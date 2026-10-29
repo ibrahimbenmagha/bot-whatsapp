@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: bot-whatsapp
+    env: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: MAX_WARNINGS
+        value: 3
+      - key: TARGET_GROUP_NAME
+        value: Votre Nom du Groupe
