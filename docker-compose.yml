@@ -1,0 +1,18 @@
+version: '3.8'
+
+services:
+  bot-whatsapp:
+    build: .
+    container_name: bot-whatsapp
+    restart: unless-stopped
+    stdin_open: true
+    tty: true
+    env_file:
+      - .env
+    volumes:
+      # Persistance de la session WhatsApp (TRÈS IMPORTANT)
+      - ./auth_info_multi:/app/auth_info_multi
+      # Persistance de la base de données SQLite
+      - ./botdata.db:/app/botdata.db
+      # Persistance des logs
+      - ./logs:/app/logs
