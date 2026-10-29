@@ -1,4 +1,16 @@
 /**
+ * Normaliser un JID WhatsApp (enlever le suffixe de device :8@s.whatsapp.net)
+ * @param {string} jid 
+ * @returns {string}
+ */
+export function normalizeJid(jid) {
+  if (!jid) return '';
+  const [user] = jid.split('@');
+  const cleanUser = user.split(':')[0];
+  return `${cleanUser}@s.whatsapp.net`;
+}
+
+/**
  * Vérifier si un participant est admin du groupe
  * @param {string} participantId - ID du participant
  * @param {Object} groupData - Données du groupe (contient le tableau participants)
@@ -10,8 +22,9 @@ export function isAdmin(participantId, groupData) {
       return false;
     }
 
+    const cleanTarget = normalizeJid(participantId);
     const participant = groupData.participants.find(
-      (p) => p.id === participantId
+      (p) => normalizeJid(p.id) === cleanTarget
     );
 
     return participant ? participant.admin === 'admin' || participant.admin === 'superadmin' : false;
@@ -22,15 +35,20 @@ export function isAdmin(participantId, groupData) {
 }
 
 /**
- * Extraire le texte d'un message Baileys
+ * Extraire le texte d'un message Baileys (supporte éphémère, vue unique, etc.)
  * @param {Object} message - Objet du message Baileys
  * @returns {string|null}
  */
 export function extractMessage(message) {
   try {
-    const msg = message?.message;
-
+    let msg = message?.message;
     if (!msg) return null;
+
+    // Déballer les conteneurs spéciaux (messages éphémères, vue unique)
+    if (msg.ephemeralMessage?.message) msg = msg.ephemeralMessage.message;
+    if (msg.viewOnceMessage?.message) msg = msg.viewOnceMessage.message;
+    if (msg.viewOnceMessageV2?.message) msg = msg.viewOnceMessageV2.message;
+    if (msg.documentWithCaptionMessage?.message) msg = msg.documentWithCaptionMessage.message;
 
     // Message texte simple
     if (msg.conversation) return msg.conversation;
@@ -87,5 +105,5 @@ export function isGroupMessage(jid) {
  * @returns {string}
  */
 export function formatMention(jid) {
-  return `@${jid.split('@')[0]}`;
+  return `@${jid.split('@')[0].split(':')[0]}`;
 }

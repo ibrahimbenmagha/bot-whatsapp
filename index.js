@@ -12,7 +12,7 @@ import makeWASocket, { useMultiFileAuthState, DisconnectReason } from '@whiskeys
 import { Boom } from '@hapi/boom';
 import pino from 'pino';
 import { initializeDatabase, addWarning, getWarningCount, resetWarnings } from './db.js';
-import { isAdmin, extractMessage, containsUrl, isGroupMessage, formatMention } from './utils/helpers.js';
+import { isAdmin, extractMessage, containsUrl, isGroupMessage, formatMention, normalizeJid } from './utils/helpers.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -202,78 +202,117 @@ async function handleNewMessages(m) {
 
   try {
     for (const msg of m.messages) {
-      if (msg.key.fromMe || !msg.message) continue;
+      if (!msg.message) continue;
 
       const jid = msg.key.remoteJid;
-      const senderId = msg.key.participant;
+      if (!jid || jid === 'status@broadcast') continue;
 
-      if (!isGroupMessage(jid)) continue;
+      const isGroup = isGroupMessage(jid);
+      const isFromMe = Boolean(msg.key.fromMe);
+
+      // Récupérer l'ID de l'expéditeur
+      const rawSender = isGroup
+        ? (msg.key.participant || msg.participant || (isFromMe ? sock?.user?.id : null))
+        : jid;
+
+      if (!rawSender) continue;
+      const senderId = normalizeJid(rawSender);
 
       const messageText = extractMessage(msg);
       if (!messageText) continue;
 
-      // Récupérer les informations du groupe
-      let groupData;
-      try {
-        groupData = await sock.groupMetadata(jid);
-      } catch (_) {
-        continue;
+      const trimmedText = messageText.trim();
+      const lowerText = trimmedText.toLowerCase();
+
+      logActivity(`Message reçu [${isGroup ? 'Groupe' : 'Privé'} | ${isFromMe ? 'Moi' : senderId.split('@')[0]}]: "${trimmedText}"`);
+
+      let groupData = null;
+      let senderIsAdmin = isFromMe; // Le propriétaire du bot est toujours considéré admin
+
+      if (isGroup) {
+        try {
+          groupData = await sock.groupMetadata(jid);
+          if (!senderIsAdmin) {
+            senderIsAdmin = isAdmin(senderId, groupData);
+          }
+        } catch (err) {
+          logActivity(`Avertissement groupMetadata: ${err.message}`, 'warn');
+        }
+
+        // 1. Module Anti-Lien (non-admins et pas depuis le compte bot lui-même)
+        if (!isFromMe && !senderIsAdmin && containsUrl(messageText)) {
+          await handleAntiLink(jid, senderId, msg.key.id, groupData);
+        }
+
+        // 2. Module Anti-Contact (non-admins et pas depuis le compte bot lui-même)
+        const isContact = msg.message.contactMessage || msg.message.contactsArrayMessage;
+        if (!isFromMe && !senderIsAdmin && isContact) {
+          await handleAntiContact(jid, senderId, msg.key.id, groupData);
+        }
+      } else {
+        // En privé (DM), pour tester
+        senderIsAdmin = true;
       }
 
-      const senderIsAdmin = isAdmin(senderId, groupData);
+      // 3. Commandes du Bot (supporte !, ., et /)
+      const isCmd = (name) => lowerText === `!${name}` || lowerText === `.${name}` || lowerText === `/${name}`;
+      const startsWithCmd = (name) => lowerText.startsWith(`!${name}`) || lowerText.startsWith(`.${name}`) || lowerText.startsWith(`/${name}`);
 
-      // 1. Module Anti-Lien
-      if (containsUrl(messageText) && !senderIsAdmin) {
-        await handleAntiLink(jid, senderId, msg.key.id, groupData);
-      }
-
-      // 2. Module Anti-Contact
-      const isContact = msg.message.contactMessage || msg.message.contactsArrayMessage;
-      if (isContact && !senderIsAdmin) {
-        await handleAntiContact(jid, senderId, msg.key.id, groupData);
-      }
-
-      // 3. Commandes du Bot
-      const lowerText = messageText.trim().toLowerCase();
-
-      // Commande !help / !aide (tous les membres)
-      if (lowerText === '!help' || lowerText === '!aide') {
+      // Commande !help / !aide / .menu / !menu
+      if (isCmd('help') || isCmd('aide') || isCmd('menu')) {
         await handleHelpCommand(jid, senderIsAdmin);
         continue;
       }
 
-      // Commande !regles / !rules (tous les membres)
-      if (lowerText === '!regles' || lowerText === '!rules') {
+      // Commande !regles / !rules / .regles / .rules
+      if (isCmd('regles') || isCmd('rules')) {
         await handleRulesCommand(jid);
         continue;
       }
 
-      // Commande !warnings / !warns (consulter les avertissements)
-      if (lowerText.startsWith('!warnings') || lowerText.startsWith('!warns')) {
+      // Commande !warnings / !warns / .warnings / .warns
+      if (startsWithCmd('warnings') || startsWithCmd('warns')) {
+        if (!isGroup) {
+          await sock.sendMessage(jid, { text: 'ℹ️ Cette commande fonctionne uniquement dans un groupe.' });
+          continue;
+        }
         await handleCheckWarningsCommand(jid, messageText, senderId, groupData);
         continue;
       }
 
-      // Commande !warn (Admins uniquement)
-      if (lowerText.startsWith('!warn ') && senderIsAdmin) {
+      // Commande !warn / .warn (Admins uniquement)
+      if (startsWithCmd('warn ') && senderIsAdmin) {
+        if (!isGroup) {
+          await sock.sendMessage(jid, { text: 'ℹ️ Cette commande fonctionne uniquement dans un groupe.' });
+          continue;
+        }
         await handleWarnCommand(jid, messageText, groupData);
         continue;
       }
 
-      // Commande !resetwarn (Admins uniquement)
-      if (lowerText.startsWith('!resetwarn') && senderIsAdmin) {
+      // Commande !resetwarn / .resetwarn (Admins uniquement)
+      if (startsWithCmd('resetwarn') && senderIsAdmin) {
+        if (!isGroup) {
+          await sock.sendMessage(jid, { text: 'ℹ️ Cette commande fonctionne uniquement dans un groupe.' });
+          continue;
+        }
         await handleResetWarnCommand(jid, messageText, groupData);
         continue;
       }
 
-      // Commande !kick (Admins uniquement)
-      if (lowerText.startsWith('!kick') && senderIsAdmin) {
+      // Commande !kick / .kick (Admins uniquement)
+      if (startsWithCmd('kick') && senderIsAdmin) {
+        if (!isGroup) {
+          await sock.sendMessage(jid, { text: 'ℹ️ Cette commande fonctionne uniquement dans un groupe.' });
+          continue;
+        }
         await handleManualKickCommand(jid, messageText, groupData);
         continue;
       }
     }
   } catch (error) {
     console.error('Erreur traitement messages:', error);
+    logActivity(`Erreur traitement messages: ${error.message}`, 'warn');
   }
 }
 
@@ -363,16 +402,16 @@ async function handleHelpCommand(jid, isAdminUser) {
   try {
     let helpText = `🤖 *BOT DE MODÉRATION - COMMANDES*\n\n`;
     helpText += `📌 *Commandes Membres :*\n`;
-    helpText += `• *!help* : Afficher la liste des commandes\n`;
-    helpText += `• *!regles* : Consulter les règles du groupe\n`;
-    helpText += `• *!warnings* : Voir vos avertissements actuels\n\n`;
+    helpText += `• *.menu* ou *!help* : Afficher ce menu\n`;
+    helpText += `• *.regles* ou *!regles* : Consulter les règles du groupe\n`;
+    helpText += `• *.warnings* ou *!warnings* : Voir vos avertissements actuels\n\n`;
 
     if (isAdminUser) {
       helpText += `👑 *Commandes Administrateur :*\n`;
-      helpText += `• *!warn @membre* : Ajouter un avertissement (+ kick à ${CONFIG.maxWarnings})\n`;
-      helpText += `• *!warnings @membre* : Voir les avertissements d'un membre\n`;
-      helpText += `• *!resetwarn @membre* : Remettre à zéro les avertissements\n`;
-      helpText += `• *!kick @membre* : Expulser immédiatement un membre\n\n`;
+      helpText += `• *.warn @membre* : Ajouter un avertissement (+ kick à ${CONFIG.maxWarnings})\n`;
+      helpText += `• *.warnings @membre* : Voir les avertissements d'un membre\n`;
+      helpText += `• *.resetwarn @membre* : Remettre à zéro les avertissements\n`;
+      helpText += `• *.kick @membre* : Expulser immédiatement un membre\n\n`;
     }
 
     helpText += `🛡️ *Protections automatiques :*\n`;
@@ -380,8 +419,10 @@ async function handleHelpCommand(jid, isAdminUser) {
     helpText += `• *Anti-Contact* : Partage de contact interdit (exclusion immédiate)`;
 
     await sock.sendMessage(jid, { text: helpText });
+    logActivity(`Menu d'aide envoyé avec succès.`);
   } catch (err) {
     console.error('Erreur !help:', err);
+    logActivity(`Erreur envoi help: ${err.message}`, 'warn');
   }
 }
 

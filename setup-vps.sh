@@ -84,3 +84,4 @@ echo "  - Voir les logs en direct : pm2 logs bot-whatsapp"
 echo "  - Statut du bot           : pm2 status"
 echo "  - Redémarrer              : pm2 restart bot-whatsapp"
 echo "=============================================================="
+
