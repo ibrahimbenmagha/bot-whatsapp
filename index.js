@@ -47,6 +47,10 @@ let lastConnectedName = null;
 const activityLogs = [];
 const sseClients = new Set();
 
+// Pairing flow control - résout quand le socket Baileys est prêt pour requestPairingCode
+let pairingReadyResolve = null;
+let pairingReadyReject = null;
+
 /**
  * Ajouter un log en mémoire et notifier l'interface web via SSE
  */
@@ -109,25 +113,10 @@ function cleanAuthDir() {
 }
 
 /**
- * Attendre que la connexion WebSocket soit bien ouverte
- */
-async function waitForSocketOpen(timeoutMs = 15000) {
-  const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
-    if (sock && sock.ws && sock.ws.isOpen) {
-      // Pause pour stabiliser le handshake Noise avec les serveurs WhatsApp
-      await new Promise((r) => setTimeout(r, 1500));
-      return true;
-    }
-    await new Promise((r) => setTimeout(r, 400));
-  }
-  return false;
-}
-
-/**
  * Initialiser la socket WhatsApp Baileys
+ * @param {string|null} pairingPhone - Si fourni, déclenche requestPairingCode dès que le socket est prêt
  */
-async function initializeSocket() {
+async function initializeSocket(pairingPhone = null) {
   try {
     // Initialiser la base de données SQLite une seule fois
     if (!db) {
@@ -155,7 +144,7 @@ async function initializeSocket() {
       logger: logger,
       printQRInTerminal: false,
       mobile: false,
-      browser: Browsers.ubuntu('Chrome'), // Profil navigateur standard Baileys
+      browser: Browsers.ubuntu('Chrome'),
       syncFullHistory: false,
       connectTimeoutMs: 60000,
       defaultQueryTimeoutMs: 60000,
@@ -164,8 +153,10 @@ async function initializeSocket() {
     // Sauvegarde automatique des crédits
     sock.ev.on('creds.update', saveCredsFunc);
 
-    // Mises à jour de la connexion
-    sock.ev.on('connection.update', handleConnectionUpdate);
+    // Mises à jour de la connexion - avec gestion du pairing intégrée
+    sock.ev.on('connection.update', (update) => {
+      handleConnectionUpdate(update, pairingPhone);
+    });
 
     // Écoute des nouveaux messages pour la modération
     sock.ev.on('messages.upsert', handleNewMessages);
@@ -183,15 +174,42 @@ async function initializeSocket() {
 
 /**
  * Gérer les changements de statut de connexion
+ * @param {object} update - L'événement de mise à jour de connexion
+ * @param {string|null} pairingPhone - Numéro pour lequel on demande un code de liaison
  */
-async function handleConnectionUpdate(update) {
-  const { connection, lastDisconnect } = update;
+async function handleConnectionUpdate(update, pairingPhone = null) {
+  const { connection, lastDisconnect, qr } = update;
 
   if (connection === 'connecting') {
     if (connectionStatus !== 'awaiting_code') {
       updateStatus('connecting');
     }
     logActivity('Connexion au serveur WhatsApp en cours...');
+  }
+
+  // ──────────────────────────────────────────────────────────
+  // CLEF DU FIX: Quand Baileys émet un QR, ça veut dire que
+  // le handshake Noise est terminé et que le socket est PRÊT
+  // pour recevoir des stanzas IQ comme requestPairingCode.
+  // On intercepte ce moment exact pour demander le code.
+  // ──────────────────────────────────────────────────────────
+  if (qr && pairingPhone) {
+    logActivity(`Socket prêt (QR reçu) — Génération du code pour +${pairingPhone}...`);
+    try {
+      const code = await sock.requestPairingCode(pairingPhone);
+      if (code && pairingReadyResolve) {
+        pairingReadyResolve(code);
+        pairingReadyResolve = null;
+        pairingReadyReject = null;
+      }
+    } catch (err) {
+      logActivity(`Erreur requestPairingCode: ${err.message}`, 'warn');
+      if (pairingReadyReject) {
+        pairingReadyReject(err);
+        pairingReadyResolve = null;
+        pairingReadyReject = null;
+      }
+    }
   }
 
   if (connection === 'open') {
@@ -221,7 +239,8 @@ async function handleConnectionUpdate(update) {
       cleanAuthDir();
       logActivity('Session déconnectée. Veuillez reconnecter le bot via la page web.', 'warn');
     } else if (connectionStatus === 'awaiting_code') {
-      logActivity('Connexion fermée pendant la liaison par code. En attente...', 'warn');
+      // Pendant la phase de pairing, ne PAS reconnecter automatiquement
+      logActivity('Connexion fermée pendant la liaison par code. En attente de validation sur le téléphone...', 'warn');
     } else if (authState?.creds?.registered) {
       // Reconnexion automatique uniquement si une session était déjà validée
       connectionAttempts++;
@@ -232,6 +251,13 @@ async function handleConnectionUpdate(update) {
       }, delay);
     } else {
       updateStatus('disconnected');
+      // Si le pairing était en cours et que la promise n'a pas encore été résolue,
+      // on la rejette pour ne pas bloquer l'API
+      if (pairingReadyReject) {
+        pairingReadyReject(new Error('Connection closed before pairing code could be generated'));
+        pairingReadyResolve = null;
+        pairingReadyReject = null;
+      }
     }
   }
 }
@@ -687,6 +713,12 @@ app.get('/api/status', async (req, res) => {
 
 /**
  * API: Demander un code d'association (Pairing Code pour n'importe quel téléphone)
+ * 
+ * STRATÉGIE: Au lieu de créer le socket puis d'attendre ws.isOpen (qui ne garantit
+ * PAS que le handshake Noise est fini), on passe le numéro de téléphone à
+ * initializeSocket(). Le handler connection.update intercepte l'événement QR
+ * (qui signifie que Baileys est prêt) et appelle requestPairingCode à ce moment
+ * exact. Le résultat est retourné via une Promise.
  */
 app.post('/api/pair', async (req, res) => {
   try {
@@ -702,7 +734,7 @@ app.post('/api/pair', async (req, res) => {
 
     logActivity(`Demande de liaison pour le numéro +${cleanPhone}...`);
 
-    // Permettre de lier n'importe quel téléphone à tout moment (fermeture propre de l'ancienne socket)
+    // Fermer proprement toute connexion existante
     if (sock) {
       logActivity(`Changement de téléphone vers +${cleanPhone} : fermeture de la session précédente...`);
       try {
@@ -720,43 +752,28 @@ app.post('/api/pair', async (req, res) => {
     currentPairingCode = null;
     updateStatus('connecting');
 
-    // Initialiser une socket toute neuve
-    await initializeSocket();
+    // Créer la Promise qui sera résolue quand requestPairingCode réussira
+    // depuis le handler connection.update (quand l'événement QR arrive)
+    const pairingPromise = new Promise((resolve, reject) => {
+      pairingReadyResolve = resolve;
+      pairingReadyReject = reject;
 
-    // Attendre que la connexion WebSocket soit bien ouverte
-    logActivity('Connexion aux serveurs WhatsApp pour la liaison...');
-    const isReady = await waitForSocketOpen(15000);
-    if (!isReady) {
-      throw new Error('Délai dépassé : impossible de joindre WhatsApp. Réessayez.');
-    }
-
-    // Demander le code de jumelage avec boucle de résilience
-    let code = null;
-    let lastErr = null;
-
-    for (let attempt = 1; attempt <= 3; attempt++) {
-      try {
-        if (!sock?.ws?.isOpen) {
-          logActivity(`Tentative ${attempt}/3: socket fermée, réouverture...`, 'warn');
-          await initializeSocket();
-          await waitForSocketOpen(10000);
+      // Timeout de sécurité: 30 secondes max
+      setTimeout(() => {
+        if (pairingReadyReject) {
+          reject(new Error('Délai dépassé (30s) : impossible de joindre WhatsApp. Réessayez.'));
+          pairingReadyResolve = null;
+          pairingReadyReject = null;
         }
+      }, 30000);
+    });
 
-        logActivity(`Génération du code pour +${cleanPhone} (tentative ${attempt}/3)...`);
-        code = await sock.requestPairingCode(cleanPhone);
-        if (code) break;
-      } catch (err) {
-        lastErr = err;
-        logActivity(`Tentative ${attempt}/3 code de liaison: ${err.message || err}`, 'warn');
-        if (attempt < 3) {
-          await new Promise((resolve) => setTimeout(resolve, 2500));
-        }
-      }
-    }
+    // Lancer le socket avec le numéro de pairing — le handler va appeler
+    // requestPairingCode dès que l'événement QR est émis
+    await initializeSocket(cleanPhone);
 
-    if (!code) {
-      throw lastErr || new Error('Impossible d\'obtenir le code auprès des serveurs WhatsApp.');
-    }
+    // Attendre que le code soit généré (résolu depuis handleConnectionUpdate)
+    const code = await pairingPromise;
 
     currentPairingCode = code;
     updateStatus('awaiting_code');
@@ -783,6 +800,8 @@ app.post('/api/pair', async (req, res) => {
  */
 app.post('/api/cancel-pairing', (req, res) => {
   currentPairingCode = null;
+  pairingReadyResolve = null;
+  pairingReadyReject = null;
   if (connectionStatus !== 'connected') {
     updateStatus('disconnected');
   }
@@ -812,13 +831,12 @@ app.post('/api/disconnect', async (req, res) => {
       fs.mkdirSync(AUTH_DIR, { recursive: true });
     }
 
+    sock = null;
     currentPairingCode = null;
+    connectedAt = null;
+    lastConnectedPhone = null;
+    lastConnectedName = null;
     updateStatus('disconnected');
-
-    // Réinitialiser la socket pour permettre une nouvelle connexion
-    setTimeout(() => {
-      initializeSocket().catch(() => {});
-    }, 1000);
 
     res.json({ success: true, message: 'Bot déconnecté et session supprimée.' });
   } catch (error) {
@@ -860,8 +878,28 @@ async function startServer() {
       console.log('╚════════════════════════════════════════════════════════════════╝\n');
     });
 
-    // Initialiser la socket WhatsApp
-    await initializeSocket();
+    // NE PAS initialiser le socket au démarrage quand il n'y a pas de credentials
+    // Cela évite un cycle connect/close inutile sur Render (pas de persistance)
+    // Le socket sera créé quand l'utilisateur cliquera "Générer le code"
+    const credsPath = path.join(AUTH_DIR, 'creds.json');
+    if (fs.existsSync(credsPath)) {
+      try {
+        const creds = JSON.parse(fs.readFileSync(credsPath, 'utf-8'));
+        if (creds.registered) {
+          logActivity('Session existante détectée, reconnexion automatique...');
+          await initializeSocket();
+        } else {
+          logActivity('En attente de liaison — cliquez "Générer le code" sur la page web.');
+          updateStatus('disconnected');
+        }
+      } catch (_) {
+        logActivity('En attente de liaison — cliquez "Générer le code" sur la page web.');
+        updateStatus('disconnected');
+      }
+    } else {
+      logActivity('Aucune session trouvée — cliquez "Générer le code" sur la page web.');
+      updateStatus('disconnected');
+    }
   } catch (error) {
     console.error('Erreur critique au démarrage:', error);
     process.exit(1);
