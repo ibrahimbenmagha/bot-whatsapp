@@ -10,6 +10,12 @@ const UI = {
   statusBadge: document.getElementById('statusBadge'),
   statusText: document.getElementById('statusText'),
 
+  // Banner for current account
+  currentAccountBanner: document.getElementById('currentAccountBanner'),
+  bannerPhone: document.getElementById('bannerPhone'),
+  bannerStatus: document.getElementById('bannerStatus'),
+  btnQuickDisconnect: document.getElementById('btnQuickDisconnect'),
+
   // Form & inputs
   pairForm: document.getElementById('pairForm'),
   phoneNumber: document.getElementById('phoneNumber'),
@@ -29,7 +35,10 @@ const UI = {
   connectedPhone: document.getElementById('connectedPhone'),
   connectedName: document.getElementById('connectedName'),
   connectedGroup: document.getElementById('connectedGroup'),
+  groupsList: document.getElementById('groupsList'),
+  groupsCountBadge: document.getElementById('groupsCountBadge'),
   activityLogs: document.getElementById('activityLogs'),
+  btnSwitchAccount: document.getElementById('btnSwitchAccount'),
   btnDisconnect: document.getElementById('btnDisconnect'),
 
   // Toast
@@ -119,12 +128,29 @@ async function checkStatus() {
 
     currentStatus = data.status;
 
+    // Mise à jour de la bannière de compte actuel
+    if (data.user?.phone) {
+      if (UI.currentAccountBanner) {
+        UI.currentAccountBanner.hidden = false;
+        UI.bannerPhone.textContent = data.user.phone + (data.user.name ? ` (${data.user.name})` : '');
+        UI.bannerStatus.textContent = data.status === 'connected' ? '🟢 En ligne et actif' : '🔴 Déconnecté';
+      }
+    } else {
+      if (UI.currentAccountBanner) {
+        UI.currentAccountBanner.hidden = true;
+      }
+    }
+
     if (data.status === 'connected') {
       updateStatusBadge('connected', 'Connecté');
       showView('connected');
-      UI.connectedPhone.textContent = data.user?.id ? `+${data.user.id.split('@')[0].split(':')[0]}` : '+En ligne';
+      UI.connectedPhone.textContent = data.user?.phone || (data.user?.id ? `+${data.user.id.split('@')[0].split(':')[0]}` : '+En ligne');
       UI.connectedName.textContent = data.user?.name || 'Bot WhatsApp';
       UI.connectedGroup.textContent = data.targetGroup || 'Tous les groupes';
+
+      if (data.groups && Array.isArray(data.groups)) {
+        renderGroups(data.groups);
+      }
 
       if (data.logs && Array.isArray(data.logs)) {
         renderLogs(data.logs);
@@ -156,6 +182,41 @@ function renderLogs(logs) {
     UI.activityLogs.appendChild(entry);
   });
   UI.activityLogs.scrollTop = UI.activityLogs.scrollHeight;
+}
+
+function renderGroups(groups) {
+  if (!UI.groupsList) return;
+  if (UI.groupsCountBadge) {
+    UI.groupsCountBadge.textContent = groups.length;
+  }
+  if (!groups || groups.length === 0) {
+    UI.groupsList.innerHTML = '<div class="groups-empty">Aucun groupe détecté. Ajoutez le bot à vos groupes WhatsApp !</div>';
+    return;
+  }
+
+  UI.groupsList.innerHTML = '';
+  groups.forEach((g) => {
+    const item = document.createElement('div');
+    item.className = 'group-item';
+    const safeName = escapeHtml(g.name);
+    item.innerHTML = `
+      <div class="group-main">
+        <span class="group-icon">👥</span>
+        <span class="group-name">${safeName}</span>
+      </div>
+      <div class="group-meta">
+        <span>${g.participantsCount} membres</span>
+        ${g.isAdmin ? '<span class="group-admin-tag">👑 Admin</span>' : ''}
+      </div>
+    `;
+    UI.groupsList.appendChild(item);
+  });
+}
+
+function escapeHtml(text) {
+  const div = document.createElement('div');
+  div.textContent = text || '';
+  return div.innerHTML;
 }
 
 // --- Submit Phone Number for Pairing Code ---
@@ -213,10 +274,10 @@ UI.btnCopyCode.addEventListener('click', async () => {
   try {
     await navigator.clipboard.writeText(codeToCopy);
     UI.copyBtnText.textContent = 'Copié !';
-    showToast('Code copié dans le presse-papier !');
+    showToast('Code copié dans le presse-papiers');
     setTimeout(() => {
       UI.copyBtnText.textContent = 'Copier le code';
-    }, 2000);
+    }, 2500);
   } catch (_) {
     // Fallback
     const input = document.createElement('input');
@@ -240,6 +301,33 @@ UI.btnCancelPairing.addEventListener('click', async () => {
     updateStatusBadge('disconnected', 'Non connecté');
   }
 });
+
+// --- Switch Account Button (From connected card) ---
+if (UI.btnSwitchAccount) {
+  UI.btnSwitchAccount.addEventListener('click', () => {
+    showView('pairing');
+    UI.phoneNumber.focus();
+    showToast('Saisissez le nouveau numéro de téléphone à connecter');
+  });
+}
+
+// --- Quick Disconnect Button (From banner) ---
+if (UI.btnQuickDisconnect) {
+  UI.btnQuickDisconnect.addEventListener('click', async () => {
+    if (confirm('Voulez-vous vraiment déconnecter ce compte WhatsApp ?')) {
+      try {
+        const res = await fetch('/api/disconnect', { method: 'POST' });
+        const data = await res.json();
+        if (data.success) {
+          showToast('Compte déconnecté avec succès.');
+          checkStatus();
+        }
+      } catch (err) {
+        alert('Erreur: ' + err.message);
+      }
+    }
+  });
+}
 
 // --- Disconnect Bot ---
 UI.btnDisconnect.addEventListener('click', async () => {
@@ -275,7 +363,6 @@ function startEventSource() {
       };
       es.onerror = () => {
         es.close();
-        // Fallback to polling
         if (!pollingTimer) {
           pollingTimer = setInterval(checkStatus, 2500);
         }

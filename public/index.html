@@ -51,6 +51,21 @@
           <p class="card-desc">Entrez votre numéro pour générer un code d'association à 8 caractères, exactement comme sur WhatsApp Web.</p>
         </div>
 
+        <!-- Bannière compte WhatsApp actuellement lié -->
+        <div id="currentAccountBanner" class="account-banner" hidden>
+          <div class="account-banner-content">
+            <span class="account-banner-icon">📱</span>
+            <div class="account-banner-info">
+              <span class="account-banner-label">Compte WhatsApp actuellement lié</span>
+              <strong id="bannerPhone" class="account-banner-phone">+212 --- ---</strong>
+              <span id="bannerStatus" class="account-banner-status">🟢 En ligne</span>
+            </div>
+          </div>
+          <button type="button" id="btnQuickDisconnect" class="btn btn-sm btn-danger" title="Déconnecter ce compte">
+            Déconnecter
+          </button>
+        </div>
+
         <form id="pairForm" class="pair-form">
           <div class="input-group">
             <label for="phoneNumber">
@@ -178,6 +193,17 @@
           </div>
         </div>
 
+        <!-- Groupes WhatsApp où le bot est présent -->
+        <div class="connected-groups-section">
+          <div class="section-title">
+            <span>🏰 Groupes WhatsApp Connectés</span>
+            <span id="groupsCountBadge" class="badge-count">0</span>
+          </div>
+          <div id="groupsList" class="groups-list">
+            <div class="groups-empty">Chargement des groupes...</div>
+          </div>
+        </div>
+
         <div class="live-activity-section">
           <div class="section-title">
             <span>⚡ Activité en direct</span>
@@ -188,7 +214,10 @@
           </div>
         </div>
 
-        <div class="card-actions">
+        <div class="card-actions card-actions-split">
+          <button type="button" id="btnSwitchAccount" class="btn btn-secondary">
+            <span>🔄 Lier un autre téléphone</span>
+          </button>
           <button type="button" id="btnDisconnect" class="btn btn-danger">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path>

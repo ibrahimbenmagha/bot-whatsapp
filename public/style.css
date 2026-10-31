@@ -741,6 +741,128 @@ body {
   to { opacity: 1; transform: translateX(-50%) translateY(0); }
 }
 
+/* Connected WhatsApp Account Banner */
+.account-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 14px 18px;
+  background: rgba(37, 211, 102, 0.08);
+  border: 1px solid rgba(37, 211, 102, 0.25);
+  border-radius: var(--radius-md);
+  margin-bottom: 6px;
+}
+.account-banner-content {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.account-banner-icon {
+  font-size: 1.5rem;
+}
+.account-banner-info {
+  display: flex;
+  flex-direction: column;
+}
+.account-banner-label {
+  font-size: 0.74rem;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.account-banner-phone {
+  font-family: var(--font-mono);
+  font-size: 1.05rem;
+  color: #fff;
+}
+.account-banner-status {
+  font-size: 0.74rem;
+  color: #86efac;
+}
+
+/* Groups List in Connected Card */
+.connected-groups-section {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.badge-count {
+  background: rgba(255, 255, 255, 0.1);
+  color: var(--text-primary);
+  font-size: 0.72rem;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 999px;
+}
+.groups-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 160px;
+  overflow-y: auto;
+}
+.group-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  background: rgba(8, 14, 18, 0.6);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: var(--radius-sm);
+  transition: border-color 0.2s;
+}
+.group-item:hover {
+  border-color: rgba(37, 211, 102, 0.3);
+}
+.group-main {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.group-icon {
+  font-size: 1.1rem;
+}
+.group-name {
+  font-size: 0.88rem;
+  font-weight: 600;
+  color: #fff;
+}
+.group-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+}
+.group-admin-tag {
+  background: rgba(37, 211, 102, 0.15);
+  color: #86efac;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 0.68rem;
+  font-weight: 700;
+}
+.groups-empty {
+  padding: 14px;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 0.82rem;
+  background: rgba(8, 14, 18, 0.4);
+  border-radius: var(--radius-sm);
+}
+
+.card-actions-split {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+}
+.btn-sm {
+  padding: 6px 12px;
+  font-size: 0.78rem;
+}
+
 @media (max-width: 540px) {
   .bot-info-grid {
     grid-template-columns: 1fr;
@@ -751,5 +873,8 @@ body {
   .app-header {
     flex-direction: column;
     align-items: flex-start;
+  }
+  .card-actions-split {
+    flex-direction: column;
   }
 }

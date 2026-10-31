@@ -41,6 +41,9 @@ let saveCredsFunc = null;
 let connectionStatus = 'disconnected'; // 'disconnected' | 'connecting' | 'awaiting_code' | 'connected'
 let currentPairingCode = null;
 let connectionAttempts = 0;
+let connectedAt = null;
+let lastConnectedPhone = null;
+let lastConnectedName = null;
 const activityLogs = [];
 const sseClients = new Set();
 
@@ -196,7 +199,10 @@ async function handleConnectionUpdate(update) {
     currentPairingCode = null;
     updateStatus('connected');
     const userPhone = sock?.user?.id ? sock.user.id.split('@')[0].split(':')[0] : 'Inconnu';
-    logActivity(`✅ Bot connecté avec succès sur le numéro +${userPhone} !`, 'system');
+    lastConnectedPhone = userPhone;
+    lastConnectedName = sock?.user?.name || 'Bot WhatsApp';
+    connectedAt = new Date().toISOString();
+    logActivity(`✅ Bot connecté avec succès sur le numéro +${userPhone} (${lastConnectedName}) !`, 'system');
   }
 
   if (connection === 'close') {
@@ -293,6 +299,12 @@ async function handleNewMessages(m) {
       // 3. Commandes du Bot (supporte !, ., et /)
       const isCmd = (name) => lowerText === `!${name}` || lowerText === `.${name}` || lowerText === `/${name}`;
       const startsWithCmd = (name) => lowerText.startsWith(`!${name}`) || lowerText.startsWith(`.${name}`) || lowerText.startsWith(`/${name}`);
+
+      // Commande !status / .status / .info / .bot / .حالة
+      if (isCmd('status') || isCmd('info') || isCmd('bot') || isCmd('حالة')) {
+        await handleStatusCommand(jid, groupData);
+        continue;
+      }
 
       // Commande !help / !aide / .menu / !menu / .اوامر
       if (isCmd('help') || isCmd('aide') || isCmd('menu') || isCmd('اوامر') || isCmd('الاوامر')) {
@@ -436,11 +448,17 @@ async function handleWarnCommand(jid, messageText, groupData) {
  */
 async function handleHelpCommand(jid, isAdminUser, senderId = null) {
   try {
+    const userPhone = sock?.user?.id ? `+${sock.user.id.split('@')[0].split(':')[0]}` : (lastConnectedPhone ? `+${lastConnectedPhone}` : '');
+
     let helpText = `مرحبا بك في البوت الرسمي ل امبراطورية باراديس \n`;
+    if (userPhone) {
+      helpText += `📱 *رقم البوت المتصل* : ${userPhone}\n`;
+    }
     helpText += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🌿 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n\n`;
 
     helpText += `╭───『 📜 أوامـر الأعـضـاء 』───⊷\n`;
     helpText += `│ ⋄ *.menu* ⇠ عـرض قـائـمـة الأوامـر\n`;
+    helpText += `│ ⋄ *.status* ⇠ مـعـلـومـات الـحـسـاب والـبـوت\n`;
     helpText += `│ ⋄ *.regles* ⇠ قـوانـيـن الإمـبـراطـوريـة\n`;
     helpText += `│ ⋄ *.warnings* ⇠ فـحـص إنـذاراتـك\n`;
     helpText += `╰─────────────────────⊷\n\n`;
@@ -472,6 +490,34 @@ async function handleHelpCommand(jid, isAdminUser, senderId = null) {
   } catch (err) {
     console.error('Erreur !help:', err);
     logActivity(`Erreur envoi help: ${err.message}`, 'warn');
+  }
+}
+
+/**
+ * Commande !status / .status / .info / .bot
+ */
+async function handleStatusCommand(jid, groupData = null) {
+  try {
+    const userPhone = sock?.user?.id ? `+${sock.user.id.split('@')[0].split(':')[0]}` : (lastConnectedPhone ? `+${lastConnectedPhone}` : 'Non connecté');
+    const userName = sock?.user?.name || lastConnectedName || 'Bot WhatsApp';
+    const groupName = groupData?.subject || 'Discussion Privée';
+
+    let text = `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🌿 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+    text += `       🏰 *حـالـة الـحـسـاب والـبـوت* 🏰\n`;
+    text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🌿 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n\n`;
+    text += `📱 *الـواتـسـاب الـمـتـصـل* : ${userPhone}\n`;
+    text += `👤 *اسـم الـحـسـاب* : ${userName}\n`;
+    text += `⚡ *حـالـة الـخـادم* : 🟢 مـتـصـل ونـشـط 24/7\n`;
+    text += `🏰 *الـمـجـمـوعـة الـحـالـيـة* : ${groupName}\n`;
+    text += `🛡️ *أنـظـمـة الـحـمـايـة* : مـضـاد الـروابـط + مـضـاد جـهـات الاتـصـال مـفـعـل\n`;
+    text += `⚠️ *الـحـد الأقـصـى لـلإنـذارات* : ${CONFIG.maxWarnings}\n\n`;
+    text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚔️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+    text += `       🏰 *PARADIS EMPIRE* 🏰`;
+
+    await sock.sendMessage(jid, { text });
+    logActivity(`Statut du compte envoyé sur WhatsApp.`);
+  } catch (err) {
+    console.error('Erreur !status:', err);
   }
 }
 
@@ -604,23 +650,43 @@ app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
 /**
- * API: Obtenir le statut actuel
+ * API: Obtenir le statut actuel et les informations du compte connecté
  */
-app.get('/api/status', (req, res) => {
+app.get('/api/status', async (req, res) => {
+  let groups = [];
+  if (connectionStatus === 'connected' && sock) {
+    try {
+      const groupData = await sock.groupFetchAllParticipating();
+      groups = Object.values(groupData).map((g) => ({
+        id: g.id,
+        name: g.subject || 'Groupe sans nom',
+        participantsCount: g.participants?.length || 0,
+        isAdmin: g.participants?.some(
+          (p) => normalizeJid(p.id) === normalizeJid(sock?.user?.id) && (p.admin === 'admin' || p.admin === 'superadmin')
+        ),
+      }));
+    } catch (_) {}
+  }
+
+  const currentPhone = sock?.user?.id ? sock.user.id.split('@')[0].split(':')[0] : lastConnectedPhone;
+
   res.json({
     status: connectionStatus,
     pairingCode: currentPairingCode,
     targetGroup: CONFIG.targetGroupName,
-    user: sock?.user ? {
-      id: sock.user.id,
-      name: sock.user.name || 'Bot WhatsApp'
+    user: currentPhone ? {
+      id: sock?.user?.id || `${currentPhone}@s.whatsapp.net`,
+      phone: `+${currentPhone}`,
+      name: sock?.user?.name || lastConnectedName || 'Bot WhatsApp',
     } : null,
-    logs: activityLogs.slice(-20),
+    connectedAt: connectedAt,
+    groups: groups,
+    logs: activityLogs.slice(-25),
   });
 });
 
 /**
- * API: Demander un code d'association (Pairing Code)
+ * API: Demander un code d'association (Pairing Code pour n'importe quel téléphone)
  */
 app.post('/api/pair', async (req, res) => {
   try {
@@ -634,14 +700,14 @@ app.post('/api/pair', async (req, res) => {
       return res.status(400).json({ success: false, error: 'Numéro de téléphone invalide.' });
     }
 
-    if (connectionStatus === 'connected') {
-      return res.status(400).json({ success: false, error: 'Le bot est déjà connecté.' });
-    }
+    logActivity(`Demande de liaison pour le numéro +${cleanPhone}...`);
 
-    logActivity(`Demande de code de liaison pour le numéro +${cleanPhone}...`);
-
-    // S'assurer de fermer l'ancienne socket si ouverte
+    // Permettre de lier n'importe quel téléphone à tout moment (fermeture propre de l'ancienne socket)
     if (sock) {
+      logActivity(`Changement de téléphone vers +${cleanPhone} : fermeture de la session précédente...`);
+      try {
+        await sock.logout().catch(() => {});
+      } catch (_) {}
       try {
         sock.ev.removeAllListeners();
         sock.ws?.close();
@@ -651,6 +717,8 @@ app.post('/api/pair', async (req, res) => {
 
     // Réinitialiser les identifiants locaux pour un jumelage propre
     cleanAuthDir();
+    currentPairingCode = null;
+    updateStatus('connecting');
 
     // Initialiser une socket toute neuve
     await initializeSocket();
@@ -693,7 +761,7 @@ app.post('/api/pair', async (req, res) => {
     currentPairingCode = code;
     updateStatus('awaiting_code');
 
-    logActivity(`Code d'association généré avec succès: ${code}`, 'system');
+    logActivity(`Code d'association généré avec succès pour +${cleanPhone}: ${code}`, 'system');
 
     res.json({
       success: true,
