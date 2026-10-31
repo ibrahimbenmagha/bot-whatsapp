@@ -238,17 +238,25 @@ async function handleConnectionUpdate(update, pairingPhone = null) {
       currentPairingCode = null;
       cleanAuthDir();
       logActivity('Session déconnectée. Veuillez reconnecter le bot via la page web.', 'warn');
-    } else if (connectionStatus === 'awaiting_code') {
-      // Pendant la phase de pairing, ne PAS reconnecter automatiquement
-      logActivity('Connexion fermée pendant la liaison par code. En attente de validation sur le téléphone...', 'warn');
+    } else if (statusCode === DisconnectReason.restartRequired || statusCode === 515) {
+      // Code 515: WhatsApp a validé le jumelage sur le téléphone et demande un redémarrage immédiat
+      logActivity('🎉 Code validé sur le téléphone ! Redémarrage pour finaliser la connexion (code 515)...', 'system');
+      updateStatus('connecting');
+      setTimeout(() => {
+        initializeSocket().catch((err) => {
+          logActivity(`Erreur reconnexion après 515: ${err.message}`, 'warn');
+        });
+      }, 1000);
     } else if (authState?.creds?.registered) {
-      // Reconnexion automatique uniquement si une session était déjà validée
+      // Reconnexion automatique standard
       connectionAttempts++;
       const delay = Math.min(connectionAttempts * 3000, 15000);
       logActivity(`Reconnexion automatique dans ${delay / 1000}s... (tentative ${connectionAttempts})`);
       setTimeout(() => {
         initializeSocket().catch(() => {});
       }, delay);
+    } else if (connectionStatus === 'awaiting_code') {
+      logActivity('Connexion fermée temporairement pendant la saisie du code. Maintien en attente...', 'warn');
     } else {
       updateStatus('disconnected');
     }
@@ -690,7 +698,7 @@ app.get('/api/status', async (req, res) => {
   const currentPhone = sock?.user?.id ? sock.user.id.split('@')[0].split(':')[0] : lastConnectedPhone;
 
   res.json({
-    version: '2.5.0-fixed',
+    version: '2.6.0-code515-fixed',
     status: connectionStatus,
     pairingCode: currentPairingCode,
     targetGroup: CONFIG.targetGroupName,
