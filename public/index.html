@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Lier un Compte WhatsApp - Bot Modérateur</title>
+  <title>Lier votre compte WhatsApp - Bot Modérateur</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@600;700&display=swap" rel="stylesheet">
@@ -27,16 +27,16 @@
           </svg>
         </div>
         <div class="brand-text">
-          <h1>Lier un WhatsApp</h1>
-          <p class="brand-tagline">Générateur de code de jumelage</p>
+          <h1>Lier votre WhatsApp</h1>
+          <p class="brand-tagline">Connexion sécurisée par code de jumelage</p>
         </div>
       </div>
 
       <div class="header-status">
-        <a href="comptes.html" class="btn btn-sm btn-secondary" style="text-decoration:none; display:inline-flex; align-items:center; gap:8px;">
-          <span>📱 Voir les comptes connectés</span>
-          <span id="headerAccountsCount" class="nav-badge" style="background:#25d366; color:#061e12;">0</span>
-        </a>
+        <div class="status-badge status-connected">
+          <span class="status-dot"></span>
+          <span>Serveur actif</span>
+        </div>
       </div>
     </header>
 
@@ -48,22 +48,19 @@
         <div class="account-banner-content">
           <span class="account-banner-icon">🎉</span>
           <div class="account-banner-info">
-            <span class="account-banner-label" style="color: #4ade80; font-weight:700;">Compte WhatsApp connecté avec succès !</span>
+            <span class="account-banner-label" style="color: #4ade80; font-weight:700;">Connexion réussie !</span>
             <strong id="successPhone" class="account-banner-phone">+212 --- ---</strong>
-            <span class="account-banner-status">Le bot est désormais actif sur ce numéro. Vous pouvez entrer un autre numéro ci-dessous.</span>
+            <span class="account-banner-status">Votre WhatsApp a été lié au bot avec succès. Vous pouvez entrer un autre numéro ci-dessous si vous le souhaitez.</span>
           </div>
         </div>
-        <a href="comptes.html" class="btn btn-sm btn-primary" style="text-decoration:none; white-space:nowrap;">
-          Voir la liste ➔
-        </a>
       </div>
 
       <!-- Card: Formulaire / Pairing -->
       <section id="cardPairing" class="card active">
         <div class="card-header">
-          <div class="badge-step">Connexion</div>
-          <h2>Entrer le numéro de téléphone</h2>
-          <p class="card-desc">Saisissez n'importe quel numéro WhatsApp pour générer son code d'association à 8 caractères.</p>
+          <div class="badge-step">Étape 1</div>
+          <h2>Entrer votre numéro</h2>
+          <p class="card-desc">Saisissez votre numéro WhatsApp pour générer un code d'association à 8 caractères.</p>
         </div>
 
         <form id="pairForm" class="pair-form">
@@ -78,7 +75,7 @@
                 type="tel" 
                 id="phoneNumber" 
                 name="phoneNumber" 
-                placeholder="212717716959" 
+                placeholder="212612345678" 
                 required 
                 autocomplete="tel"
                 pattern="[0-9]{8,15}"
@@ -134,12 +131,12 @@
 
         <div class="waiting-notice">
           <div class="radar-spinner"></div>
-          <span>En attente de votre saisie sur WhatsApp... Dès validation, la page retournera au formulaire.</span>
+          <span>En attente de votre saisie sur WhatsApp...</span>
         </div>
 
         <div class="card-actions">
           <button type="button" id="btnCancelPairing" class="btn btn-secondary">
-            Annuler / Retourner au champ
+            Annuler / Changer de numéro
           </button>
         </div>
       </section>
@@ -148,7 +145,7 @@
 
     <!-- Footer -->
     <footer class="app-footer">
-      <p>Bot WhatsApp Baileys • Multi-Comptes • <a href="comptes.html" style="color:#25d366; text-decoration:none; font-weight:600;">Ouvrir la page des comptes ➔</a></p>
+      <p>Bot WhatsApp Baileys • Liaison Sécurisée</p>
     </footer>
   </div>
 

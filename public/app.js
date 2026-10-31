@@ -5,9 +5,6 @@ const UI = {
   cardPairing: document.getElementById('cardPairing'),
   cardCode: document.getElementById('cardCode'),
 
-  // Header
-  headerAccountsCount: document.getElementById('headerAccountsCount'),
-
   // Success Notice
   connectionSuccessNotice: document.getElementById('connectionSuccessNotice'),
   successPhone: document.getElementById('successPhone'),
@@ -74,27 +71,21 @@ function formatPairingCode(code) {
   return code;
 }
 
-// --- Mise à jour du compteur de comptes connectés ---
-async function updateAccountsCount() {
+// --- Vérifier si le numéro en cours est devenu connecté ---
+async function checkPendingAccountStatus() {
+  if (!currentPhonePending) return;
+
   try {
     const res = await fetch('/api/accounts');
     const data = await res.json();
     if (data.success) {
       const accounts = data.accounts || [];
-      const connected = accounts.filter(a => a.status === 'connected');
-      if (UI.headerAccountsCount) {
-        UI.headerAccountsCount.textContent = connected.length;
-      }
+      const isNowConnected = accounts.some(
+        a => a.phone.includes(currentPhonePending) && a.status === 'connected'
+      );
 
-      // Si un numéro était en cours d'appairage et est maintenant connecté
-      if (currentPhonePending) {
-        const isNowConnected = accounts.some(
-          a => a.phone.includes(currentPhonePending) && a.status === 'connected'
-        );
-
-        if (isNowConnected) {
-          onPhoneConnectedSuccess(currentPhonePending);
-        }
+      if (isNowConnected) {
+        onPhoneConnectedSuccess(currentPhonePending);
       }
     }
   } catch (_) {}
@@ -166,7 +157,7 @@ if (UI.pairForm) {
 
       // Lancer la vérification active toutes les 2 secondes
       if (pollTimer) clearInterval(pollTimer);
-      pollTimer = setInterval(updateAccountsCount, 2000);
+      pollTimer = setInterval(checkPendingAccountStatus, 2000);
     } catch (err) {
       showAlert(err.message || 'Erreur inconnue.');
       currentPhonePending = null;
@@ -215,20 +206,10 @@ if (window.EventSource) {
       const data = JSON.parse(event.data);
 
       if (data.type === 'session_update') {
-        updateAccountsCount();
-
         if (data.status === 'connected' && currentPhonePending && data.phone && data.phone.includes(currentPhonePending)) {
           onPhoneConnectedSuccess(currentPhonePending);
         }
       }
-
-      if (data.type === 'session_deleted') {
-        updateAccountsCount();
-      }
     } catch (_) {}
   };
 }
-
-// Initialisation
-updateAccountsCount();
-setInterval(updateAccountsCount, 10000);

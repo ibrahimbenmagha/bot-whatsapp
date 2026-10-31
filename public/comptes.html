@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Comptes WhatsApp Connectés - Bot Modérateur</title>
+  <title>Administration - Numéros WhatsApp Connectés</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@600;700&display=swap" rel="stylesheet">
@@ -28,14 +28,15 @@
         </div>
         <div class="brand-text">
           <h1>Comptes Connectés</h1>
-          <p class="brand-tagline">Tableau de bord des bots actifs</p>
+          <p class="brand-tagline">Panneau d'administration privé</p>
         </div>
       </div>
 
       <div class="header-status">
-        <a href="index.html" class="btn btn-sm btn-primary" style="text-decoration:none;">
-          <span>➕ Lier un autre numéro</span>
-        </a>
+        <div class="status-badge status-connected">
+          <span class="status-dot"></span>
+          <span>Admin</span>
+        </div>
       </div>
     </header>
 
@@ -43,9 +44,9 @@
     <main class="main-content">
       <section class="card active">
         <div class="card-header">
-          <div class="badge-step">Dashboard</div>
-          <h2>Liste des numéros WhatsApp actifs</h2>
-          <p class="card-desc">Chaque compte ci-dessous exécute le bot en temps réel et applique les règles de modération.</p>
+          <div class="badge-step">Admin Dashboard</div>
+          <h2>Numéros WhatsApp Connectés</h2>
+          <p class="card-desc">Liste de tous les numéros WhatsApp actuellement connectés et actifs.</p>
         </div>
 
         <!-- Liste des comptes -->
@@ -56,25 +57,19 @@
         <!-- Terminal d'activité en direct -->
         <div class="live-activity-section" style="margin-top: 24px;">
           <div class="section-title">
-            <span>⚡ Activité en direct du serveur</span>
+            <span>⚡ Activité du serveur en direct</span>
             <span class="pulse-indicator"></span>
           </div>
           <div class="activity-terminal" id="activityLogs">
-            <div class="log-entry log-system">[SYSTÈME] Tableau de bord connecté au serveur...</div>
+            <div class="log-entry log-system">[SYSTÈME] Tableau de bord connecté...</div>
           </div>
-        </div>
-
-        <div class="card-actions" style="margin-top: 20px;">
-          <a href="index.html" class="btn btn-primary" style="text-decoration:none; justify-content:center;">
-            <span>➕ Lier un nouveau numéro WhatsApp</span>
-          </a>
         </div>
       </section>
     </main>
 
     <!-- Footer -->
     <footer class="app-footer">
-      <p>Bot WhatsApp Baileys • Multi-Comptes • Stockage SQLite • <a href="index.html" style="color:#25d366; text-decoration:none; font-weight:600;">Ajouter un numéro ➔</a></p>
+      <p>Panneau d'administration privé • Stockage SQLite</p>
     </footer>
   </div>
 
