@@ -251,13 +251,6 @@ async function handleConnectionUpdate(update, pairingPhone = null) {
       }, delay);
     } else {
       updateStatus('disconnected');
-      // Si le pairing était en cours et que la promise n'a pas encore été résolue,
-      // on la rejette pour ne pas bloquer l'API
-      if (pairingReadyReject) {
-        pairingReadyReject(new Error('Connection closed before pairing code could be generated'));
-        pairingReadyResolve = null;
-        pairingReadyReject = null;
-      }
     }
   }
 }
@@ -772,8 +765,26 @@ app.post('/api/pair', async (req, res) => {
     // requestPairingCode dès que l'événement QR est émis
     await initializeSocket(cleanPhone);
 
-    // Attendre que le code soit généré (résolu depuis handleConnectionUpdate)
+    // Double sécurité: si l'événement QR tarde, tenter directement après 3.5s
+    const fallbackTimer = setTimeout(async () => {
+      if (pairingReadyResolve && sock && !sock.authState?.creds?.registered) {
+        logActivity(`Délai QR dépassé — tentative d'appel direct pour +${cleanPhone}...`);
+        try {
+          const directCode = await sock.requestPairingCode(cleanPhone);
+          if (directCode && pairingReadyResolve) {
+            pairingReadyResolve(directCode);
+            pairingReadyResolve = null;
+            pairingReadyReject = null;
+          }
+        } catch (err) {
+          logActivity(`Tentative directe pairing code: ${err.message}`, 'warn');
+        }
+      }
+    }, 3500);
+
+    // Attendre que le code soit généré (résolu depuis handleConnectionUpdate ou le fallback)
     const code = await pairingPromise;
+    clearTimeout(fallbackTimer);
 
     currentPairingCode = code;
     updateStatus('awaiting_code');
