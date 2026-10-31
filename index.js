@@ -8,7 +8,7 @@ import express from 'express';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
-import makeWASocket, { useMultiFileAuthState, DisconnectReason } from '@whiskeysockets/baileys';
+import makeWASocket, { useMultiFileAuthState, DisconnectReason, Browsers } from '@whiskeysockets/baileys';
 import { Boom } from '@hapi/boom';
 import pino from 'pino';
 import { initializeDatabase, addWarning, getWarningCount, resetWarnings } from './db.js';
@@ -91,6 +91,37 @@ function updateStatus(newStatus) {
 }
 
 /**
+ * Nettoyer le dossier d'authentification pour repartir à zéro
+ */
+function cleanAuthDir() {
+  try {
+    if (fs.existsSync(AUTH_DIR)) {
+      fs.rmSync(AUTH_DIR, { recursive: true, force: true });
+    }
+    fs.mkdirSync(AUTH_DIR, { recursive: true });
+    logActivity('Identifiants et session réinitialisés.');
+  } catch (err) {
+    console.error('Erreur nettoyage auth_info_multi:', err);
+  }
+}
+
+/**
+ * Attendre que la connexion WebSocket soit bien ouverte
+ */
+async function waitForSocketOpen(timeoutMs = 15000) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    if (sock && sock.ws && sock.ws.isOpen) {
+      // Pause pour stabiliser le handshake Noise avec les serveurs WhatsApp
+      await new Promise((r) => setTimeout(r, 1500));
+      return true;
+    }
+    await new Promise((r) => setTimeout(r, 400));
+  }
+  return false;
+}
+
+/**
  * Initialiser la socket WhatsApp Baileys
  */
 async function initializeSocket() {
@@ -121,7 +152,7 @@ async function initializeSocket() {
       logger: logger,
       printQRInTerminal: false,
       mobile: false,
-      browser: ['Ubuntu', 'Chrome', '122.0.0.0'], // Profil navigateur compatible pairing code
+      browser: Browsers.ubuntu('Chrome'), // Profil navigateur standard Baileys
       syncFullHistory: false,
       connectTimeoutMs: 60000,
       defaultQueryTimeoutMs: 60000,
@@ -181,15 +212,20 @@ async function handleConnectionUpdate(update) {
     if (isLoggedOut) {
       updateStatus('disconnected');
       currentPairingCode = null;
+      cleanAuthDir();
       logActivity('Session déconnectée. Veuillez reconnecter le bot via la page web.', 'warn');
-    } else {
-      // Reconnexion automatique si ce n'est pas une déconnexion volontaire
+    } else if (connectionStatus === 'awaiting_code') {
+      logActivity('Connexion fermée pendant la liaison par code. En attente...', 'warn');
+    } else if (authState?.creds?.registered) {
+      // Reconnexion automatique uniquement si une session était déjà validée
       connectionAttempts++;
       const delay = Math.min(connectionAttempts * 3000, 15000);
       logActivity(`Reconnexion automatique dans ${delay / 1000}s... (tentative ${connectionAttempts})`);
       setTimeout(() => {
         initializeSocket().catch(() => {});
       }, delay);
+    } else {
+      updateStatus('disconnected');
     }
   }
 }
@@ -604,9 +640,26 @@ app.post('/api/pair', async (req, res) => {
 
     logActivity(`Demande de code de liaison pour le numéro +${cleanPhone}...`);
 
-    // S'assurer que la socket est initialisée
-    if (!sock || !sock.ws || sock.ws.readyState === 3 /* CLOSED */) {
-      await initializeSocket();
+    // S'assurer de fermer l'ancienne socket si ouverte
+    if (sock) {
+      try {
+        sock.ev.removeAllListeners();
+        sock.ws?.close();
+      } catch (_) {}
+      sock = null;
+    }
+
+    // Réinitialiser les identifiants locaux pour un jumelage propre
+    cleanAuthDir();
+
+    // Initialiser une socket toute neuve
+    await initializeSocket();
+
+    // Attendre que la connexion WebSocket soit bien ouverte
+    logActivity('Connexion aux serveurs WhatsApp pour la liaison...');
+    const isReady = await waitForSocketOpen(15000);
+    if (!isReady) {
+      throw new Error('Délai dépassé : impossible de joindre WhatsApp. Réessayez.');
     }
 
     // Demander le code de jumelage avec boucle de résilience
@@ -615,19 +668,20 @@ app.post('/api/pair', async (req, res) => {
 
     for (let attempt = 1; attempt <= 3; attempt++) {
       try {
-        if (!sock || !sock.ws || sock.ws.readyState === 3 /* CLOSED */) {
+        if (!sock?.ws?.isOpen) {
+          logActivity(`Tentative ${attempt}/3: socket fermée, réouverture...`, 'warn');
           await initializeSocket();
-          await new Promise((resolve) => setTimeout(resolve, 2500));
+          await waitForSocketOpen(10000);
         }
 
+        logActivity(`Génération du code pour +${cleanPhone} (tentative ${attempt}/3)...`);
         code = await sock.requestPairingCode(cleanPhone);
         if (code) break;
       } catch (err) {
         lastErr = err;
         logActivity(`Tentative ${attempt}/3 code de liaison: ${err.message || err}`, 'warn');
-        // Si besoin de réinitialiser la socket avant réessai
         if (attempt < 3) {
-          await new Promise((resolve) => setTimeout(resolve, 2000));
+          await new Promise((resolve) => setTimeout(resolve, 2500));
         }
       }
     }
