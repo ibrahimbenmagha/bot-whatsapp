@@ -690,6 +690,7 @@ app.get('/api/status', async (req, res) => {
   const currentPhone = sock?.user?.id ? sock.user.id.split('@')[0].split(':')[0] : lastConnectedPhone;
 
   res.json({
+    version: '2.5.0-fixed',
     status: connectionStatus,
     pairingCode: currentPairingCode,
     targetGroup: CONFIG.targetGroupName,
