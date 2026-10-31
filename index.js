@@ -1,5 +1,5 @@
 /**
- * Bot de Modération WhatsApp avec Baileys et Interface Web de Liaison par Code
+ * Bot de Modération WhatsApp Multi-Comptes avec Baileys et Interface Web
  * Stack: Baileys, Express, SQLite, Pino
  */
 
@@ -16,40 +16,35 @@ import { isAdmin, extractMessage, containsUrl, isGroupMessage, formatMention, no
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const AUTH_DIR = path.join(__dirname, 'auth_info_multi');
+const SESSIONS_BASE_DIR = path.join(__dirname, 'sessions');
+const LEGACY_AUTH_DIR = path.join(__dirname, 'auth_info_multi');
 
-// Assurer l'existence du dossier auth_info_multi
-if (!fs.existsSync(AUTH_DIR)) {
-  fs.mkdirSync(AUTH_DIR, { recursive: true });
+// Assurer l'existence du dossier racine des sessions
+if (!fs.existsSync(SESSIONS_BASE_DIR)) {
+  fs.mkdirSync(SESSIONS_BASE_DIR, { recursive: true });
 }
 
-// Configuration depuis .env ou valeurs par défaut
+// Configuration
 const CONFIG = {
   port: parseInt(process.env.PORT, 10) || 3000,
   targetGroupName: process.env.TARGET_GROUP_NAME || 'Votre Nom du Groupe',
   maxWarnings: parseInt(process.env.MAX_WARNINGS, 10) || 3,
 };
 
-// Logger Pino pour Baileys (silencieux)
+// Logger silencieux pour Baileys
 const logger = pino({ level: 'silent' });
 
-// Variables d'état globales
-let sock = null;
+// Base de données
 let db = null;
-let authState = null;
-let saveCredsFunc = null;
-let connectionStatus = 'disconnected'; // 'disconnected' | 'connecting' | 'awaiting_code' | 'connected'
-let currentPairingCode = null;
-let connectionAttempts = 0;
-let connectedAt = null;
-let lastConnectedPhone = null;
-let lastConnectedName = null;
+
+// Map des sessions actives: phone -> SessionObject
+const sessions = new Map();
+
+// Variables globales pour l'interface web
 const activityLogs = [];
 const sseClients = new Set();
-
-// Pairing flow control - résout quand le socket Baileys est prêt pour requestPairingCode
-let pairingReadyResolve = null;
-let pairingReadyReject = null;
+let latestPairingCode = null;
+let latestPairingPhone = null;
 
 /**
  * Ajouter un log en mémoire et notifier l'interface web via SSE
@@ -60,7 +55,7 @@ function logActivity(message, logType = 'info') {
   console.log(formattedMsg);
 
   activityLogs.push(formattedMsg);
-  if (activityLogs.length > 50) {
+  if (activityLogs.length > 60) {
     activityLogs.shift();
   }
 
@@ -72,7 +67,7 @@ function logActivity(message, logType = 'info') {
 }
 
 /**
- * Notifier tous les clients SSE
+ * Notifier tous les clients SSE connectés
  */
 function broadcastSSE(data) {
   const payload = `data: ${JSON.stringify(data)}\n\n`;
@@ -86,141 +81,186 @@ function broadcastSSE(data) {
 }
 
 /**
- * Met à jour le statut global et notifie les clients web
+ * Récupérer la liste de tous les comptes pour l'API
  */
-function updateStatus(newStatus) {
-  connectionStatus = newStatus;
-  broadcastSSE({
-    type: 'status',
-    status: newStatus,
-    code: currentPairingCode,
-  });
-}
+async function getAllAccountsData() {
+  const accountsList = [];
 
-/**
- * Nettoyer le dossier d'authentification pour repartir à zéro
- */
-function cleanAuthDir() {
-  try {
-    if (fs.existsSync(AUTH_DIR)) {
-      fs.rmSync(AUTH_DIR, { recursive: true, force: true });
-    }
-    fs.mkdirSync(AUTH_DIR, { recursive: true });
-    logActivity('Identifiants et session réinitialisés.');
-  } catch (err) {
-    console.error('Erreur nettoyage auth_info_multi:', err);
-  }
-}
-
-/**
- * Initialiser la socket WhatsApp Baileys
- * @param {string|null} pairingPhone - Si fourni, déclenche requestPairingCode dès que le socket est prêt
- */
-async function initializeSocket(pairingPhone = null) {
-  try {
-    // Initialiser la base de données SQLite une seule fois
-    if (!db) {
-      db = await initializeDatabase();
-    }
-
-    // Charger l'état d'authentification multi-fichiers
-    const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
-    authState = state;
-    saveCredsFunc = saveCreds;
-
-    // Fermer l'ancienne socket si elle existe
-    if (sock) {
+  for (const [phone, session] of sessions.entries()) {
+    let groupsCount = 0;
+    if (session.sock && session.status === 'connected') {
       try {
-        sock.ev.removeAllListeners();
-        sock.ws?.close();
+        const groups = await session.sock.groupFetchAllParticipating().catch(() => ({}));
+        groupsCount = Object.keys(groups).length;
       } catch (_) {}
     }
 
-    updateStatus('connecting');
-    logActivity('Initialisation de la connexion WhatsApp...');
-
-    sock = makeWASocket({
-      auth: authState,
-      logger: logger,
-      printQRInTerminal: false,
-      mobile: false,
-      browser: Browsers.ubuntu('Chrome'),
-      syncFullHistory: false,
-      connectTimeoutMs: 60000,
-      defaultQueryTimeoutMs: 60000,
+    accountsList.push({
+      phone: `+${phone}`,
+      name: session.user?.name || session.name || 'Bot WhatsApp',
+      status: session.status || 'disconnected',
+      connectedAt: session.connectedAt,
+      groupsCount: groupsCount,
     });
+  }
 
-    // Sauvegarde automatique des crédits
-    sock.ev.on('creds.update', saveCredsFunc);
+  return accountsList;
+}
 
-    // Mises à jour de la connexion - avec gestion du pairing intégrée
-    sock.ev.on('connection.update', (update) => {
-      handleConnectionUpdate(update, pairingPhone);
-    });
-
-    // Écoute des nouveaux messages pour la modération
-    sock.ev.on('messages.upsert', handleNewMessages);
-
-    // Mises à jour du groupe
-    sock.ev.on('groups.update', handleGroupUpdate);
-
-    return sock;
-  } catch (error) {
-    logActivity(`Erreur initialisation socket: ${error.message}`, 'warn');
-    updateStatus('disconnected');
-    throw error;
+/**
+ * Migrer l'ancienne session 'auth_info_multi' vers 'sessions/<phone>' si présente
+ */
+function migrateLegacySession() {
+  try {
+    const credsPath = path.join(LEGACY_AUTH_DIR, 'creds.json');
+    if (fs.existsSync(credsPath)) {
+      const creds = JSON.parse(fs.readFileSync(credsPath, 'utf-8'));
+      if (creds?.me?.id) {
+        const phone = creds.me.id.split('@')[0].split(':')[0];
+        const targetDir = path.join(SESSIONS_BASE_DIR, phone);
+        if (!fs.existsSync(targetDir)) {
+          fs.cpSync(LEGACY_AUTH_DIR, targetDir, { recursive: true });
+          logActivity(`Session existante migrée avec succès vers sessions/${phone}`);
+        }
+      }
+    }
+  } catch (err) {
+    console.error('Erreur migration legacy session:', err);
   }
 }
 
 /**
- * Gérer les changements de statut de connexion
- * @param {object} update - L'événement de mise à jour de connexion
- * @param {string|null} pairingPhone - Numéro pour lequel on demande un code de liaison
+ * Démarrer ou connecter une session WhatsApp pour un numéro donné
  */
-async function handleConnectionUpdate(update, pairingPhone = null) {
+async function startSession(phone, options = {}) {
+  const { isNewPairing = false } = options;
+  const sessionDir = path.join(SESSIONS_BASE_DIR, phone);
+
+  if (!fs.existsSync(sessionDir)) {
+    fs.mkdirSync(sessionDir, { recursive: true });
+  }
+
+  // Fermer la socket précédente si elle existait déjà
+  const existingSession = sessions.get(phone);
+  if (existingSession?.sock) {
+    try {
+      existingSession.sock.ev.removeAllListeners();
+      existingSession.sock.ws?.close();
+    } catch (_) {}
+  }
+
+  const { state, saveCreds } = await useMultiFileAuthState(sessionDir);
+
+  const sessionObj = {
+    phone,
+    sock: null,
+    authState: state,
+    saveCreds,
+    status: isNewPairing ? 'connecting' : (state?.creds?.registered ? 'connecting' : 'disconnected'),
+    pairingCode: null,
+    connectedAt: existingSession?.connectedAt || null,
+    user: existingSession?.user || null,
+    name: state?.creds?.me?.name || 'Bot WhatsApp',
+    pairingResolve: null,
+    pairingReject: null,
+    connectionAttempts: 0,
+  };
+
+  sessions.set(phone, sessionObj);
+
+  logActivity(`[+${phone}] Initialisation de la socket Baileys...`);
+
+  const sock = makeWASocket({
+    auth: state,
+    logger: logger,
+    printQRInTerminal: false,
+    mobile: false,
+    browser: Browsers.ubuntu('Chrome'),
+    syncFullHistory: false,
+    connectTimeoutMs: 60000,
+    defaultQueryTimeoutMs: 60000,
+  });
+
+  sessionObj.sock = sock;
+
+  // Sauvegarde des identifiants
+  sock.ev.on('creds.update', saveCreds);
+
+  // Gestion des mises à jour de connexion
+  sock.ev.on('connection.update', async (update) => {
+    await handleSessionConnectionUpdate(phone, update, isNewPairing);
+  });
+
+  // Gestion des messages reçus pour la modération
+  sock.ev.on('messages.upsert', async (m) => {
+    await handleSessionMessages(phone, m);
+  });
+
+  // Mises à jour des groupes
+  sock.ev.on('groups.update', (updates) => {
+    for (const update of updates) {
+      logActivity(`[+${phone}] Groupe mis à jour : ${update.id}`);
+    }
+  });
+
+  return sessionObj;
+}
+
+/**
+ * Gestionnaire connection.update par session
+ */
+async function handleSessionConnectionUpdate(phone, update, isNewPairing) {
+  const session = sessions.get(phone);
+  if (!session) return;
+
   const { connection, lastDisconnect, qr } = update;
 
   if (connection === 'connecting') {
-    if (connectionStatus !== 'awaiting_code') {
-      updateStatus('connecting');
+    if (session.status !== 'awaiting_code') {
+      session.status = 'connecting';
     }
-    logActivity('Connexion au serveur WhatsApp en cours...');
+    broadcastSSE({ type: 'session_update', phone, status: session.status });
   }
 
-  // ──────────────────────────────────────────────────────────
-  // CLEF DU FIX: Quand Baileys émet un QR, ça veut dire que
-  // le handshake Noise est terminé et que le socket est PRÊT
-  // pour recevoir des stanzas IQ comme requestPairingCode.
-  // On intercepte ce moment exact pour demander le code.
-  // ──────────────────────────────────────────────────────────
-  if (qr && pairingPhone) {
-    logActivity(`Socket prêt (QR reçu) — Génération du code pour +${pairingPhone}...`);
+  // Si on est en cours de pairing et que le socket est prêt (QR émis)
+  if (qr && isNewPairing && session.pairingResolve) {
+    logActivity(`[+${phone}] Socket prêt — Génération du code de jumelage...`);
     try {
-      const code = await sock.requestPairingCode(pairingPhone);
-      if (code && pairingReadyResolve) {
-        pairingReadyResolve(code);
-        pairingReadyResolve = null;
-        pairingReadyReject = null;
+      const code = await session.sock.requestPairingCode(phone);
+      if (code && session.pairingResolve) {
+        session.pairingCode = code;
+        session.status = 'awaiting_code';
+        latestPairingCode = code;
+        latestPairingPhone = phone;
+
+        session.pairingResolve(code);
+        session.pairingResolve = null;
+        session.pairingReject = null;
+
+        logActivity(`[+${phone}] Code généré avec succès : ${code}`, 'system');
+        broadcastSSE({ type: 'session_update', phone, status: 'awaiting_code', code });
       }
     } catch (err) {
-      logActivity(`Erreur requestPairingCode: ${err.message}`, 'warn');
-      if (pairingReadyReject) {
-        pairingReadyReject(err);
-        pairingReadyResolve = null;
-        pairingReadyReject = null;
-      }
+      logActivity(`[+${phone}] Erreur requestPairingCode: ${err.message}`, 'warn');
     }
   }
 
   if (connection === 'open') {
-    connectionAttempts = 0;
-    currentPairingCode = null;
-    updateStatus('connected');
-    const userPhone = sock?.user?.id ? sock.user.id.split('@')[0].split(':')[0] : 'Inconnu';
-    lastConnectedPhone = userPhone;
-    lastConnectedName = sock?.user?.name || 'Bot WhatsApp';
-    connectedAt = new Date().toISOString();
-    logActivity(`✅ Bot connecté avec succès sur le numéro +${userPhone} (${lastConnectedName}) !`, 'system');
+    session.connectionAttempts = 0;
+    session.pairingCode = null;
+    session.status = 'connected';
+    session.connectedAt = new Date().toISOString();
+
+    const currentPhone = session.sock?.user?.id ? session.sock.user.id.split('@')[0].split(':')[0] : phone;
+    const currentName = session.sock?.user?.name || session.name || 'Bot WhatsApp';
+    session.user = {
+      id: session.sock?.user?.id || `${currentPhone}@s.whatsapp.net`,
+      phone: `+${currentPhone}`,
+      name: currentName,
+    };
+
+    logActivity(`✅ [+${currentPhone}] Connecté avec succès (${currentName}) !`, 'system');
+    broadcastSSE({ type: 'session_update', phone, status: 'connected', user: session.user });
   }
 
   if (connection === 'close') {
@@ -231,43 +271,54 @@ async function handleConnectionUpdate(update, pairingPhone = null) {
     const errorMsg = lastDisconnect?.error?.message || lastDisconnect?.error;
     const isLoggedOut = statusCode === DisconnectReason.loggedOut;
 
-    logActivity(`Connexion fermée: code ${statusCode || 'inconnu'} (${errorMsg})`, 'warn');
+    logActivity(`[+${phone}] Connexion fermée: code ${statusCode || 'inconnu'} (${errorMsg})`, 'warn');
 
     if (isLoggedOut) {
-      updateStatus('disconnected');
-      currentPairingCode = null;
-      cleanAuthDir();
-      logActivity('Session déconnectée. Veuillez reconnecter le bot via la page web.', 'warn');
+      session.status = 'disconnected';
+      session.pairingCode = null;
+      // Nettoyer la session déconnectée
+      const sDir = path.join(SESSIONS_BASE_DIR, phone);
+      if (fs.existsSync(sDir)) {
+        fs.rmSync(sDir, { recursive: true, force: true });
+      }
+      sessions.delete(phone);
+      logActivity(`[+${phone}] Session supprimée suite à déconnexion sur le téléphone.`, 'warn');
+      broadcastSSE({ type: 'session_deleted', phone });
     } else if (statusCode === DisconnectReason.restartRequired || statusCode === 515) {
-      // Code 515: WhatsApp a validé le jumelage sur le téléphone et demande un redémarrage immédiat
-      logActivity('🎉 Code validé sur le téléphone ! Redémarrage pour finaliser la connexion (code 515)...', 'system');
-      updateStatus('connecting');
+      // Code 515: WhatsApp a validé le jumelage sur le téléphone et demande le redémarrage
+      logActivity(`[+${phone}] 🎉 Code validé sur le téléphone ! Redémarrage immédiat (code 515)...`, 'system');
+      session.status = 'connecting';
       setTimeout(() => {
-        initializeSocket().catch((err) => {
-          logActivity(`Erreur reconnexion après 515: ${err.message}`, 'warn');
+        startSession(phone, { isNewPairing: false }).catch((err) => {
+          logActivity(`[+${phone}] Erreur reconnexion après 515: ${err.message}`, 'warn');
         });
       }, 1000);
-    } else if (authState?.creds?.registered) {
-      // Reconnexion automatique standard
-      connectionAttempts++;
-      const delay = Math.min(connectionAttempts * 3000, 15000);
-      logActivity(`Reconnexion automatique dans ${delay / 1000}s... (tentative ${connectionAttempts})`);
+    } else if (session.authState?.creds?.registered) {
+      // Reconnexion automatique pour compte déjà enregistré
+      session.connectionAttempts++;
+      const delay = Math.min(session.connectionAttempts * 3000, 15000);
+      logActivity(`[+${phone}] Reconnexion dans ${delay / 1000}s... (tentative ${session.connectionAttempts})`);
       setTimeout(() => {
-        initializeSocket().catch(() => {});
+        startSession(phone, { isNewPairing: false }).catch(() => {});
       }, delay);
-    } else if (connectionStatus === 'awaiting_code') {
-      logActivity('Connexion fermée temporairement pendant la saisie du code. Maintien en attente...', 'warn');
+    } else if (session.status === 'awaiting_code') {
+      logActivity(`[+${phone}] En attente de saisie du code sur le téléphone...`);
     } else {
-      updateStatus('disconnected');
+      session.status = 'disconnected';
+      broadcastSSE({ type: 'session_update', phone, status: 'disconnected' });
     }
   }
 }
 
 /**
- * Gérer les messages entrants (Modération Anti-Lien, Anti-Contact, Warns)
+ * Traitement des messages entrants et modération
  */
-async function handleNewMessages(m) {
-  if (connectionStatus !== 'connected' || !m.messages) return;
+async function handleSessionMessages(botPhone, m) {
+  const session = sessions.get(botPhone);
+  if (!session || session.status !== 'connected' || !m.messages) return;
+
+  const sock = session.sock;
+  if (!sock) return;
 
   try {
     for (const msg of m.messages) {
@@ -279,7 +330,6 @@ async function handleNewMessages(m) {
       const isGroup = isGroupMessage(jid);
       const isFromMe = Boolean(msg.key.fromMe);
 
-      // Récupérer l'ID de l'expéditeur
       const rawSender = isGroup
         ? (msg.key.participant || msg.participant || (isFromMe ? sock?.user?.id : null))
         : jid;
@@ -293,10 +343,10 @@ async function handleNewMessages(m) {
       const trimmedText = messageText.trim();
       const lowerText = trimmedText.toLowerCase();
 
-      logActivity(`Message reçu [${isGroup ? 'Groupe' : 'Privé'} | ${isFromMe ? 'Moi' : senderId.split('@')[0]}]: "${trimmedText}"`);
+      logActivity(`[+${botPhone}] [${isGroup ? 'Groupe' : 'Privé'} | ${isFromMe ? 'Moi' : senderId.split('@')[0]}]: "${trimmedText}"`);
 
       let groupData = null;
-      let senderIsAdmin = isFromMe; // Le propriétaire du bot est toujours considéré admin
+      let senderIsAdmin = isFromMe;
 
       if (isGroup) {
         try {
@@ -308,80 +358,79 @@ async function handleNewMessages(m) {
           logActivity(`Avertissement groupMetadata: ${err.message}`, 'warn');
         }
 
-        // 1. Module Anti-Lien (non-admins et pas depuis le compte bot lui-même)
+        // 1. Module Anti-Lien
         if (!isFromMe && !senderIsAdmin && containsUrl(messageText)) {
-          await handleAntiLink(jid, senderId, msg.key.id, groupData);
+          await handleAntiLink(sock, jid, senderId, msg.key.id, groupData);
         }
 
-        // 2. Module Anti-Contact (non-admins et pas depuis le compte bot lui-même)
+        // 2. Module Anti-Contact
         const isContact = msg.message.contactMessage || msg.message.contactsArrayMessage;
         if (!isFromMe && !senderIsAdmin && isContact) {
-          await handleAntiContact(jid, senderId, msg.key.id, groupData);
+          await handleAntiContact(sock, jid, senderId, msg.key.id, groupData);
         }
       } else {
-        // En privé (DM), pour tester
         senderIsAdmin = true;
       }
 
-      // 3. Commandes du Bot (supporte !, ., et /)
+      // 3. Commandes
       const isCmd = (name) => lowerText === `!${name}` || lowerText === `.${name}` || lowerText === `/${name}`;
       const startsWithCmd = (name) => lowerText.startsWith(`!${name}`) || lowerText.startsWith(`.${name}`) || lowerText.startsWith(`/${name}`);
 
-      // Commande !status / .status / .info / .bot / .حالة
+      // Commande .status
       if (isCmd('status') || isCmd('info') || isCmd('bot') || isCmd('حالة')) {
-        await handleStatusCommand(jid, groupData);
+        await handleStatusCommand(sock, jid, groupData, session);
         continue;
       }
 
-      // Commande !help / !aide / .menu / !menu / .اوامر
+      // Commande .menu
       if (isCmd('help') || isCmd('aide') || isCmd('menu') || isCmd('اوامر') || isCmd('الاوامر')) {
-        await handleHelpCommand(jid, senderIsAdmin, senderId);
+        await handleHelpCommand(sock, jid, senderIsAdmin, senderId, session);
         continue;
       }
 
-      // Commande !regles / !rules / .regles / .rules / .قوانين
+      // Commande .regles
       if (isCmd('regles') || isCmd('rules') || isCmd('قوانين') || isCmd('القوانين')) {
-        await handleRulesCommand(jid);
+        await handleRulesCommand(sock, jid);
         continue;
       }
 
-      // Commande !warnings / !warns / .warnings / .warns / .انذارات
+      // Commande .warnings
       if (startsWithCmd('warnings') || startsWithCmd('warns') || startsWithCmd('انذارات') || startsWithCmd('انذاراتي')) {
         if (!isGroup) {
           await sock.sendMessage(jid, { text: 'ℹ️ Cette commande fonctionne uniquement dans un groupe.' });
           continue;
         }
-        await handleCheckWarningsCommand(jid, messageText, senderId, groupData);
+        await handleCheckWarningsCommand(sock, jid, messageText, senderId);
         continue;
       }
 
-      // Commande !warn / .warn / .انذار (Admins uniquement)
+      // Commande .warn (Admins)
       if ((startsWithCmd('warn ') || startsWithCmd('انذار ')) && senderIsAdmin) {
         if (!isGroup) {
           await sock.sendMessage(jid, { text: 'ℹ️ Cette commande fonctionne uniquement dans un groupe.' });
           continue;
         }
-        await handleWarnCommand(jid, messageText, groupData);
+        await handleWarnCommand(sock, jid, messageText, groupData);
         continue;
       }
 
-      // Commande !resetwarn / .resetwarn / .تصفير (Admins uniquement)
+      // Commande .resetwarn (Admins)
       if ((startsWithCmd('resetwarn') || startsWithCmd('تصفير')) && senderIsAdmin) {
         if (!isGroup) {
           await sock.sendMessage(jid, { text: 'ℹ️ Cette commande fonctionne uniquement dans un groupe.' });
           continue;
         }
-        await handleResetWarnCommand(jid, messageText, groupData);
+        await handleResetWarnCommand(sock, jid, messageText);
         continue;
       }
 
-      // Commande !kick / .kick / .طرد (Admins uniquement)
+      // Commande .kick (Admins)
       if ((startsWithCmd('kick') || startsWithCmd('طرد')) && senderIsAdmin) {
         if (!isGroup) {
           await sock.sendMessage(jid, { text: 'ℹ️ Cette commande fonctionne uniquement dans un groupe.' });
           continue;
         }
-        await handleManualKickCommand(jid, messageText, groupData);
+        await handleManualKickCommand(sock, jid, messageText, groupData);
         continue;
       }
     }
@@ -392,9 +441,9 @@ async function handleNewMessages(m) {
 }
 
 /**
- * Module Anti-Lien
+ * Fonctions de modération
  */
-async function handleAntiLink(jid, senderId, messageId, groupData) {
+async function handleAntiLink(sock, jid, senderId, messageId, groupData) {
   try {
     await sock.sendMessage(jid, { delete: { remoteJid: jid, fromMe: false, id: messageId } });
     const newWarningCount = addWarning(jid, senderId);
@@ -403,7 +452,8 @@ async function handleAntiLink(jid, senderId, messageId, groupData) {
     let notificationText = `⚠️ ${senderMention} Lien détecté et supprimé ! Avertissement ${newWarningCount}/${CONFIG.maxWarnings}`;
 
     if (newWarningCount >= CONFIG.maxWarnings) {
-      await handleUserKick(jid, senderId, groupData);
+      await sock.groupParticipantsUpdate(jid, [senderId], 'remove');
+      resetWarnings(jid, senderId);
       notificationText += `\n\n❌ Utilisateur ${senderMention} exclu du groupe (${CONFIG.maxWarnings} avertissements atteints).`;
     }
 
@@ -414,16 +464,13 @@ async function handleAntiLink(jid, senderId, messageId, groupData) {
   }
 }
 
-/**
- * Module Anti-Contact
- */
-async function handleAntiContact(jid, senderId, messageId, groupData) {
+async function handleAntiContact(sock, jid, senderId, messageId, groupData) {
   try {
     await sock.sendMessage(jid, { delete: { remoteJid: jid, fromMe: false, id: messageId } });
     await sock.groupParticipantsUpdate(jid, [senderId], 'remove');
     resetWarnings(jid, senderId);
 
-    const admins = groupData.participants.filter(p => p.admin === 'admin' || p.admin === 'superadmin').map(p => p.id);
+    const admins = groupData?.participants?.filter(p => p.admin === 'admin' || p.admin === 'superadmin')?.map(p => p.id) || [];
     const senderMention = formatMention(senderId);
     const adminMentions = admins.map(adminId => formatMention(adminId)).join(' ');
 
@@ -436,10 +483,7 @@ async function handleAntiContact(jid, senderId, messageId, groupData) {
   }
 }
 
-/**
- * Commande manuelle !warn
- */
-async function handleWarnCommand(jid, messageText, groupData) {
+async function handleWarnCommand(sock, jid, messageText, groupData) {
   try {
     const match = messageText.match(/@(\d+)/);
     if (!match) {
@@ -448,7 +492,7 @@ async function handleWarnCommand(jid, messageText, groupData) {
     }
 
     const targetUserId = match[1] + '@s.whatsapp.net';
-    const targetParticipant = groupData.participants.find((p) => p.id === targetUserId);
+    const targetParticipant = groupData?.participants?.find((p) => p.id === targetUserId);
     if (!targetParticipant) {
       await sock.sendMessage(jid, { text: '❌ Utilisateur introuvable dans ce groupe.' });
       return;
@@ -459,7 +503,8 @@ async function handleWarnCommand(jid, messageText, groupData) {
     let responseText = `⚠️ Avertissement ajouté pour ${targetMention}. Total: ${newWarningCount}/${CONFIG.maxWarnings}`;
 
     if (newWarningCount >= CONFIG.maxWarnings) {
-      await handleUserKick(jid, targetUserId, groupData);
+      await sock.groupParticipantsUpdate(jid, [targetUserId], 'remove');
+      resetWarnings(jid, targetUserId);
       responseText += `\n\n❌ ${targetMention} a été exclu (${CONFIG.maxWarnings} avertissements atteints).`;
     }
 
@@ -470,12 +515,9 @@ async function handleWarnCommand(jid, messageText, groupData) {
   }
 }
 
-/**
- * Commande !help / !aide / .menu
- */
-async function handleHelpCommand(jid, isAdminUser, senderId = null) {
+async function handleHelpCommand(sock, jid, isAdminUser, senderId = null, session = null) {
   try {
-    const userPhone = sock?.user?.id ? `+${sock.user.id.split('@')[0].split(':')[0]}` : (lastConnectedPhone ? `+${lastConnectedPhone}` : '');
+    const userPhone = session?.user?.phone || (session?.phone ? `+${session.phone}` : '');
 
     let helpText = `مرحبا بك في البوت الرسمي ل امبراطورية باراديس \n`;
     if (userPhone) {
@@ -513,21 +555,17 @@ async function handleHelpCommand(jid, isAdminUser, senderId = null) {
     }
 
     await sock.sendMessage(jid, options);
-    logActivity(`Menu d'aide envoyé avec succès.`);
   } catch (err) {
     console.error('Erreur !help:', err);
-    logActivity(`Erreur envoi help: ${err.message}`, 'warn');
   }
 }
 
-/**
- * Commande !status / .status / .info / .bot
- */
-async function handleStatusCommand(jid, groupData = null) {
+async function handleStatusCommand(sock, jid, groupData = null, session = null) {
   try {
-    const userPhone = sock?.user?.id ? `+${sock.user.id.split('@')[0].split(':')[0]}` : (lastConnectedPhone ? `+${lastConnectedPhone}` : 'Non connecté');
-    const userName = sock?.user?.name || lastConnectedName || 'Bot WhatsApp';
+    const userPhone = session?.user?.phone || (session?.phone ? `+${session.phone}` : 'Inconnu');
+    const userName = session?.user?.name || session?.name || 'Bot WhatsApp';
     const groupName = groupData?.subject || 'Discussion Privée';
+    const totalActive = Array.from(sessions.values()).filter(s => s.status === 'connected').length;
 
     let text = `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🌿 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
     text += `       🏰 *حـالـة الـحـسـاب والـبـوت* 🏰\n`;
@@ -535,23 +573,20 @@ async function handleStatusCommand(jid, groupData = null) {
     text += `📱 *الـواتـسـاب الـمـتـصـل* : ${userPhone}\n`;
     text += `👤 *اسـم الـحـسـاب* : ${userName}\n`;
     text += `⚡ *حـالـة الـخـادم* : 🟢 مـتـصـل ونـشـط 24/7\n`;
+    text += `🤖 *إجمالي البوتات المتصلة* : ${totalActive} حساب\n`;
     text += `🏰 *الـمـجـمـوعـة الـحـالـيـة* : ${groupName}\n`;
-    text += `🛡️ *أنـظـمـة الـحـمـايـة* : مـضـاد الـروابـط + مـضـاد جـهـات الاتـصـال مـفـعـل\n`;
+    text += `🛡️ *أنـظـمـة الـحـمـايـة* : مـضـاد الـروابـط + مـضـاد جـهـات الاتـصـال\n`;
     text += `⚠️ *الـحـد الأقـصـى لـلإنـذارات* : ${CONFIG.maxWarnings}\n\n`;
     text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚔️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
     text += `       🏰 *PARADIS EMPIRE* 🏰`;
 
     await sock.sendMessage(jid, { text });
-    logActivity(`Statut du compte envoyé sur WhatsApp.`);
   } catch (err) {
     console.error('Erreur !status:', err);
   }
 }
 
-/**
- * Commande !regles / !rules / .regles
- */
-async function handleRulesCommand(jid) {
+async function handleRulesCommand(sock, jid) {
   try {
     let rulesText = `📜 *قـوانـيـن إمـبـراطـوريـة بـاراديـس* 📜\n`;
     rulesText += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚔️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n\n`;
@@ -572,17 +607,11 @@ async function handleRulesCommand(jid) {
   }
 }
 
-/**
- * Commande !warnings / !warns
- */
-async function handleCheckWarningsCommand(jid, messageText, senderId, groupData) {
+async function handleCheckWarningsCommand(sock, jid, messageText, senderId) {
   try {
     const match = messageText.match(/@(\d+)/);
     let targetUserId = senderId;
-
-    if (match) {
-      targetUserId = match[1] + '@s.whatsapp.net';
-    }
+    if (match) targetUserId = match[1] + '@s.whatsapp.net';
 
     const count = getWarningCount(jid, targetUserId);
     const targetMention = formatMention(targetUserId);
@@ -600,10 +629,7 @@ async function handleCheckWarningsCommand(jid, messageText, senderId, groupData)
   }
 }
 
-/**
- * Commande !resetwarn
- */
-async function handleResetWarnCommand(jid, messageText, groupData) {
+async function handleResetWarnCommand(sock, jid, messageText) {
   try {
     const match = messageText.match(/@(\d+)/);
     if (!match) {
@@ -619,16 +645,12 @@ async function handleResetWarnCommand(jid, messageText, groupData) {
       text: `✅ Les avertissements de ${targetMention} ont été réinitialisés à 0/${CONFIG.maxWarnings}.`,
       mentions: [targetUserId]
     });
-    logActivity(`Avertissements réinitialisés pour ${targetUserId}`);
   } catch (err) {
     console.error('Erreur !resetwarn:', err);
   }
 }
 
-/**
- * Commande !kick
- */
-async function handleManualKickCommand(jid, messageText, groupData) {
+async function handleManualKickCommand(sock, jid, messageText, groupData) {
   try {
     const match = messageText.match(/@(\d+)/);
     if (!match) {
@@ -640,36 +662,15 @@ async function handleManualKickCommand(jid, messageText, groupData) {
     const targetMention = formatMention(targetUserId);
 
     await sock.sendMessage(jid, { text: `👋 Expulsion de ${targetMention} par un administrateur...`, mentions: [targetUserId] });
-    await handleUserKick(jid, targetUserId, groupData);
-    logActivity(`!kick manuel appliqué pour ${targetUserId}`);
+    await sock.groupParticipantsUpdate(jid, [targetUserId], 'remove');
+    resetWarnings(jid, targetUserId);
   } catch (err) {
     console.error('Erreur !kick:', err);
   }
 }
 
-/**
- * Expulser un participant
- */
-async function handleUserKick(jid, userId, groupData) {
-  try {
-    await sock.groupParticipantsUpdate(jid, [userId], 'remove');
-    resetWarnings(jid, userId);
-  } catch (err) {
-    console.error('Erreur expulsion:', err);
-  }
-}
-
-/**
- * Mises à jour des groupes
- */
-async function handleGroupUpdate(updates) {
-  for (const update of updates) {
-    logActivity(`Mise à jour groupe ${update.id}`);
-  }
-}
-
 // ----------------------------------------------------
-// Serveur Web Express & API de Liaison WhatsApp
+// Serveur Web Express & API Multi-Comptes
 // ----------------------------------------------------
 
 const app = express();
@@ -677,50 +678,46 @@ app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
 /**
- * API: Obtenir le statut actuel et les informations du compte connecté
+ * API: Liste de tous les comptes WhatsApp connectés / enregistrés
+ */
+app.get('/api/accounts', async (req, res) => {
+  try {
+    const accounts = await getAllAccountsData();
+    res.json({ success: true, accounts });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/**
+ * API: Obtenir le statut global et le résumé des comptes
  */
 app.get('/api/status', async (req, res) => {
-  let groups = [];
-  if (connectionStatus === 'connected' && sock) {
-    try {
-      const groupData = await sock.groupFetchAllParticipating();
-      groups = Object.values(groupData).map((g) => ({
-        id: g.id,
-        name: g.subject || 'Groupe sans nom',
-        participantsCount: g.participants?.length || 0,
-        isAdmin: g.participants?.some(
-          (p) => normalizeJid(p.id) === normalizeJid(sock?.user?.id) && (p.admin === 'admin' || p.admin === 'superadmin')
-        ),
-      }));
-    } catch (_) {}
-  }
-
-  const currentPhone = sock?.user?.id ? sock.user.id.split('@')[0].split(':')[0] : lastConnectedPhone;
+  const accounts = await getAllAccountsData();
+  const connectedAccounts = accounts.filter(a => a.status === 'connected');
+  const overallStatus = connectedAccounts.length > 0 ? 'connected' : (sessions.size > 0 ? 'connecting' : 'disconnected');
 
   res.json({
-    version: '2.6.0-code515-fixed',
-    status: connectionStatus,
-    pairingCode: currentPairingCode,
+    version: '3.0.0-multi-account',
+    status: overallStatus,
+    pairingCode: latestPairingCode,
     targetGroup: CONFIG.targetGroupName,
-    user: currentPhone ? {
-      id: sock?.user?.id || `${currentPhone}@s.whatsapp.net`,
-      phone: `+${currentPhone}`,
-      name: sock?.user?.name || lastConnectedName || 'Bot WhatsApp',
+    accountsCount: accounts.length,
+    connectedCount: connectedAccounts.length,
+    accounts: accounts,
+    // Compatibilité ascendante pour l'interface existante
+    user: connectedAccounts[0] ? {
+      id: `${connectedAccounts[0].phone.replace('+', '')}@s.whatsapp.net`,
+      phone: connectedAccounts[0].phone,
+      name: connectedAccounts[0].name,
     } : null,
-    connectedAt: connectedAt,
-    groups: groups,
+    connectedAt: connectedAccounts[0]?.connectedAt || null,
     logs: activityLogs.slice(-25),
   });
 });
 
 /**
- * API: Demander un code d'association (Pairing Code pour n'importe quel téléphone)
- * 
- * STRATÉGIE: Au lieu de créer le socket puis d'attendre ws.isOpen (qui ne garantit
- * PAS que le handshake Noise est fini), on passe le numéro de téléphone à
- * initializeSocket(). Le handler connection.update intercepte l'événement QR
- * (qui signifie que Baileys est prêt) et appelle requestPairingCode à ce moment
- * exact. Le résultat est retourné via une Promise.
+ * API: Lier un nouveau numéro de téléphone (sans déconnecter les autres !)
  */
 app.post('/api/pair', async (req, res) => {
   try {
@@ -736,69 +733,46 @@ app.post('/api/pair', async (req, res) => {
 
     logActivity(`Demande de liaison pour le numéro +${cleanPhone}...`);
 
-    // Fermer proprement toute connexion existante
-    if (sock) {
-      logActivity(`Changement de téléphone vers +${cleanPhone} : fermeture de la session précédente...`);
-      try {
-        await sock.logout().catch(() => {});
-      } catch (_) {}
-      try {
-        sock.ev.removeAllListeners();
-        sock.ws?.close();
-      } catch (_) {}
-      sock = null;
-    }
+    // Démarrer la session pour ce numéro spécifique
+    const session = await startSession(cleanPhone, { isNewPairing: true });
 
-    // Réinitialiser les identifiants locaux pour un jumelage propre
-    cleanAuthDir();
-    currentPairingCode = null;
-    updateStatus('connecting');
-
-    // Créer la Promise qui sera résolue quand requestPairingCode réussira
-    // depuis le handler connection.update (quand l'événement QR arrive)
+    // Créer la Promise pour attendre le code
     const pairingPromise = new Promise((resolve, reject) => {
-      pairingReadyResolve = resolve;
-      pairingReadyReject = reject;
+      session.pairingResolve = resolve;
+      session.pairingReject = reject;
 
-      // Timeout de sécurité: 30 secondes max
       setTimeout(() => {
-        if (pairingReadyReject) {
-          reject(new Error('Délai dépassé (30s) : impossible de joindre WhatsApp. Réessayez.'));
-          pairingReadyResolve = null;
-          pairingReadyReject = null;
+        if (session.pairingReject) {
+          reject(new Error('Délai dépassé (30s) pour obtenir le code WhatsApp.'));
+          session.pairingResolve = null;
+          session.pairingReject = null;
         }
       }, 30000);
     });
 
-    // Lancer le socket avec le numéro de pairing — le handler va appeler
-    // requestPairingCode dès que l'événement QR est émis
-    await initializeSocket(cleanPhone);
-
-    // Double sécurité: si l'événement QR tarde, tenter directement après 3.5s
+    // Fallback direct après 3.5 secondes si l'événement QR n'a pas encore déclenché
     const fallbackTimer = setTimeout(async () => {
-      if (pairingReadyResolve && sock && !sock.authState?.creds?.registered) {
-        logActivity(`Délai QR dépassé — tentative d'appel direct pour +${cleanPhone}...`);
+      if (session.pairingResolve && session.sock) {
+        logActivity(`[+${cleanPhone}] Appel direct requestPairingCode...`);
         try {
-          const directCode = await sock.requestPairingCode(cleanPhone);
-          if (directCode && pairingReadyResolve) {
-            pairingReadyResolve(directCode);
-            pairingReadyResolve = null;
-            pairingReadyReject = null;
+          const directCode = await session.sock.requestPairingCode(cleanPhone);
+          if (directCode && session.pairingResolve) {
+            session.pairingCode = directCode;
+            session.status = 'awaiting_code';
+            latestPairingCode = directCode;
+            latestPairingPhone = cleanPhone;
+            session.pairingResolve(directCode);
+            session.pairingResolve = null;
+            session.pairingReject = null;
           }
         } catch (err) {
-          logActivity(`Tentative directe pairing code: ${err.message}`, 'warn');
+          logActivity(`[+${cleanPhone}] Tentative directe: ${err.message}`, 'warn');
         }
       }
     }, 3500);
 
-    // Attendre que le code soit généré (résolu depuis handleConnectionUpdate ou le fallback)
     const code = await pairingPromise;
     clearTimeout(fallbackTimer);
-
-    currentPairingCode = code;
-    updateStatus('awaiting_code');
-
-    logActivity(`Code d'association généré avec succès pour +${cleanPhone}: ${code}`, 'system');
 
     res.json({
       success: true,
@@ -816,49 +790,36 @@ app.post('/api/pair', async (req, res) => {
 });
 
 /**
- * API: Annuler la tentative de liaison en cours
+ * API: Déconnecter un compte spécifique
  */
-app.post('/api/cancel-pairing', (req, res) => {
-  currentPairingCode = null;
-  pairingReadyResolve = null;
-  pairingReadyReject = null;
-  if (connectionStatus !== 'connected') {
-    updateStatus('disconnected');
-  }
-  res.json({ success: true });
-});
-
-/**
- * API: Déconnecter le bot et réinitialiser les identifiants
- */
-app.post('/api/disconnect', async (req, res) => {
+app.post('/api/accounts/disconnect', async (req, res) => {
   try {
-    logActivity('Déconnexion demandée depuis l\'interface web...', 'warn');
+    const { phoneNumber } = req.body;
+    const cleanPhone = String(phoneNumber || '').replace(/[^0-9]/g, '');
 
-    if (sock) {
-      try {
-        await sock.logout();
-      } catch (_) {}
-      try {
-        sock.ev.removeAllListeners();
-        sock.ws?.close();
-      } catch (_) {}
+    if (!cleanPhone) {
+      return res.status(400).json({ success: false, error: 'Numéro de téléphone requis.' });
     }
 
-    // Supprimer les fichiers d'authentification pour repartir à neuf
-    if (fs.existsSync(AUTH_DIR)) {
-      fs.rmSync(AUTH_DIR, { recursive: true, force: true });
-      fs.mkdirSync(AUTH_DIR, { recursive: true });
+    logActivity(`Demande de déconnexion pour le compte +${cleanPhone}...`, 'warn');
+
+    const session = sessions.get(cleanPhone);
+    if (session?.sock) {
+      try { await session.sock.logout(); } catch (_) {}
+      try { session.sock.ev.removeAllListeners(); session.sock.ws?.close(); } catch (_) {}
     }
 
-    sock = null;
-    currentPairingCode = null;
-    connectedAt = null;
-    lastConnectedPhone = null;
-    lastConnectedName = null;
-    updateStatus('disconnected');
+    // Supprimer le dossier de session pour ce numéro
+    const sDir = path.join(SESSIONS_BASE_DIR, cleanPhone);
+    if (fs.existsSync(sDir)) {
+      fs.rmSync(sDir, { recursive: true, force: true });
+    }
 
-    res.json({ success: true, message: 'Bot déconnecté et session supprimée.' });
+    sessions.delete(cleanPhone);
+    logActivity(`Compte +${cleanPhone} déconnecté et supprimé.`, 'system');
+    broadcastSSE({ type: 'session_deleted', phone: cleanPhone });
+
+    res.json({ success: true, message: `Compte +${cleanPhone} déconnecté.` });
   } catch (error) {
     console.error('Erreur déconnexion:', error);
     res.status(500).json({ success: false, error: error.message });
@@ -866,7 +827,42 @@ app.post('/api/disconnect', async (req, res) => {
 });
 
 /**
- * API: Server-Sent Events (SSE) pour les notifications en temps réel
+ * API: Déconnecter (rétrocompatibilité avec l'ancien bouton)
+ */
+app.post('/api/disconnect', async (req, res) => {
+  try {
+    const { phoneNumber } = req.body || {};
+    let targetPhone = phoneNumber ? String(phoneNumber).replace(/[^0-9]/g, '') : null;
+
+    if (!targetPhone) {
+      const firstPhone = sessions.keys().next().value;
+      targetPhone = firstPhone;
+    }
+
+    if (!targetPhone) {
+      return res.json({ success: true, message: 'Aucun compte actif.' });
+    }
+
+    const session = sessions.get(targetPhone);
+    if (session?.sock) {
+      try { await session.sock.logout(); } catch (_) {}
+      try { session.sock.ev.removeAllListeners(); session.sock.ws?.close(); } catch (_) {}
+    }
+
+    const sDir = path.join(SESSIONS_BASE_DIR, targetPhone);
+    if (fs.existsSync(sDir)) {
+      fs.rmSync(sDir, { recursive: true, force: true });
+    }
+
+    sessions.delete(targetPhone);
+    res.json({ success: true, message: `Compte +${targetPhone} déconnecté.` });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+/**
+ * API: SSE notifications temps réel
  */
 app.get('/api/events', (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
@@ -876,49 +872,56 @@ app.get('/api/events', (req, res) => {
 
   sseClients.add(res);
 
-  // Envoyer l'état actuel immédiatement
-  res.write(`data: ${JSON.stringify({ type: 'status', status: connectionStatus, code: currentPairingCode })}\n\n`);
-
   req.on('close', () => {
     sseClients.delete(res);
   });
 });
 
 /**
- * Démarrage du serveur et du bot
+ * Démarrage du serveur et reconnexion automatique de toutes les sessions enregistrées
  */
 async function startServer() {
   try {
+    // 1. Initialiser la base SQLite
+    db = await initializeDatabase();
+
+    // 2. Migrer l'ancienne session si elle existe
+    migrateLegacySession();
+
+    // 3. Lancer le serveur HTTP
     app.listen(CONFIG.port, () => {
       console.log('\n╔════════════════════════════════════════════════════════════════╗');
-      console.log('║               🤖 WHATSAPP BOT MODÉRATEUR                      ║');
+      console.log('║        🤖 WHATSAPP BOT MODÉRATEUR - MULTI-COMPTES              ║');
       console.log('╠════════════════════════════════════════════════════════════════╣');
       console.log(`║ 🌐 Interface Web : http://localhost:${CONFIG.port}                     ║`);
-      console.log('║ 📱 Ouvrez l\'URL ci-dessus pour lier votre compte WhatsApp      ║');
+      console.log('║ 📱 Gérez plusieurs numéros WhatsApp simultanément               ║');
       console.log('╚════════════════════════════════════════════════════════════════╝\n');
     });
 
-    // NE PAS initialiser le socket au démarrage quand il n'y a pas de credentials
-    // Cela évite un cycle connect/close inutile sur Render (pas de persistance)
-    // Le socket sera créé quand l'utilisateur cliquera "Générer le code"
-    const credsPath = path.join(AUTH_DIR, 'creds.json');
-    if (fs.existsSync(credsPath)) {
-      try {
-        const creds = JSON.parse(fs.readFileSync(credsPath, 'utf-8'));
-        if (creds.registered) {
-          logActivity('Session existante détectée, reconnexion automatique...');
-          await initializeSocket();
-        } else {
-          logActivity('En attente de liaison — cliquez "Générer le code" sur la page web.');
-          updateStatus('disconnected');
+    // 4. Parcourir le dossier sessions/ et reconnecter chaque compte déjà enregistré
+    if (fs.existsSync(SESSIONS_BASE_DIR)) {
+      const dirs = fs.readdirSync(SESSIONS_BASE_DIR, { withFileTypes: true });
+      for (const d of dirs) {
+        if (d.isDirectory()) {
+          const phone = d.name;
+          const credsFile = path.join(SESSIONS_BASE_DIR, phone, 'creds.json');
+          if (fs.existsSync(credsFile)) {
+            try {
+              const creds = JSON.parse(fs.readFileSync(credsFile, 'utf-8'));
+              if (creds.registered) {
+                logActivity(`[+${phone}] Session enregistrée détectée, reconnexion automatique...`);
+                await startSession(phone, { isNewPairing: false });
+              }
+            } catch (err) {
+              logActivity(`[+${phone}] Erreur lecture creds: ${err.message}`, 'warn');
+            }
+          }
         }
-      } catch (_) {
-        logActivity('En attente de liaison — cliquez "Générer le code" sur la page web.');
-        updateStatus('disconnected');
       }
-    } else {
-      logActivity('Aucune session trouvée — cliquez "Générer le code" sur la page web.');
-      updateStatus('disconnected');
+    }
+
+    if (sessions.size === 0) {
+      logActivity('Aucune session active — entrez un numéro sur la page web pour lier un compte.');
     }
   } catch (error) {
     console.error('Erreur critique au démarrage:', error);
@@ -929,7 +932,9 @@ async function startServer() {
 // Arrêt propre
 process.on('SIGINT', () => {
   logActivity('Arrêt du serveur et fermeture des connexions...');
-  try { sock?.ws?.close(); } catch (_) {}
+  for (const session of sessions.values()) {
+    try { session.sock?.ws?.close(); } catch (_) {}
+  }
   process.exit(0);
 });
 
