@@ -561,16 +561,41 @@ async function handleMentionCommand(sock, jid, messageText, groupData, senderId)
     // Séparer les admins des membres normaux
     const admins = [];
     const members = [];
-    const allMentions = [];
+    const allMentions = new Set();
 
     for (const p of currentGroupData.participants) {
-      const cleanJid = normalizeJid(p.id);
-      allMentions.push(cleanJid);
+      // Récupérer le vrai numéro de téléphone du participant
+      // p.jid contient le numéro de téléphone réel (@s.whatsapp.net) même si p.id est un LID
+      let phone = null;
+      let primaryJid = null;
+
+      if (p.jid && p.jid.endsWith('@s.whatsapp.net')) {
+        primaryJid = p.jid;
+        phone = p.jid.split('@')[0].split(':')[0];
+      } else if (p.id && p.id.endsWith('@s.whatsapp.net')) {
+        primaryJid = p.id;
+        phone = p.id.split('@')[0].split(':')[0];
+      } else if (p.phoneNumber && String(p.phoneNumber).endsWith('@s.whatsapp.net')) {
+        primaryJid = p.phoneNumber;
+        phone = p.phoneNumber.split('@')[0].split(':')[0];
+      } else {
+        // Si c'est un identifiant LID
+        primaryJid = p.id || p.lid;
+        phone = (p.id || p.lid || '').split('@')[0].split(':')[0];
+      }
+
+      // Ajouter tous les identifiants possibles au set pour que WhatsApp valide le tag à 100%
+      if (p.id) allMentions.add(p.id);
+      if (p.jid) allMentions.add(p.jid);
+      if (p.lid) allMentions.add(p.lid);
+      if (primaryJid) allMentions.add(primaryJid);
+
+      const tagText = `@${phone}`;
 
       if (p.admin === 'admin' || p.admin === 'superadmin') {
-        admins.push(cleanJid);
+        admins.push(tagText);
       } else {
-        members.push(cleanJid);
+        members.push(tagText);
       }
     }
 
@@ -591,8 +616,8 @@ async function handleMentionCommand(sock, jid, messageText, groupData, senderId)
     // 1. Section المشرفين
     mentionText += `╭───『 👑 الـمـشـرفـيـن (${admins.length}) 』───⊷\n`;
     if (admins.length > 0) {
-      for (const adminJid of admins) {
-        mentionText += `│ ⋄ ${formatMention(adminJid)}\n`;
+      for (const adminTag of admins) {
+        mentionText += `│ ⋄ ${adminTag}\n`;
       }
     } else {
       mentionText += `│ ⋄ لا يوجد مشرفين\n`;
@@ -602,8 +627,8 @@ async function handleMentionCommand(sock, jid, messageText, groupData, senderId)
     // 2. Section الأعضاء
     mentionText += `╭───『 👥 الأعـضـاء (${members.length}) 』───⊷\n`;
     if (members.length > 0) {
-      for (const memberJid of members) {
-        mentionText += `│ ⋄ ${formatMention(memberJid)}\n`;
+      for (const memberTag of members) {
+        mentionText += `│ ⋄ ${memberTag}\n`;
       }
     } else {
       mentionText += `│ ⋄ لا يوجد أعضاء إضافيين\n`;
@@ -615,7 +640,7 @@ async function handleMentionCommand(sock, jid, messageText, groupData, senderId)
 
     await sock.sendMessage(jid, {
       text: mentionText,
-      mentions: allMentions,
+      mentions: Array.from(allMentions).filter(Boolean),
     });
 
     logActivity(`[Mention] Appel général envoyé dans ${jid} (${totalCount} membres mentionnés)`);

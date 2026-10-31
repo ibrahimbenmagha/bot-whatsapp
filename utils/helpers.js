@@ -1,17 +1,18 @@
 /**
- * Normaliser un JID WhatsApp (enlever le suffixe de device :8@s.whatsapp.net)
+ * Normaliser un JID WhatsApp (enlever le suffixe de device :8@s.whatsapp.net tout en préservant le domaine @s.whatsapp.net ou @lid)
  * @param {string} jid 
  * @returns {string}
  */
 export function normalizeJid(jid) {
   if (!jid) return '';
-  const [user] = jid.split('@');
+  const [user, server] = jid.split('@');
   const cleanUser = user.split(':')[0];
-  return `${cleanUser}@s.whatsapp.net`;
+  const targetServer = server ? (server.includes('lid') ? 'lid' : 's.whatsapp.net') : 's.whatsapp.net';
+  return `${cleanUser}@${targetServer}`;
 }
 
 /**
- * Vérifier si un participant est admin du groupe
+ * Vérifier si un participant est admin du groupe (compatible PN JID et LID)
  * @param {string} participantId - ID du participant
  * @param {Object} groupData - Données du groupe (contient le tableau participants)
  * @returns {boolean}
@@ -22,10 +23,15 @@ export function isAdmin(participantId, groupData) {
       return false;
     }
 
-    const cleanTarget = normalizeJid(participantId);
-    const participant = groupData.participants.find(
-      (p) => normalizeJid(p.id) === cleanTarget
-    );
+    const targetUser = participantId ? participantId.split('@')[0].split(':')[0] : '';
+    if (!targetUser) return false;
+
+    const participant = groupData.participants.find((p) => {
+      const idUser = (p.id || '').split('@')[0].split(':')[0];
+      const jidUser = (p.jid || '').split('@')[0].split(':')[0];
+      const lidUser = (p.lid || '').split('@')[0].split(':')[0];
+      return idUser === targetUser || jidUser === targetUser || lidUser === targetUser;
+    });
 
     return participant ? participant.admin === 'admin' || participant.admin === 'superadmin' : false;
   } catch (error) {
