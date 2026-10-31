@@ -258,20 +258,20 @@ async function handleNewMessages(m) {
       const isCmd = (name) => lowerText === `!${name}` || lowerText === `.${name}` || lowerText === `/${name}`;
       const startsWithCmd = (name) => lowerText.startsWith(`!${name}`) || lowerText.startsWith(`.${name}`) || lowerText.startsWith(`/${name}`);
 
-      // Commande !help / !aide / .menu / !menu
-      if (isCmd('help') || isCmd('aide') || isCmd('menu')) {
-        await handleHelpCommand(jid, senderIsAdmin);
+      // Commande !help / !aide / .menu / !menu / .اوامر
+      if (isCmd('help') || isCmd('aide') || isCmd('menu') || isCmd('اوامر') || isCmd('الاوامر')) {
+        await handleHelpCommand(jid, senderIsAdmin, senderId);
         continue;
       }
 
-      // Commande !regles / !rules / .regles / .rules
-      if (isCmd('regles') || isCmd('rules')) {
+      // Commande !regles / !rules / .regles / .rules / .قوانين
+      if (isCmd('regles') || isCmd('rules') || isCmd('قوانين') || isCmd('القوانين')) {
         await handleRulesCommand(jid);
         continue;
       }
 
-      // Commande !warnings / !warns / .warnings / .warns
-      if (startsWithCmd('warnings') || startsWithCmd('warns')) {
+      // Commande !warnings / !warns / .warnings / .warns / .انذارات
+      if (startsWithCmd('warnings') || startsWithCmd('warns') || startsWithCmd('انذارات') || startsWithCmd('انذاراتي')) {
         if (!isGroup) {
           await sock.sendMessage(jid, { text: 'ℹ️ Cette commande fonctionne uniquement dans un groupe.' });
           continue;
@@ -280,8 +280,8 @@ async function handleNewMessages(m) {
         continue;
       }
 
-      // Commande !warn / .warn (Admins uniquement)
-      if (startsWithCmd('warn ') && senderIsAdmin) {
+      // Commande !warn / .warn / .انذار (Admins uniquement)
+      if ((startsWithCmd('warn ') || startsWithCmd('انذار ')) && senderIsAdmin) {
         if (!isGroup) {
           await sock.sendMessage(jid, { text: 'ℹ️ Cette commande fonctionne uniquement dans un groupe.' });
           continue;
@@ -290,8 +290,8 @@ async function handleNewMessages(m) {
         continue;
       }
 
-      // Commande !resetwarn / .resetwarn (Admins uniquement)
-      if (startsWithCmd('resetwarn') && senderIsAdmin) {
+      // Commande !resetwarn / .resetwarn / .تصفير (Admins uniquement)
+      if ((startsWithCmd('resetwarn') || startsWithCmd('تصفير')) && senderIsAdmin) {
         if (!isGroup) {
           await sock.sendMessage(jid, { text: 'ℹ️ Cette commande fonctionne uniquement dans un groupe.' });
           continue;
@@ -300,8 +300,8 @@ async function handleNewMessages(m) {
         continue;
       }
 
-      // Commande !kick / .kick (Admins uniquement)
-      if (startsWithCmd('kick') && senderIsAdmin) {
+      // Commande !kick / .kick / .طرد (Admins uniquement)
+      if ((startsWithCmd('kick') || startsWithCmd('طرد')) && senderIsAdmin) {
         if (!isGroup) {
           await sock.sendMessage(jid, { text: 'ℹ️ Cette commande fonctionne uniquement dans un groupe.' });
           continue;
@@ -396,29 +396,42 @@ async function handleWarnCommand(jid, messageText, groupData) {
 }
 
 /**
- * Commande !help / !aide
+ * Commande !help / !aide / .menu
  */
-async function handleHelpCommand(jid, isAdminUser) {
+async function handleHelpCommand(jid, isAdminUser, senderId = null) {
   try {
-    let helpText = `🤖 *BOT DE MODÉRATION - COMMANDES*\n\n`;
-    helpText += `📌 *Commandes Membres :*\n`;
-    helpText += `• *.menu* ou *!help* : Afficher ce menu\n`;
-    helpText += `• *.regles* ou *!regles* : Consulter les règles du groupe\n`;
-    helpText += `• *.warnings* ou *!warnings* : Voir vos avertissements actuels\n\n`;
+    let helpText = `مرحبا بك في البوت الرسمي ل امبراطورية باراديس \n`;
+    helpText += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🌿 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n\n`;
+
+    helpText += `╭───『 📜 أوامـر الأعـضـاء 』───⊷\n`;
+    helpText += `│ ⋄ *.menu* ⇠ عـرض قـائـمـة الأوامـر\n`;
+    helpText += `│ ⋄ *.regles* ⇠ قـوانـيـن الإمـبـراطـوريـة\n`;
+    helpText += `│ ⋄ *.warnings* ⇠ فـحـص إنـذاراتـك\n`;
+    helpText += `╰─────────────────────⊷\n\n`;
 
     if (isAdminUser) {
-      helpText += `👑 *Commandes Administrateur :*\n`;
-      helpText += `• *.warn @membre* : Ajouter un avertissement (+ kick à ${CONFIG.maxWarnings})\n`;
-      helpText += `• *.warnings @membre* : Voir les avertissements d'un membre\n`;
-      helpText += `• *.resetwarn @membre* : Remettre à zéro les avertissements\n`;
-      helpText += `• *.kick @membre* : Expulser immédiatement un membre\n\n`;
+      helpText += `╭───『 ⚔️ أوامـر الـمـشـرفـيـن 』───⊷\n`;
+      helpText += `│ ⋄ *.warn @عضو* ⇠ إعـطـاء إنـذار (${CONFIG.maxWarnings} = طرد)\n`;
+      helpText += `│ ⋄ *.warnings @عضو* ⇠ فـحـص إنـذارات عـضـو\n`;
+      helpText += `│ ⋄ *.resetwarn @عضو* ⇠ تـصـفـيـر إنـذارات عـضـو\n`;
+      helpText += `│ ⋄ *.kick @عضو* ⇠ طـرد عـضـو مـن الـمـجـمـوعـة\n`;
+      helpText += `╰─────────────────────⊷\n\n`;
     }
 
-    helpText += `🛡️ *Protections automatiques :*\n`;
-    helpText += `• *Anti-Lien* : Liens supprimés automatiquement (${CONFIG.maxWarnings} avertissements = exclusion)\n`;
-    helpText += `• *Anti-Contact* : Partage de contact interdit (exclusion immédiate)`;
+    helpText += `╭───『 🛡️ أنـظـمـة الـحـمـايـة 』───⊷\n`;
+    helpText += `│ ⋄ 🚫 *مـنـع الـروابـط* : حـذف فـوري + إنـذار\n`;
+    helpText += `│ ⋄ 📵 *مـنـع جـهـات الاتـصـال* : طـرد فـوري ومـبـاشـر\n`;
+    helpText += `╰─────────────────────⊷\n\n`;
 
-    await sock.sendMessage(jid, { text: helpText });
+    helpText += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚔️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+    helpText += `       🏰 *PARADIS EMPIRE* 🏰`;
+
+    const options = { text: helpText };
+    if (senderId) {
+      options.mentions = [senderId];
+    }
+
+    await sock.sendMessage(jid, options);
     logActivity(`Menu d'aide envoyé avec succès.`);
   } catch (err) {
     console.error('Erreur !help:', err);
@@ -427,16 +440,22 @@ async function handleHelpCommand(jid, isAdminUser) {
 }
 
 /**
- * Commande !regles / !rules
+ * Commande !regles / !rules / .regles
  */
 async function handleRulesCommand(jid) {
   try {
-    let rulesText = `📜 *RÈGLES OFFICIELLES DU GROUPE*\n\n`;
-    rulesText += `1️⃣ *Aucun lien externe* : Les liens sont strictement interdits et supprimés automatiquement.\n`;
-    rulesText += `2️⃣ *Aucun partage de contact* : Partager une fiche contact entraîne une expulsion immédiate.\n`;
-    rulesText += `3️⃣ *Système d'avertissements* : Vous avez droit à ${CONFIG.maxWarnings} avertissements maximum avant expulsion définitive.\n`;
-    rulesText += `4️⃣ *Respect et courtoisie* : Restez poli et courtois envers tous les membres.\n\n`;
-    rulesText += `_Modération automatique active 24/7 par le bot._`;
+    let rulesText = `📜 *قـوانـيـن إمـبـراطـوريـة بـاراديـس* 📜\n`;
+    rulesText += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚔️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n\n`;
+    rulesText += `1️⃣ *مـمـنـوع نـشـر الـروابـط* 🚫\n`;
+    rulesText += `أي رابـط خـارجـي يُـحـذف فـوراً مـع إنـذار.\n\n`;
+    rulesText += `2️⃣ *مـمـنـوع جـهـات الاتـصـال* 📵\n`;
+    rulesText += `مـشـاركـة بـطـاقـات الاتـصـال تـعـرضـك لـلـطـرد الـمـبـاشـر.\n\n`;
+    rulesText += `3️⃣ *نـظـام الإنـذارات* ⚠️\n`;
+    rulesText += `الـحـد الأقـصـى ${CONFIG.maxWarnings} إنـذارات، بـعـدهـا يـتـم الـطـرد تـلـقـائـيـاً.\n\n`;
+    rulesText += `4️⃣ *الاحـتـرام والـتـقـديـر* 🤝\n`;
+    rulesText += `يُـمـنـع الـسـب أو الـشـتـم، الـمـعـامـلـة بـاحـتـرام واجـبـة.\n\n`;
+    rulesText += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🌿 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+    rulesText += `_نـظـام الـحـمـايـة شـغـال 24/7_`;
 
     await sock.sendMessage(jid, { text: rulesText });
   } catch (err) {
