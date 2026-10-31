@@ -382,6 +382,24 @@ async function handleSessionMessages(botPhone, m) {
         continue;
       }
 
+      // Commande .mention / .منشن / .tagall
+      if (isCmd('mention') || isCmd('منشن') || isCmd('tagall') || isCmd('الكل') ||
+          startsWithCmd('mention') || startsWithCmd('منشن') || startsWithCmd('tagall') || startsWithCmd('الكل')) {
+        if (!isGroup) {
+          await sock.sendMessage(jid, { text: 'ℹ️ هذه العملية تعمل فقط داخل المجموعات.' });
+          continue;
+        }
+        if (!senderIsAdmin) {
+          await sock.sendMessage(jid, { 
+            text: '⚠️ *عـذراً!* أمـر الـمـنـشـن الـجـمـاعـي مـخـصـص لـمـشـرفـي الـمـجـمـوعـة فـقـط 🛡️',
+            mentions: [senderId]
+          });
+          continue;
+        }
+        await handleMentionCommand(sock, jid, messageText, groupData, senderId);
+        continue;
+      }
+
       // Commande .menu
       if (isCmd('help') || isCmd('aide') || isCmd('menu') || isCmd('اوامر') || isCmd('الاوامر')) {
         await handleHelpCommand(sock, jid, senderIsAdmin, senderId, session);
@@ -515,6 +533,98 @@ async function handleWarnCommand(sock, jid, messageText, groupData) {
   }
 }
 
+/**
+ * Commande .mention / .منشن / .tagall
+ * Mentionne tous les membres 1 par 1 en séparant les admins des membres normaux
+ */
+async function handleMentionCommand(sock, jid, messageText, groupData, senderId) {
+  try {
+    let currentGroupData = groupData;
+    if (!currentGroupData || !currentGroupData.participants || currentGroupData.participants.length === 0) {
+      try {
+        currentGroupData = await sock.groupMetadata(jid);
+      } catch (err) {
+        logActivity(`Erreur groupMetadata pour mention: ${err.message}`, 'warn');
+      }
+    }
+
+    if (!currentGroupData || !currentGroupData.participants || currentGroupData.participants.length === 0) {
+      await sock.sendMessage(jid, { text: '❌ تعذر جلب قائمة أعضاء المجموعة، يرجى المحاولة لاحقاً.' });
+      return;
+    }
+
+    // Extraire le message personnalisé éventuel après la commande (.mention réunion à 20h)
+    const words = messageText.trim().split(/\s+/);
+    words.shift();
+    const customMessage = words.join(' ').trim();
+
+    // Séparer les admins des membres normaux
+    const admins = [];
+    const members = [];
+    const allMentions = [];
+
+    for (const p of currentGroupData.participants) {
+      const cleanJid = normalizeJid(p.id);
+      allMentions.push(cleanJid);
+
+      if (p.admin === 'admin' || p.admin === 'superadmin') {
+        admins.push(cleanJid);
+      } else {
+        members.push(cleanJid);
+      }
+    }
+
+    const totalCount = currentGroupData.participants.length;
+    const groupSubject = currentGroupData.subject || 'المجموعة';
+
+    let mentionText = `⎔⋅• ━ ╼━ ╼╃ ⌬〔 📢 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+    mentionText += `       🏰 *إمـبـراطـوريـة بـاراديـس* 🏰\n`;
+    mentionText += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 📢 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n\n`;
+
+    mentionText += `🏰 *المجموعة* : ${groupSubject}\n`;
+    mentionText += `👥 *العدد الإجمالي* : ${totalCount} عضو\n`;
+    if (customMessage) {
+      mentionText += `💬 *الرسالة* : ${customMessage}\n`;
+    }
+    mentionText += `\n`;
+
+    // 1. Section المشرفين
+    mentionText += `╭───『 👑 الـمـشـرفـيـن (${admins.length}) 』───⊷\n`;
+    if (admins.length > 0) {
+      for (const adminJid of admins) {
+        mentionText += `│ ⋄ ${formatMention(adminJid)}\n`;
+      }
+    } else {
+      mentionText += `│ ⋄ لا يوجد مشرفين\n`;
+    }
+    mentionText += `╰─────────────────────⊷\n\n`;
+
+    // 2. Section الأعضاء
+    mentionText += `╭───『 👥 الأعـضـاء (${members.length}) 』───⊷\n`;
+    if (members.length > 0) {
+      for (const memberJid of members) {
+        mentionText += `│ ⋄ ${formatMention(memberJid)}\n`;
+      }
+    } else {
+      mentionText += `│ ⋄ لا يوجد أعضاء إضافيين\n`;
+    }
+    mentionText += `╰─────────────────────⊷\n\n`;
+
+    mentionText += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚔️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+    mentionText += `       🏰 *PARADIS EMPIRE* 🏰`;
+
+    await sock.sendMessage(jid, {
+      text: mentionText,
+      mentions: allMentions,
+    });
+
+    logActivity(`[Mention] Appel général envoyé dans ${jid} (${totalCount} membres mentionnés)`);
+  } catch (err) {
+    console.error('Erreur handleMentionCommand:', err);
+    logActivity(`Erreur mention: ${err.message}`, 'warn');
+  }
+}
+
 async function handleHelpCommand(sock, jid, isAdminUser, senderId = null, session = null) {
   try {
     const userPhone = session?.user?.phone || (session?.phone ? `+${session.phone}` : '');
@@ -534,6 +644,7 @@ async function handleHelpCommand(sock, jid, isAdminUser, senderId = null, sessio
 
     if (isAdminUser) {
       helpText += `╭───『 ⚔️ أوامـر الـمـشـرفـيـن 』───⊷\n`;
+      helpText += `│ ⋄ *.mention* ⇠ نـداء ومـنـشـن شـامـل لـكـافـة الأعـضـاء\n`;
       helpText += `│ ⋄ *.warn @عضو* ⇠ إعـطـاء إنـذار (${CONFIG.maxWarnings} = طرد)\n`;
       helpText += `│ ⋄ *.warnings @عضو* ⇠ فـحـص إنـذارات عـضـو\n`;
       helpText += `│ ⋄ *.resetwarn @عضو* ⇠ تـصـفـيـر إنـذارات عـضـو\n`;
