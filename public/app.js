@@ -1,13 +1,12 @@
-// WhatsApp Bot Web Linker - Frontend Client Multi-Comptes
+// WhatsApp Bot Web Linker - Frontend Client
 
 const UI = {
   // Cards
   cardPairing: document.getElementById('cardPairing'),
   cardCode: document.getElementById('cardCode'),
 
-  // Header & Nav
-  headerAccountsText: document.getElementById('headerAccountsText'),
-  navAccountsCount: document.getElementById('navAccountsCount'),
+  // Header
+  headerAccountsCount: document.getElementById('headerAccountsCount'),
 
   // Success Notice
   connectionSuccessNotice: document.getElementById('connectionSuccessNotice'),
@@ -28,13 +27,12 @@ const UI = {
   copyBtnText: document.getElementById('copyBtnText'),
   btnCancelPairing: document.getElementById('btnCancelPairing'),
 
-  // Logs
-  activityLogs: document.getElementById('activityLogs'),
   toast: document.getElementById('toast'),
 };
 
 let currentPhonePending = null;
 let rawPairingCode = '';
+let pollTimer = null;
 
 // --- Navigation between views ---
 function showView(viewName) {
@@ -54,7 +52,7 @@ function showToast(message) {
   UI.toast.hidden = false;
   setTimeout(() => {
     UI.toast.hidden = true;
-  }, 3000);
+  }, 4000);
 }
 
 // --- Alerts ---
@@ -76,30 +74,56 @@ function formatPairingCode(code) {
   return code;
 }
 
-// --- Add log entry ---
-function addLogEntry(text, type = 'info') {
-  if (!UI.activityLogs) return;
-  const entry = document.createElement('div');
-  entry.className = `log-entry ${type === 'system' ? 'log-system' : type === 'warn' ? 'log-warn' : ''}`;
-  const now = new Date().toLocaleTimeString();
-  entry.textContent = `[${now}] ${text}`;
-  UI.activityLogs.appendChild(entry);
-  UI.activityLogs.scrollTop = UI.activityLogs.scrollHeight;
-}
-
-// --- Mettre à jour les compteurs de comptes connectés ---
+// --- Mise à jour du compteur de comptes connectés ---
 async function updateAccountsCount() {
   try {
     const res = await fetch('/api/accounts');
     const data = await res.json();
     if (data.success) {
-      const connected = (data.accounts || []).filter(a => a.status === 'connected');
-      if (UI.navAccountsCount) UI.navAccountsCount.textContent = connected.length;
-      if (UI.headerAccountsText) {
-        UI.headerAccountsText.textContent = `${connected.length} Compte(s) Connecté(s)`;
+      const accounts = data.accounts || [];
+      const connected = accounts.filter(a => a.status === 'connected');
+      if (UI.headerAccountsCount) {
+        UI.headerAccountsCount.textContent = connected.length;
+      }
+
+      // Si un numéro était en cours d'appairage et est maintenant connecté
+      if (currentPhonePending) {
+        const isNowConnected = accounts.some(
+          a => a.phone.includes(currentPhonePending) && a.status === 'connected'
+        );
+
+        if (isNowConnected) {
+          onPhoneConnectedSuccess(currentPhonePending);
+        }
       }
     }
   } catch (_) {}
+}
+
+// --- Quand un numéro s'est connecté avec succès ---
+function onPhoneConnectedSuccess(phone) {
+  if (pollTimer) {
+    clearInterval(pollTimer);
+    pollTimer = null;
+  }
+
+  showToast(`🎉 Le numéro +${phone} a été connecté avec succès !`);
+
+  if (UI.connectionSuccessNotice) {
+    UI.connectionSuccessNotice.hidden = false;
+    UI.successPhone.textContent = `+${phone}`;
+  }
+
+  // Réinitialiser le formulaire pour pouvoir entrer directement le numéro suivant
+  currentPhonePending = null;
+  rawPairingCode = '';
+  if (UI.phoneNumber) {
+    UI.phoneNumber.value = '';
+    UI.phoneNumber.focus();
+  }
+
+  // Retour automatique vers la page du formulaire
+  showView('pairing');
 }
 
 // --- Gestion de la soumission du formulaire ---
@@ -138,9 +162,14 @@ if (UI.pairForm) {
       rawPairingCode = data.code;
       UI.codeDisplay.textContent = formatPairingCode(data.code);
       showView('code');
-      showToast('Code généré avec succès !');
+      showToast('Code généré avec succès ! Saisissez-le sur WhatsApp.');
+
+      // Lancer la vérification active toutes les 2 secondes
+      if (pollTimer) clearInterval(pollTimer);
+      pollTimer = setInterval(updateAccountsCount, 2000);
     } catch (err) {
       showAlert(err.message || 'Erreur inconnue.');
+      currentPhonePending = null;
     } finally {
       UI.btnGenerate.disabled = false;
       UI.btnLabel.textContent = 'Générer le code de liaison';
@@ -169,6 +198,8 @@ if (UI.btnCopyCode) {
 // --- Bouton Annuler le pairing ---
 if (UI.btnCancelPairing) {
   UI.btnCancelPairing.addEventListener('click', () => {
+    if (pollTimer) clearInterval(pollTimer);
+    pollTimer = null;
     currentPhonePending = null;
     rawPairingCode = '';
     showView('pairing');
@@ -183,24 +214,11 @@ if (window.EventSource) {
     try {
       const data = JSON.parse(event.data);
 
-      if (data.type === 'log') {
-        addLogEntry(data.message, data.logType);
-      }
-
       if (data.type === 'session_update') {
         updateAccountsCount();
 
-        // Si le compte actuellement en cours de saisie vient de se connecter
-        if (data.status === 'connected' && currentPhonePending && data.phone.includes(currentPhonePending)) {
-          showToast(`🎉 Le compte +${currentPhonePending} est maintenant connecté !`);
-          if (UI.connectionSuccessNotice) {
-            UI.connectionSuccessNotice.hidden = false;
-            UI.successPhone.textContent = `+${currentPhonePending}`;
-          }
-          currentPhonePending = null;
-          rawPairingCode = '';
-          UI.phoneNumber.value = '';
-          showView('pairing');
+        if (data.status === 'connected' && currentPhonePending && data.phone && data.phone.includes(currentPhonePending)) {
+          onPhoneConnectedSuccess(currentPhonePending);
         }
       }
 
@@ -213,4 +231,4 @@ if (window.EventSource) {
 
 // Initialisation
 updateAccountsCount();
-setInterval(updateAccountsCount, 8000);
+setInterval(updateAccountsCount, 10000);

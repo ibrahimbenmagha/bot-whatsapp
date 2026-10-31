@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>WhatsApp Bot - Lier un Compte</title>
+  <title>Lier un Compte WhatsApp - Bot Modérateur</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@600;700&display=swap" rel="stylesheet">
@@ -27,61 +27,50 @@
           </svg>
         </div>
         <div class="brand-text">
-          <h1>WhatsApp Bot Linker</h1>
-          <p class="brand-tagline">Connexion sécurisée par code de jumelage</p>
+          <h1>Lier un WhatsApp</h1>
+          <p class="brand-tagline">Générateur de code de jumelage</p>
         </div>
       </div>
 
       <div class="header-status">
-        <a href="comptes.html" class="status-badge status-connected" style="text-decoration:none;">
-          <span class="status-dot"></span>
-          <span id="headerAccountsText">Comptes connectés</span>
+        <a href="comptes.html" class="btn btn-sm btn-secondary" style="text-decoration:none; display:inline-flex; align-items:center; gap:8px;">
+          <span>📱 Voir les comptes connectés</span>
+          <span id="headerAccountsCount" class="nav-badge" style="background:#25d366; color:#061e12;">0</span>
         </a>
       </div>
     </header>
 
-    <!-- Navigation Tabs -->
-    <nav class="app-nav">
-      <a href="index.html" class="nav-link active">
-        <span>⚡ Lier un compte</span>
-      </a>
-      <a href="comptes.html" class="nav-link">
-        <span>📱 Comptes connectés</span>
-        <span id="navAccountsCount" class="nav-badge">0</span>
-      </a>
-    </nav>
-
     <!-- Main Content -->
     <main class="main-content">
 
-      <!-- Notification de succès de connexion récente -->
-      <div id="connectionSuccessNotice" class="account-banner" style="border-color: rgba(37, 211, 102, 0.4); background: rgba(37, 211, 102, 0.1);" hidden>
+      <!-- Notification de succès après connexion -->
+      <div id="connectionSuccessNotice" class="account-banner" style="border-color: rgba(37, 211, 102, 0.5); background: rgba(37, 211, 102, 0.12); margin-bottom: 20px;" hidden>
         <div class="account-banner-content">
           <span class="account-banner-icon">🎉</span>
           <div class="account-banner-info">
-            <span class="account-banner-label" style="color: #4ade80; font-weight:700;">Connexion réussie !</span>
+            <span class="account-banner-label" style="color: #4ade80; font-weight:700;">Compte WhatsApp connecté avec succès !</span>
             <strong id="successPhone" class="account-banner-phone">+212 --- ---</strong>
-            <span class="account-banner-status">Le compte est connecté et actif 24/7. Vous pouvez lier un autre compte ci-dessous.</span>
+            <span class="account-banner-status">Le bot est désormais actif sur ce numéro. Vous pouvez entrer un autre numéro ci-dessous.</span>
           </div>
         </div>
-        <a href="comptes.html" class="btn btn-sm btn-primary" style="text-decoration:none;">
-          Voir tous les comptes
+        <a href="comptes.html" class="btn btn-sm btn-primary" style="text-decoration:none; white-space:nowrap;">
+          Voir la liste ➔
         </a>
       </div>
 
       <!-- Card: Formulaire / Pairing -->
       <section id="cardPairing" class="card active">
         <div class="card-header">
-          <div class="badge-step">Étape 1</div>
-          <h2>Lier un compte WhatsApp</h2>
-          <p class="card-desc">Entrez le numéro de votre compte WhatsApp pour générer un code d'association à 8 caractères. Vous pouvez connecter plusieurs numéros indépendamment.</p>
+          <div class="badge-step">Connexion</div>
+          <h2>Entrer le numéro de téléphone</h2>
+          <p class="card-desc">Saisissez n'importe quel numéro WhatsApp pour générer son code d'association à 8 caractères.</p>
         </div>
 
         <form id="pairForm" class="pair-form">
           <div class="input-group">
             <label for="phoneNumber">
               <span>Numéro WhatsApp (avec indicatif pays)</span>
-              <span class="label-help">Ex: 33612345678 (France) ou 212612345678 (Maroc)</span>
+              <span class="label-help">Ex: 212612345678 (Maroc) ou 33612345678 (France)</span>
             </label>
             <div class="input-wrapper">
               <span class="input-prefix">+</span>
@@ -89,10 +78,11 @@
                 type="tel" 
                 id="phoneNumber" 
                 name="phoneNumber" 
-                placeholder="212775395922" 
+                placeholder="212717716959" 
                 required 
                 autocomplete="tel"
                 pattern="[0-9]{8,15}"
+                autofocus
               >
             </div>
           </div>
@@ -114,12 +104,12 @@
       <section id="cardCode" class="card">
         <div class="card-header">
           <div class="badge-step badge-pulsing">Étape 2</div>
-          <h2>Code de liaison WhatsApp</h2>
-          <p class="card-desc">Saisissez ce code dans WhatsApp sur votre téléphone mobile.</p>
+          <h2>Votre code de liaison</h2>
+          <p class="card-desc">Entrez ce code dans WhatsApp sur votre téléphone mobile.</p>
         </div>
 
         <div class="code-display-container">
-          <div class="code-label">VOTRE CODE DE JUMELAGE</div>
+          <div class="code-label">CODE D'ASSOCIATION WHATSAPP</div>
           <div class="code-display" id="codeDisplay">---- ----</div>
           
           <button type="button" id="btnCopyCode" class="btn btn-copy" title="Copier le code">
@@ -132,53 +122,25 @@
         </div>
 
         <div class="instructions-container">
-          <h3>📱 Comment valider sur votre téléphone :</h3>
+          <h3>📱 Instructions sur votre téléphone :</h3>
           <ol class="instructions-list">
-            <li>
-              <span class="step-num">1</span>
-              <span>Ouvrez <strong>WhatsApp</strong> sur votre smartphone</span>
-            </li>
-            <li>
-              <span class="step-num">2</span>
-              <span>Allez dans <strong>Paramètres</strong> (ou <strong>⋮</strong>) → <strong>Appareils connectés</strong></span>
-            </li>
-            <li>
-              <span class="step-num">3</span>
-              <span>Appuyez sur <strong>Lier un appareil</strong></span>
-            </li>
-            <li>
-              <span class="step-num">4</span>
-              <span>En bas de l'écran, cliquez sur <strong>"Lier avec le numéro de téléphone"</strong></span>
-            </li>
-            <li>
-              <span class="step-num">5</span>
-              <span>Saisissez le code de 8 caractères affiché ci-dessus</span>
-            </li>
+            <li><span>1. Ouvrez <strong>WhatsApp</strong></span></li>
+            <li><span>2. Allez dans <strong>Paramètres</strong> ➜ <strong>Appareils connectés</strong></span></li>
+            <li><span>3. Appuyez sur <strong>Lier un appareil</strong></span></li>
+            <li><span>4. Cliquez en bas sur <strong>"Lier avec le numéro de téléphone"</strong></span></li>
+            <li><span>5. Tapez le code de 8 caractères ci-dessus</span></li>
           </ol>
         </div>
 
         <div class="waiting-notice">
           <div class="radar-spinner"></div>
-          <span>En attente de la validation sur WhatsApp...</span>
+          <span>En attente de votre saisie sur WhatsApp... Dès validation, la page retournera au formulaire.</span>
         </div>
 
         <div class="card-actions">
           <button type="button" id="btnCancelPairing" class="btn btn-secondary">
-            Annuler / Changer de numéro
+            Annuler / Retourner au champ
           </button>
-        </div>
-      </section>
-
-      <!-- Terminal d'activité en direct -->
-      <section class="card active" style="margin-top: 16px;">
-        <div class="live-activity-section">
-          <div class="section-title">
-            <span>⚡ Activité du serveur en direct</span>
-            <span class="pulse-indicator"></span>
-          </div>
-          <div class="activity-terminal" id="activityLogs">
-            <div class="log-entry log-system">[SYSTÈME] Prêt pour la liaison multi-comptes...</div>
-          </div>
         </div>
       </section>
 
@@ -186,7 +148,7 @@
 
     <!-- Footer -->
     <footer class="app-footer">
-      <p>Bot WhatsApp Baileys • Multi-Comptes • Stockage SQLite • <span style="color:#10b981;font-weight:600;">v3.0 Multi-Sessions</span></p>
+      <p>Bot WhatsApp Baileys • Multi-Comptes • <a href="comptes.html" style="color:#25d366; text-decoration:none; font-weight:600;">Ouvrir la page des comptes ➔</a></p>
     </footer>
   </div>
 

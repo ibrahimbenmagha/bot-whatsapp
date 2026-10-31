@@ -27,36 +27,25 @@
           </svg>
         </div>
         <div class="brand-text">
-          <h1>WhatsApp Bot Linker</h1>
-          <p class="brand-tagline">Gestionnaire Multi-Comptes WhatsApp</p>
+          <h1>Comptes Connectés</h1>
+          <p class="brand-tagline">Tableau de bord des bots actifs</p>
         </div>
       </div>
 
       <div class="header-status">
-        <a href="index.html" class="btn btn-sm btn-primary">
-          <span>➕ Lier un nouveau numéro</span>
+        <a href="index.html" class="btn btn-sm btn-primary" style="text-decoration:none;">
+          <span>➕ Lier un autre numéro</span>
         </a>
       </div>
     </header>
-
-    <!-- Navigation Tabs -->
-    <nav class="app-nav">
-      <a href="index.html" class="nav-link">
-        <span>⚡ Lier un compte</span>
-      </a>
-      <a href="comptes.html" class="nav-link active">
-        <span>📱 Comptes connectés</span>
-        <span id="navAccountsCount" class="nav-badge">0</span>
-      </a>
-    </nav>
 
     <!-- Main Content -->
     <main class="main-content">
       <section class="card active">
         <div class="card-header">
           <div class="badge-step">Dashboard</div>
-          <h2>Numéros WhatsApp Connectés</h2>
-          <p class="card-desc">Liste de tous les comptes WhatsApp actuellement actifs sur votre serveur. Chaque compte modère ses propres groupes indépendamment.</p>
+          <h2>Liste des numéros WhatsApp actifs</h2>
+          <p class="card-desc">Chaque compte ci-dessous exécute le bot en temps réel et applique les règles de modération.</p>
         </div>
 
         <!-- Liste des comptes -->
@@ -71,13 +60,13 @@
             <span class="pulse-indicator"></span>
           </div>
           <div class="activity-terminal" id="activityLogs">
-            <div class="log-entry log-system">[SYSTÈME] Écoute des logs multi-comptes en cours...</div>
+            <div class="log-entry log-system">[SYSTÈME] Tableau de bord connecté au serveur...</div>
           </div>
         </div>
 
         <div class="card-actions" style="margin-top: 20px;">
           <a href="index.html" class="btn btn-primary" style="text-decoration:none; justify-content:center;">
-            <span>➕ Lier un autre compte WhatsApp</span>
+            <span>➕ Lier un nouveau numéro WhatsApp</span>
           </a>
         </div>
       </section>
@@ -85,7 +74,7 @@
 
     <!-- Footer -->
     <footer class="app-footer">
-      <p>Bot WhatsApp Baileys • Multi-Comptes • Stockage SQLite • <span style="color:#10b981;font-weight:600;">v3.0 Multi-Sessions</span></p>
+      <p>Bot WhatsApp Baileys • Multi-Comptes • Stockage SQLite • <a href="index.html" style="color:#25d366; text-decoration:none; font-weight:600;">Ajouter un numéro ➔</a></p>
     </footer>
   </div>
 
