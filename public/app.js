@@ -1,15 +1,20 @@
 // WhatsApp Bot Web Linker - Frontend Client
 
 const UI = {
+  // Tabs
+  tabCode: document.getElementById('tabCode'),
+  tabQr: document.getElementById('tabQr'),
+
   // Cards
   cardPairing: document.getElementById('cardPairing'),
   cardCode: document.getElementById('cardCode'),
+  cardQr: document.getElementById('cardQr'),
 
   // Success Notice
   connectionSuccessNotice: document.getElementById('connectionSuccessNotice'),
   successPhone: document.getElementById('successPhone'),
 
-  // Form & inputs
+  // Form & inputs (Code de jumelage)
   pairForm: document.getElementById('pairForm'),
   phoneNumber: document.getElementById('phoneNumber'),
   btnGenerate: document.getElementById('btnGenerate'),
@@ -24,21 +29,43 @@ const UI = {
   copyBtnText: document.getElementById('copyBtnText'),
   btnCancelPairing: document.getElementById('btnCancelPairing'),
 
+  // QR Code Card
+  qrLoading: document.getElementById('qrLoading'),
+  qrImageWrapper: document.getElementById('qrImageWrapper'),
+  qrImage: document.getElementById('qrImage'),
+  qrErrorBox: document.getElementById('qrErrorBox'),
+  qrErrorMsg: document.getElementById('qrErrorMsg'),
+  btnRefreshQr: document.getElementById('btnRefreshQr'),
+
   toast: document.getElementById('toast'),
 };
 
 let currentPhonePending = null;
 let rawPairingCode = '';
 let pollTimer = null;
+let activeQrSessionId = null;
+let qrPollTimer = null;
 
 // --- Navigation between views ---
 function showView(viewName) {
   if (viewName === 'pairing') {
     UI.cardPairing.classList.add('active');
     UI.cardCode.classList.remove('active');
+    UI.cardQr?.classList.remove('active');
+    UI.tabCode?.classList.add('active');
+    UI.tabQr?.classList.remove('active');
   } else if (viewName === 'code') {
     UI.cardPairing.classList.remove('active');
     UI.cardCode.classList.add('active');
+    UI.cardQr?.classList.remove('active');
+    UI.tabCode?.classList.add('active');
+    UI.tabQr?.classList.remove('active');
+  } else if (viewName === 'qr') {
+    UI.cardPairing.classList.remove('active');
+    UI.cardCode.classList.remove('active');
+    UI.cardQr?.classList.add('active');
+    UI.tabCode?.classList.remove('active');
+    UI.tabQr?.classList.add('active');
   }
 }
 
@@ -52,13 +79,23 @@ function showToast(message) {
   }, 4000);
 }
 
-// --- Alerts ---
+// --- Alerts (Pairing Form) ---
 function showAlert(message) {
   UI.alertMsg.textContent = message;
   UI.alertBox.hidden = false;
 }
 function hideAlert() {
   UI.alertBox.hidden = true;
+}
+
+// --- Alerts (QR Code) ---
+function showQrError(message) {
+  if (!UI.qrErrorBox) return;
+  UI.qrErrorMsg.textContent = message;
+  UI.qrErrorBox.hidden = false;
+}
+function hideQrError() {
+  if (UI.qrErrorBox) UI.qrErrorBox.hidden = true;
 }
 
 // --- Format Code Display ---
@@ -91,33 +128,136 @@ async function checkPendingAccountStatus() {
   } catch (_) {}
 }
 
-// --- Quand un numéro s'est connecté avec succès ---
+// --- Quand un numéro s'est connecté avec succès (Pairing ou QR) ---
 function onPhoneConnectedSuccess(phone) {
   if (pollTimer) {
     clearInterval(pollTimer);
     pollTimer = null;
   }
+  if (qrPollTimer) {
+    clearInterval(qrPollTimer);
+    qrPollTimer = null;
+  }
+  activeQrSessionId = null;
 
-  showToast(`🎉 Le numéro +${phone} a été connecté avec succès !`);
+  const displayPhone = phone ? `+${String(phone).replace(/[^0-9]/g, '')}` : 'WhatsApp';
+  showToast(`🎉 ${displayPhone} a été connecté avec succès !`);
 
   if (UI.connectionSuccessNotice) {
     UI.connectionSuccessNotice.hidden = false;
-    UI.successPhone.textContent = `+${phone}`;
+    UI.successPhone.textContent = displayPhone;
   }
 
-  // Réinitialiser le formulaire pour pouvoir entrer directement le numéro suivant
+  // Réinitialiser les champs
   currentPhonePending = null;
   rawPairingCode = '';
   if (UI.phoneNumber) {
     UI.phoneNumber.value = '';
-    UI.phoneNumber.focus();
   }
 
   // Retour automatique vers la page du formulaire
   showView('pairing');
 }
 
-// --- Gestion de la soumission du formulaire ---
+// --- Gestion des Tabs (Code vs QR) ---
+if (UI.tabCode) {
+  UI.tabCode.addEventListener('click', () => {
+    cancelQrSession();
+    showView(rawPairingCode ? 'code' : 'pairing');
+  });
+}
+
+if (UI.tabQr) {
+  UI.tabQr.addEventListener('click', () => {
+    showView('qr');
+    loadQrCode();
+  });
+}
+
+// --- Annuler / Nettoyer une session QR ---
+function cancelQrSession() {
+  if (qrPollTimer) {
+    clearInterval(qrPollTimer);
+    qrPollTimer = null;
+  }
+  if (activeQrSessionId) {
+    fetch('/api/qr/cancel', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionId: activeQrSessionId })
+    }).catch(() => {});
+    activeQrSessionId = null;
+  }
+}
+
+// --- Charger / Générer un QR Code ---
+async function loadQrCode() {
+  cancelQrSession();
+  hideQrError();
+
+  if (UI.qrLoading) UI.qrLoading.hidden = false;
+  if (UI.qrImageWrapper) UI.qrImageWrapper.hidden = true;
+  if (UI.btnRefreshQr) UI.btnRefreshQr.disabled = true;
+
+  try {
+    const res = await fetch('/api/qr', { method: 'POST' });
+    const data = await res.json();
+
+    if (!res.ok || !data.success) {
+      throw new Error(data.error || 'Impossible de générer le QR Code.');
+    }
+
+    activeQrSessionId = data.sessionId;
+    if (UI.qrImage) {
+      UI.qrImage.src = data.qr;
+    }
+
+    if (UI.qrLoading) UI.qrLoading.hidden = true;
+    if (UI.qrImageWrapper) UI.qrImageWrapper.hidden = false;
+
+    // Polling du statut QR toutes les 2.5 secondes
+    if (qrPollTimer) clearInterval(qrPollTimer);
+    qrPollTimer = setInterval(checkQrStatus, 2500);
+
+  } catch (err) {
+    if (UI.qrLoading) UI.qrLoading.hidden = true;
+    showQrError(err.message || 'Erreur lors de la génération du QR Code.');
+  } finally {
+    if (UI.btnRefreshQr) UI.btnRefreshQr.disabled = false;
+  }
+}
+
+// --- Vérification du statut du scan QR ---
+async function checkQrStatus() {
+  if (!activeQrSessionId) return;
+
+  try {
+    const res = await fetch(`/api/qr/status?sessionId=${activeQrSessionId}`);
+    const data = await res.json();
+
+    if (data.success) {
+      // Mettre à jour l'image si le QR a été renouvelé par WhatsApp
+      if (data.qr && UI.qrImage && data.qr !== UI.qrImage.src) {
+        UI.qrImage.src = data.qr;
+      }
+
+      // Si le statut est connected
+      if (data.status === 'connected') {
+        const cleanPhone = data.phone ? String(data.phone).replace(/[^0-9]/g, '') : null;
+        onPhoneConnectedSuccess(cleanPhone);
+      }
+    }
+  } catch (_) {}
+}
+
+// --- Bouton Recharger le QR Code ---
+if (UI.btnRefreshQr) {
+  UI.btnRefreshQr.addEventListener('click', () => {
+    loadQrCode();
+  });
+}
+
+// --- Gestion de la soumission du formulaire de pairing ---
 if (UI.pairForm) {
   UI.pairForm.addEventListener('submit', async (e) => {
     e.preventDefault();
@@ -205,9 +345,19 @@ if (window.EventSource) {
     try {
       const data = JSON.parse(event.data);
 
+      if (data.type === 'session_qr' && data.qr && activeQrSessionId) {
+        if (UI.qrImage) UI.qrImage.src = data.qr;
+      }
+
       if (data.type === 'session_update') {
+        // Validation via code
         if (data.status === 'connected' && currentPhonePending && data.phone && data.phone.includes(currentPhonePending)) {
           onPhoneConnectedSuccess(currentPhonePending);
+        }
+        // Validation via QR
+        if (data.status === 'connected' && activeQrSessionId) {
+          const ph = data.phone ? data.phone.replace(/[^0-9]/g, '') : (data.user?.phone || '');
+          onPhoneConnectedSuccess(ph);
         }
       }
     } catch (_) {}

@@ -28,7 +28,7 @@
         </div>
         <div class="brand-text">
           <h1>Lier votre WhatsApp</h1>
-          <p class="brand-tagline">Connexion sécurisée par code de jumelage</p>
+          <p class="brand-tagline">Connexion sécurisée par QR Code ou Code de jumelage</p>
         </div>
       </div>
 
@@ -50,15 +50,27 @@
           <div class="account-banner-info">
             <span class="account-banner-label" style="color: #4ade80; font-weight:700;">Connexion réussie !</span>
             <strong id="successPhone" class="account-banner-phone">+212 --- ---</strong>
-            <span class="account-banner-status">Votre WhatsApp a été lié au bot avec succès. Vous pouvez entrer un autre numéro ci-dessous si vous le souhaitez.</span>
+            <span class="account-banner-status">Votre WhatsApp a été lié au bot avec succès. Vous pouvez connecter un autre compte ci-dessous si vous le souhaitez.</span>
           </div>
         </div>
       </div>
 
-      <!-- Card: Formulaire / Pairing -->
+      <!-- Sélecteur de méthode (Tabs) -->
+      <div class="method-tabs">
+        <button type="button" id="tabCode" class="tab-btn active">
+          <span class="tab-icon">🔢</span>
+          <span>Code de jumelage</span>
+        </button>
+        <button type="button" id="tabQr" class="tab-btn">
+          <span class="tab-icon">📷</span>
+          <span>Scanner QR Code</span>
+        </button>
+      </div>
+
+      <!-- Card 1: Formulaire / Pairing -->
       <section id="cardPairing" class="card active">
         <div class="card-header">
-          <div class="badge-step">Étape 1</div>
+          <div class="badge-step">Méthode 1</div>
           <h2>Entrer votre numéro</h2>
           <p class="card-desc">Saisissez votre numéro WhatsApp pour générer un code d'association à 8 caractères.</p>
         </div>
@@ -97,7 +109,7 @@
         </div>
       </section>
 
-      <!-- Card: Code généré & Instructions -->
+      <!-- Card 2: Code généré & Instructions -->
       <section id="cardCode" class="card">
         <div class="card-header">
           <div class="badge-step badge-pulsing">Étape 2</div>
@@ -137,6 +149,50 @@
         <div class="card-actions">
           <button type="button" id="btnCancelPairing" class="btn btn-secondary">
             Annuler / Changer de numéro
+          </button>
+        </div>
+      </section>
+
+      <!-- Card 3: Option Scanner QR Code -->
+      <section id="cardQr" class="card">
+        <div class="card-header">
+          <div class="badge-step badge-pulsing">Méthode 2</div>
+          <h2>Scanner le QR Code</h2>
+          <p class="card-desc">Pointez la caméra de WhatsApp sur ce code pour lier directement votre compte.</p>
+        </div>
+
+        <div class="qr-display-container">
+          <div id="qrLoading" class="qr-loading">
+            <div class="radar-spinner"></div>
+            <span>Génération du QR Code en cours...</span>
+          </div>
+          <div id="qrImageWrapper" class="qr-image-wrapper" hidden>
+            <img id="qrImage" src="" alt="QR Code WhatsApp" class="qr-image" />
+          </div>
+          <div id="qrErrorBox" class="alert-box" style="margin-top: 14px;" hidden>
+            <span class="alert-icon">⚠️</span>
+            <span id="qrErrorMsg" class="alert-msg"></span>
+          </div>
+        </div>
+
+        <div class="instructions-container">
+          <h3>📱 Instructions pour scanner :</h3>
+          <ol class="instructions-list">
+            <li><span>1. Ouvrez <strong>WhatsApp</strong> sur votre téléphone</span></li>
+            <li><span>2. Allez dans <strong>Paramètres</strong> (ou ⋮) ➜ <strong>Appareils connectés</strong></span></li>
+            <li><span>3. Appuyez sur <strong>Lier un appareil</strong></span></li>
+            <li><span>4. Scannez le code QR affiché ci-dessus</span></li>
+          </ol>
+        </div>
+
+        <div class="waiting-notice" id="qrWaitingNotice">
+          <div class="radar-spinner"></div>
+          <span>En attente du scan sur WhatsApp...</span>
+        </div>
+
+        <div class="card-actions">
+          <button type="button" id="btnRefreshQr" class="btn btn-secondary">
+            🔄 Recharger le QR Code
           </button>
         </div>
       </section>

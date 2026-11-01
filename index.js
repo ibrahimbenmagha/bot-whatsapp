@@ -11,6 +11,7 @@ import { fileURLToPath } from 'url';
 import makeWASocket, { useMultiFileAuthState, DisconnectReason, Browsers } from '@whiskeysockets/baileys';
 import { Boom } from '@hapi/boom';
 import pino from 'pino';
+import QRCode from 'qrcode';
 import { 
   initializeDatabase, 
   addWarning, 
@@ -62,6 +63,7 @@ const activityLogs = [];
 const sseClients = new Set();
 let latestPairingCode = null;
 let latestPairingPhone = null;
+let activeQrSessionId = null;
 
 // Anti-spam tracker (messages transférés successifs dans le groupe):
 // key = jid -> Array<{ senderId: string, timestamp: number }>
@@ -177,10 +179,10 @@ function migrateLegacySession() {
 }
 
 /**
- * Démarrer ou connecter une session WhatsApp pour un numéro donné
+ * Démarrer ou connecter une session WhatsApp pour un numéro donné (ou session QR temporaire)
  */
 async function startSession(phone, options = {}) {
-  const { isNewPairing = false } = options;
+  const { isNewPairing = false, isQrMode = false } = options;
   const sessionDir = path.join(SESSIONS_BASE_DIR, phone);
 
   if (!fs.existsSync(sessionDir)) {
@@ -205,17 +207,22 @@ async function startSession(phone, options = {}) {
     saveCreds,
     status: isNewPairing ? 'connecting' : (state?.creds?.registered ? 'connecting' : 'disconnected'),
     pairingCode: null,
+    qr: null,
+    isQrMode,
     connectedAt: existingSession?.connectedAt || null,
     user: existingSession?.user || null,
     name: state?.creds?.me?.name || 'Bot WhatsApp',
     pairingResolve: null,
     pairingReject: null,
+    qrResolve: null,
+    qrReject: null,
     connectionAttempts: 0,
   };
 
   sessions.set(phone, sessionObj);
 
-  logActivity(`[+${phone}] Initialisation de la socket Baileys...`);
+  const displayName = phone.startsWith('qr_') ? phone : `+${phone}`;
+  logActivity(`[${displayName}] Initialisation de la socket Baileys...`);
 
   const sock = makeWASocket({
     auth: state,
@@ -263,38 +270,60 @@ async function handleSessionConnectionUpdate(phone, update, isNewPairing) {
   const { connection, lastDisconnect, qr } = update;
 
   if (connection === 'connecting') {
-    if (session.status !== 'awaiting_code') {
+    if (session.status !== 'awaiting_code' && session.status !== 'awaiting_qr') {
       session.status = 'connecting';
     }
     broadcastSSE({ type: 'session_update', phone, status: session.status });
   }
 
-  // Si on est en cours de pairing et que le socket est prêt (QR émis)
-  if (qr && isNewPairing && session.pairingResolve) {
-    logActivity(`[+${phone}] Socket prêt — Génération du code de jumelage...`);
-    try {
-      const code = await session.sock.requestPairingCode(phone);
-      if (code && session.pairingResolve) {
-        session.pairingCode = code;
-        session.status = 'awaiting_code';
-        latestPairingCode = code;
-        latestPairingPhone = phone;
-
-        session.pairingResolve(code);
-        session.pairingResolve = null;
-        session.pairingReject = null;
-
-        logActivity(`[+${phone}] Code généré avec succès : ${code}`, 'system');
-        broadcastSSE({ type: 'session_update', phone, status: 'awaiting_code', code });
+  // Émission du QR Code
+  if (qr) {
+    if (session.isQrMode) {
+      logActivity(`[${phone}] Nouveau QR Code reçu de Baileys.`);
+      try {
+        const qrDataUrl = await QRCode.toDataURL(qr, {
+          margin: 2,
+          scale: 8,
+          color: { dark: '#0a1014', light: '#ffffff' }
+        });
+        session.qr = qrDataUrl;
+        session.status = 'awaiting_qr';
+        if (session.qrResolve) {
+          session.qrResolve(qrDataUrl);
+          session.qrResolve = null;
+          session.qrReject = null;
+        }
+        broadcastSSE({ type: 'session_qr', sessionId: phone, status: 'awaiting_qr', qr: qrDataUrl });
+      } catch (err) {
+        logActivity(`[${phone}] Erreur génération image QR: ${err.message}`, 'warn');
       }
-    } catch (err) {
-      logActivity(`[+${phone}] Erreur requestPairingCode: ${err.message}`, 'warn');
+    } else if (isNewPairing && session.pairingResolve) {
+      logActivity(`[+${phone}] Socket prêt — Génération du code de jumelage...`);
+      try {
+        const code = await session.sock.requestPairingCode(phone);
+        if (code && session.pairingResolve) {
+          session.pairingCode = code;
+          session.status = 'awaiting_code';
+          latestPairingCode = code;
+          latestPairingPhone = phone;
+
+          session.pairingResolve(code);
+          session.pairingResolve = null;
+          session.pairingReject = null;
+
+          logActivity(`[+${phone}] Code généré avec succès : ${code}`, 'system');
+          broadcastSSE({ type: 'session_update', phone, status: 'awaiting_code', code });
+        }
+      } catch (err) {
+        logActivity(`[+${phone}] Erreur requestPairingCode: ${err.message}`, 'warn');
+      }
     }
   }
 
   if (connection === 'open') {
     session.connectionAttempts = 0;
     session.pairingCode = null;
+    session.qr = null;
     session.status = 'connected';
     session.connectedAt = new Date().toISOString();
 
@@ -306,8 +335,38 @@ async function handleSessionConnectionUpdate(phone, update, isNewPairing) {
       name: currentName,
     };
 
+    // Si c'était une session QR temporaire, migrer vers sessions/${currentPhone}
+    if (phone.startsWith('qr_') && currentPhone && currentPhone !== phone) {
+      logActivity(`[${phone}] Scan QR réussi pour +${currentPhone} ! Enregistrement de la session...`, 'system');
+      const tempDir = path.join(SESSIONS_BASE_DIR, phone);
+      const targetDir = path.join(SESSIONS_BASE_DIR, currentPhone);
+
+      if (!fs.existsSync(targetDir)) {
+        fs.mkdirSync(targetDir, { recursive: true });
+      }
+      if (fs.existsSync(tempDir)) {
+        fs.cpSync(tempDir, targetDir, { recursive: true });
+        try { fs.rmSync(tempDir, { recursive: true, force: true }); } catch (_) {}
+      }
+
+      sessions.delete(phone);
+      session.phone = currentPhone;
+      sessions.set(currentPhone, session);
+
+      try {
+        const { saveCreds: newSaveCreds } = await useMultiFileAuthState(targetDir);
+        session.saveCreds = newSaveCreds;
+        session.sock.ev.removeAllListeners('creds.update');
+        session.sock.ev.on('creds.update', newSaveCreds);
+      } catch (saveErr) {
+        logActivity(`[+${currentPhone}] Note saveCreds: ${saveErr.message}`);
+      }
+
+      broadcastSSE({ type: 'session_migrated', from: phone, to: currentPhone });
+    }
+
     logActivity(`✅ [+${currentPhone}] Connecté avec succès (${currentName}) !`, 'system');
-    broadcastSSE({ type: 'session_update', phone, status: 'connected', user: session.user });
+    broadcastSSE({ type: 'session_update', phone: currentPhone, status: 'connected', user: session.user });
   }
 
   if (connection === 'close') {
@@ -318,11 +377,28 @@ async function handleSessionConnectionUpdate(phone, update, isNewPairing) {
     const errorMsg = lastDisconnect?.error?.message || lastDisconnect?.error;
     const isLoggedOut = statusCode === DisconnectReason.loggedOut;
 
-    logActivity(`[+${phone}] Connexion fermée: code ${statusCode || 'inconnu'} (${errorMsg})`, 'warn');
+    logActivity(`[${phone.startsWith('qr_') ? phone : '+' + phone}] Connexion fermée: code ${statusCode || 'inconnu'} (${errorMsg})`, 'warn');
+
+    if (phone.startsWith('qr_')) {
+      if (statusCode === DisconnectReason.restartRequired || statusCode === 515) {
+        logActivity(`[${phone}] WhatsApp a validé le QR code ! Redémarrage (code 515)...`, 'system');
+        setTimeout(() => {
+          startSession(phone, { isNewPairing: false, isQrMode: true }).catch(() => {});
+        }, 1000);
+      } else {
+        const sDir = path.join(SESSIONS_BASE_DIR, phone);
+        if (fs.existsSync(sDir) && !session.authState?.creds?.registered) {
+          try { fs.rmSync(sDir, { recursive: true, force: true }); } catch (_) {}
+        }
+        sessions.delete(phone);
+      }
+      return;
+    }
 
     if (isLoggedOut) {
       session.status = 'disconnected';
       session.pairingCode = null;
+      session.qr = null;
       // Nettoyer la session déconnectée
       const sDir = path.join(SESSIONS_BASE_DIR, phone);
       if (fs.existsSync(sDir)) {
@@ -333,7 +409,7 @@ async function handleSessionConnectionUpdate(phone, update, isNewPairing) {
       broadcastSSE({ type: 'session_deleted', phone });
     } else if (statusCode === DisconnectReason.restartRequired || statusCode === 515) {
       // Code 515: WhatsApp a validé le jumelage sur le téléphone et demande le redémarrage
-      logActivity(`[+${phone}] 🎉 Code validé sur le téléphone ! Redémarrage immédiat (code 515)...`, 'system');
+      logActivity(`[+${phone}] 🎉 Validé sur le téléphone ! Redémarrage immédiat (code 515)...`, 'system');
       session.status = 'connecting';
       setTimeout(() => {
         startSession(phone, { isNewPairing: false }).catch((err) => {
@@ -2095,6 +2171,122 @@ app.post('/api/pair', async (req, res) => {
 });
 
 /**
+ * API: Démarrer une session de jumelage par QR Code
+ */
+app.post('/api/qr', async (req, res) => {
+  try {
+    if (activeQrSessionId) {
+      const prevSession = sessions.get(activeQrSessionId);
+      if (prevSession?.sock) {
+        try { prevSession.sock.ev.removeAllListeners(); prevSession.sock.ws?.close(); } catch (_) {}
+      }
+      const prevDir = path.join(SESSIONS_BASE_DIR, activeQrSessionId);
+      if (fs.existsSync(prevDir)) {
+        try { fs.rmSync(prevDir, { recursive: true, force: true }); } catch (_) {}
+      }
+      sessions.delete(activeQrSessionId);
+      activeQrSessionId = null;
+    }
+
+    const tempId = `qr_${Date.now()}`;
+    activeQrSessionId = tempId;
+    logActivity(`[${tempId}] Demande de connexion par QR Code...`);
+
+    const session = await startSession(tempId, { isNewPairing: true, isQrMode: true });
+
+    const qrPromise = new Promise((resolve, reject) => {
+      session.qrResolve = resolve;
+      session.qrReject = reject;
+
+      setTimeout(() => {
+        if (session.qrReject) {
+          reject(new Error('Délai dépassé (35s) pour obtenir le QR Code WhatsApp.'));
+          session.qrResolve = null;
+          session.qrReject = null;
+        }
+      }, 35000);
+    });
+
+    const qrDataUrl = await qrPromise;
+
+    res.json({
+      success: true,
+      qr: qrDataUrl,
+      sessionId: tempId
+    });
+  } catch (err) {
+    console.error('Erreur génération QR:', err);
+    logActivity(`Erreur génération QR: ${err.message}`, 'warn');
+    res.status(500).json({ success: false, error: err.message || 'Échec de la génération du QR Code.' });
+  }
+});
+
+/**
+ * API: Statut d'une session QR
+ */
+app.get('/api/qr/status', (req, res) => {
+  const { sessionId } = req.query;
+  const targetId = sessionId || activeQrSessionId;
+  if (!targetId) {
+    return res.status(400).json({ success: false, error: 'Session ID requis' });
+  }
+
+  const session = sessions.get(targetId);
+  if (session) {
+    return res.json({
+      success: true,
+      status: session.status,
+      phone: session.user?.phone || null,
+      qr: session.qr || null
+    });
+  }
+
+  // Vérifier si elle a été migrée avec succès vers un compte connecté
+  for (const [phone, sess] of sessions.entries()) {
+    if (sess.status === 'connected' && sess.connectedAt) {
+      const connTime = new Date(sess.connectedAt).getTime();
+      if (Date.now() - connTime < 30000) {
+        return res.json({
+          success: true,
+          status: 'connected',
+          phone: sess.user?.phone || `+${phone}`,
+          qr: null
+        });
+      }
+    }
+  }
+
+  res.json({
+    success: true,
+    status: 'disconnected',
+    phone: null,
+    qr: null
+  });
+});
+
+/**
+ * API: Annuler une session QR
+ */
+app.post('/api/qr/cancel', (req, res) => {
+  const { sessionId } = req.body || {};
+  const targetId = sessionId || activeQrSessionId;
+  if (targetId) {
+    const sess = sessions.get(targetId);
+    if (sess?.sock) {
+      try { sess.sock.ev.removeAllListeners(); sess.sock.ws?.close(); } catch (_) {}
+    }
+    const sDir = path.join(SESSIONS_BASE_DIR, targetId);
+    if (fs.existsSync(sDir)) {
+      try { fs.rmSync(sDir, { recursive: true, force: true }); } catch (_) {}
+    }
+    sessions.delete(targetId);
+    if (activeQrSessionId === targetId) activeQrSessionId = null;
+    logActivity(`[${targetId}] Session QR annulée.`);
+  }
+  res.json({ success: true });
+});
+
+/**
  * API: Déconnecter un compte spécifique
  */
 app.post('/api/accounts/disconnect', async (req, res) => {
@@ -2209,6 +2401,10 @@ async function startServer() {
       for (const d of dirs) {
         if (d.isDirectory()) {
           const phone = d.name;
+          if (phone.startsWith('qr_')) {
+            try { fs.rmSync(path.join(SESSIONS_BASE_DIR, phone), { recursive: true, force: true }); } catch (_) {}
+            continue;
+          }
           const credsFile = path.join(SESSIONS_BASE_DIR, phone, 'creds.json');
           if (fs.existsSync(credsFile)) {
             try {

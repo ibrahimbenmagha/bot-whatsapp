@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>النظام الداخلي - إمبࢪاطوࢪية باࢪادايس 🌿</title>
+<link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700;800&display=swap" rel="stylesheet">
+<style>
+  :root { 
+    --green:#00ff88; 
+    --green-dark:#0a2a1a; 
+    --black:#080e0a; 
+    --card:#111c14; 
+    --border:#1f3d28; 
+    --text:#e0e0e0; 
+    --text-muted:#6b7f72;
+  }
+  
+  *{
+    margin:0;
+    padding:0;
+    box-sizing:border-box;
+    font-family:'Tajawal',sans-serif;
+    transition:all 0.2s ease;
+  }
+  
+  body{
+    background:var(--black);
+    color:var(--text);
+    min-height:100vh;
+    line-height:1.6;
+  }
+  
+  /* Header */
+  header{
+    background:linear-gradient(to right, #0d1a11, #1a3320);
+    border-bottom:1px solid var(--border);
+    padding:16px 24px;
+    display:flex;
+    justify-content:space-between;
+    align-items:center;
+    position:sticky;top:0;z-index:100;
+    box-shadow:0 4px 20px rgba(0,0,0,0.4);
+  }
+  
+  .logo{display:flex;align-items:center;gap:12px;cursor:pointer}
+  .logo-icon{width:42px;height:42px;background:var(--green);color:#000;display:grid;place-items:center;border-radius:10px;font-size:24px;font-weight:800;transform:rotate(0deg);transition:transform 0.4s ease}
+  .logo:hover .logo-icon{transform:rotate(360deg)}
+  .logo h1{font-size:20px;color:#fff} 
+  .logo span{font-size:13px;color:var(--green);display:block;font-weight:500}
+  .music-icon-btn{width:36px;height:36px;background:rgba(26,255,102,0.12);border:1px solid rgba(26,255,102,0.25);border-radius:10px;display:grid;place-items:center;cursor:pointer;font-size:18px;transition:0.3s;}
+  .music-icon-btn.playing{background:#1aff66;box-shadow:0 0 15px rgba(26,255,102,0.6);animation:pulse 1.5s infinite;}
+  /* 3 Dots Menu Button */
+  .menu-btn{
+    width:42px;height:42px;
+    background:var(--card);
+    border:1px solid var(--border);
+    border-radius:10px;
+    cursor:pointer;
+    display:grid;place-items:center;
+    font-size:22px;letter-spacing:2px;
+    position:relative;
+  }
+  .menu-btn:hover{background:var(--green-dark);border-color:var(--green)}
+  .menu-btn::after{content:'';position:absolute;inset:0;border-radius:10px;border:2px solid transparent;background:linear-gradient(to right, var(--green), #00ffaa) border-box;-webkit-mask:linear-gradient(#fff 0 0) padding-box, linear-gradient(#fff 0 0);mask-composite:exclude;opacity:0;transition:opacity 0.3s}
+  .menu-btn:hover::after{opacity:1}
+  
+  /* Dropdown */
+  .dropdown{
+    position:absolute;left:24px;top:70px;
+    width:280px;
+    background:var(--card);
+    border:1px solid var(--border);
+    border-radius:14px;
+    padding:8px;
+    display:none;
+    box-shadow:0 20px 40px rgba(0,0,0,0.6);
+    z-index:200;
+    transform:translateY(-10px);
+    opacity:0;
+    transition:all 0.3s cubic-bezier(0.4,0,0.2,1);
+  }
+  .dropdown.active{display:block;transform:translateY(0);opacity:1}
+  .dropdown a{
+    display:flex;justify-content:space-between;align-items:center;
+    padding:14px 16px;border-radius:8px;
+    color:#ccc;text-decoration:none;font-size:14px;
+    position:relative;overflow:hidden;
+  }
+  .dropdown a::before{
+    content:'';
+    position:absolute;left:0;top:0;height:100%;width:0;
+    background:var(--green-dark);
+    z-index:-1;transition:width 0.2s;
+  }
+  .dropdown a:hover::before{width:100%}
+  .dropdown a:hover{color:var(--green);font-weight:500}
+  .dropdown a.active{background:var(--green);color:#000;font-weight:700}
+  .dropdown .sep{height:1px;background:var(--border);margin:6px 0}
+  .badge{font-size:11px;background:#1a3324;padding:2px 8px;border-radius:20px;border:1px solid var(--border)}
+  
+  /* Main Content */
+  main{max-width:900px;margin:0 auto;padding:32px 20px}
+  
+  .welcome{
+    background:linear-gradient(135deg,var(--green-dark),var(--card));
+    border:1px solid var(--border);
+    border-radius:20px;padding:40px;text-align:center;margin-bottom:24px;
+    position:relative;overflow:hidden;
+  }
+  .welcome::before{
+    content:'';
+    position:absolute;top:-50%;right:-50%;
+    width:200px;height:200px;
+    background:var(--green);
+    opacity:0.05;
+    border-radius:50%;
+    animation:float 8s ease-in-out infinite;
+  }
+  @keyframes float{0%,100%{transform:translate(0,0)}50%{transform:translate(20px,20px)}}
+  .welcome .icon{font-size:60px;margin-bottom:10px;animation:spin 6s linear infinite}
+  @keyframes spin{0%{transform:rotate(0deg)}100%{transform:rotate(360deg)}}
+  .welcome h2{font-size:32px;color:var(--green);margin-bottom:12px}
+  .welcome p{color:#9bb0a3;line-height:1.8;max-width:600px;margin:0 auto}
+  
+  .content-section{display:none;background:var(--card);border:1px solid var(--border);border-radius:16px;padding:32px;animation:fadeIn 0.4s ease}
+  .content-section.active{display:block}
+  @keyframes fadeIn{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:translateY(0)}}
+  .content-section h3{font-size:24px;color:var(--green);margin-bottom:6px;display:flex;gap:10px;align-items:center}
+  .content-section .meta{color:var(--text-muted);font-size:12px;margin-bottom:20px}
+  .law-box{
+    background:var(--black);
+    border-right:3px solid var(--green);
+    padding:16px;margin:14px 0;
+    border-radius:8px 0 0 8px;
+    transform:scale(1);transition:transform 0.2s;
+  }
+  .law-box:hover{transform:scale(1.01)}
+  .law-box strong{color:var(--green)} 
+  .law-box p{margin-top:6px;color:#c2d6c7;line-height:1.7;font-size:14px}
+  
+  .add-hint{margin-top:20px;padding:12px;border:1px dashed var(--border);border-radius:8px;color:#5a7562;font-size:12px;text-align:center}
+</style>
+</head>
+<body>
+<audio id="bgMusic" loop preload="auto">
+  <source src="music.mp3" type="audio/mpeg">
+</audio>
+<audio id="rankMusic"></audio>
+<header>
+  <div class="logo">
+    <div class="logo-icon">🌿</div>
+    <div><h1>إمبࢪاطوࢪية باࢪادايس</h1><span>النظام الداخلي الࢪسمي</span></div>
+  </div>
+  <button class="music-icon-btn" id="musicBtn" onclick="toggleMusic()">🎵</button>
+  <div style="position:relative">
+    <div class="menu-btn" id="menuBtn">⋮</div>
+    <div class="dropdown" id="dropdown">
+      <a onclick="openSec('home')" id="link-home" class="active">🏠 الࢪئيسية <span class="badge">تـمـهـيـد</span></a>
+      <div class="sep"></div>
+      <a onclick="openSec('niqaba')" id="link-niqaba">⚖️ قانون النقابة ←</a>
+      <a onclick="openSec('tarqiya')" id="link-tarqiya">📈 قانون التࢪقية ←</a>
+      <a onclick="openSec('intimae')" id="link-intimae">🤝 قانون الانتماء ←</a>
+      <a onclick="openSec('indar')" id="link-indar">⚠️ قانون الإنذاࢪات الإداࢪية ←</a>
+      <a onclick="openSec('branches')" id="link-branches">🎏 قانون الفࢪوع التࢪفيهية ←</a>
+      <div class="sep"></div>
+      <a style="color:#5a7562;cursor:default">إضغط على زࢪ الـرجو؏ للعودة إلى الصفحة الࢪئيسية</a>
+    </div>
+  </div>
+</header>
+
+<main>
+  <!-- الرئيسية -->
+  <div id="sec-home" class="content-section active" style="display:block;background:transparent;border:none;padding:0">
+    <div class="welcome">
+      <div class="icon">🌿</div>
+      <h2>مرحباً بكم في النظام الداخلي</h2>
+      <p>هذه الصفحة هي المرجع الرسمي والوحيد لجميع قوانين وأنظمة وبنود مجتمعنا. تم إعدادها لضمان الشفافية، العدالة، والتنظيم. يرجى من جميع الأعضاء قراءة القوانين بعناية والالتزام بها. أي مخالفة تعرض صاحبها للمساءلة.</p>
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:14px">
+      <div class="law-box"><strong>🎯 هدفنا</strong><p>بناء مجتمع منظم، عادل، ومحترم يُحترم فيه الجميع.</p></div>
+      <div class="law-box"><strong>📅 آخࢪ تحديث</strong><p>18 أكتوبࢪ 2026 - جميع القوانين ساࢪية المفعول.</p></div>
+      <div class="law-box"><strong>🔒 ملاحظة</strong><p>الإداࢪة العليا لها الحق في تعديل القوانين بعد إشعاࢪ الأعضاء.</p></div>
+    </div>
+  </div>
+
+  <!-- قوانين النقابة -->
+  <div id="sec-niqaba" class="content-section">
+    <h3>⚖️ قوانين النقابة</h3><div class="meta">الباب الأول : نقاء المحادثات والاحترام المتبادل.</div>
+  <h2>الشطر الأول :تسجيل إنذارات النقابات (3 إنذارات = مؤبد)</h2>
+    <div class="law-box"><strong>المادة 01: يمنع إرسال ملصقات مخلة</strong><p>ملصقات تحتوي على كلمات أو كلام مخل، أو ملصق يحتوي على صورة ممثل إباحي أو ملصق يحتوي على صورة ملتقطة لعضو أو صديقك أو أنت.</p></div>
+    <div class="law-box"><strong>المادة 02: يمنع السبام</strong><p>إرسال 3 ملصقات أو أكثر متتابعة، أو إرسال 9 رسائل متتابعة، أو إرسال 3 رسائل متتابعة بدون فائدة (هبد).</p></div>
+    <div class="law-box"><strong>المادة 03: يمنع التطقيم والارتباط بين الجنسين</strong><p>يمنع التطقيم بين ولد وبنت، ويسمح به بين ولد وولد أو بنت وبنت، ويمنع الإرتباط من داخل المملكة بين الجنسين.</p></div>
+    <div class="law-box"><strong>المادة 04: التحدث عن الهنتاي والأمور المشابهة</strong><p>الهينتاي والإيتشي والأمور الإباحية.</p></div>
+    <div class="law-box"><strong>المادة 05: العنصرية بكل أشكالها</strong><p>واضحة.</p></div>
+    <div class="law-box"><strong>المادة 06: المواضيع الدينينة الحساسة</strong><p>التكلم على مواضيع لا علم لك بها، أو التقليل من معتنق ديانة أخرى غير ديانتك.</p></div>
+    <div class="law-box"><strong>المادة 07: الحرق</strong><p>التحدث عن أحداث جرت في المانغا بالنسبة للأنميات المستمرة.</p></div>
+    <div class="law-box"><strong>المادة 08: التحدث عن حلقة انمي لم يمر على إصدارها 7 ساعات</strong><p>بالنسبة للأنميات المستمرة، لايجب على أي عضو أن يتحدث على حلقة جديدة حتى تمر 7 ساعات لتجنب الحرق على الآخرين.</p></div>
+    <div class="law-box"><strong>المادة 09: التنمر</strong><p>التنمر على الأعضاء لأي سبب ممكن، أو إهانة الأعضاء الجدد عوض الترحيب بهم.</p></div>
+    <div class="law-box"><strong>المادة 10: تسجيل الصوتيات المخلة بالأدب</strong><p>الصوتيات الغير لائقة التي تحتوي على توحويح أو ماشابه.</p></div>
+    <div class="law-box"><strong>المادة 11: السب والشتم داخل الجروب</strong><p>واضحة.</p></div>
+    <div class="law-box"><strong>المادة 12: الصوتيات العالية الصوت المزعجة</strong><p>تسجيل مقطع صوتي فيه ضجيج أو صراخ.</p></div>
+    <div class="law-box"><strong>المادة 13: طلب رتبة وإزعاج المسؤولين</strong><p>واضحة.</p></div>
+    <div class="law-box"><strong>المادة 14 : إرسال رابط خارج واتساب</strong><p>إرسال رابط فيديو أو حساب أو موقع، يمنع الروابط بكل أشكالها.</p></div>
+    <div class="law-box"><strong>المادة 15: الإتصال وفتح مكالمة في الجروب</strong><p>فتح مكالمة في الجروب أو الاتصال على الأعضاء والمشرفين.</p></div>
+    <div class="law-box"><strong>المادة 16: إرسال صورة وجهك أو صورة صديقك</strong><p>واضحة.</p></div>
+  
+  <h2>الشطر الثاني : قوانين الطرد المؤبد (طرد مباشر بعد المخالفة)</h2>
+    <div class="law-box"><strong>المادة 01: التهديد بالزرف</strong><p>تهديد بالزرف سواءا في العام او الخاص.</p></div>
+    <div class="law-box"><strong>المادة 02: سرقة الأعضاء وإنشاء جروب جانبي</strong><p>إنشاء جروب جانبي وسرقة الأعضاء، يطرد كل مشرفي ذلك الجروب إلى غاية التحقيق في أمرهم.</p></div>
+    <div class="law-box"><strong>المادة 03: الدخول بنية التخريب</strong><p>الدخول ومحاولة التحريض على الكراهية أو السبام أو نشر شائعات مزعجة.</p></div>
+    <div class="law-box"><strong>المادة 04: تهديد الأعضاء بالباند وغيرها</strong><p>واضحة.</p></div>
+    <div class="law-box"><strong>المادة 05: إرسال صورة أو مقطع أو ملصق إباحي</strong><p>واضحة.</p></div>
+    <div class="law-box"><strong>المادة 06: إرسال صورة أو ملصق أو مقطع دموي</strong><p>واضحة.</p></div>
+    <div class="law-box"><strong>المادة 07: افتعال مشاكل متعمدة بالنقابة</strong><p>محاولة إشعال نيران المشاكل بين الأعضاء وجعلهم يتهاوشون في ما بينهم بطريقة ما.</p></div>
+    <div class="law-box"><strong>المادة 08: الاحتكاك الغير لائق بين الجنسين</strong><p>الاحتكاك بين الجنسين يشوه صورة النقابة سواءا في الخاص أو العام.</p></div>
+    <div class="law-box"><strong>المادة 09: عدم احترام المشرفين</strong><p>السب أو التقليل من مشرف أو تجاهل تنبيهاته.</p></div>
+    <div class="law-box"><strong>المادة 10: إرسال رابط جروب واتساب</strong><p>إرسال رابط جروب واتساب غير روابط فروع المملكة.</p></div>
+    <div class="law-box"><strong>المادة 11: وجودك في مملكة أخرى</strong><p>وجودك داخل مملكة أخرى كرتبة أو حتى كعضو.</p></div>
+    <div class="law-box"><strong>المادة 12: وجودك في نقابة أخرى</strong><p>التعدد غير مسموح به، يمكنك زيارة النقابات فقط اذا اشتريت الزيارة من المتجر.</p></div>
+    <div class="law-box"><strong>المادة 13: محاولة التبنيد</strong><p>محاولة تبنيد النقابة.</p></div>
+  </div>
+
+  <!-- قانون الترقية -->
+  <div id="sec-tarqiya" class="content-section">
+    <h3>📈 قانون التࢪقية</h3><div class="meta">الباب الثاني : سلم الترقيات.</div>
+    <div class="law-box"><strong>البند 1: شروط الترقية</strong><p>الحرص على تنفيذ المهام الموكلة من طرف الأدميرال، أو تطبيق توجيهات الدوق او الملك او الجيروسي...</p></div>
+    <div class="law-box"><strong>البند 2: طريق الترقيات</strong><p>الترقية تكون بخطوة واحدة، يمنع تجاوز رتبة والترقية للتي بعدها، وإلا سيعاقب المرقي وفق قانون الإنذارات الإدارية.</p></div>
+    <div class="law-box"><strong>البند 3: المدة</strong><p>لا تتم الترقية إلا بعد 5 أيام من آخر ترقية وذلك في حالة تنفيذ المهام دون تخادل، في حالة تقديم مجهودات يثنى عليها ومهام إضافية تقلص المدة لـ3 أيام، الأدميرال يحكم، يؤدي تجاوز هذه المدة إلى عواقب صارمة.</p></div>
+    <div class="law-box"><strong>البند 4: تجنب الإنذارات</strong><p>الإنذارات الادارية لا تهدد بالإعفاء فقط، بل تعيق طريق ترقياتك.</p></div>
+  </div>
+
+  <!-- قانون الانتماء -->
+  <div id="sec-intimae" class="content-section">
+    <h3>🤝 قانون الانتماء</h3><div class="meta"> الباب الثالث : شروط العضوية.</div>
+    <div class="law-box"><strong>المادة 1: الولاء</strong><p>يمنع الانتماء لأي مملكة أخرى خارج بارادايس في نفس الوقت.</p></div>
+    <div class="law-box"><strong>المادة 2: الجنسية</strong><p>يمنع التواجد في نقابة غير أول نقابة دخلتها، إلا اذا كان لك الحق في ذلك بسبب رتبتك أو شراء الزيارة.</div>
+    <div class="law-box"><strong>المادة 3: المواضبة</strong><p>عدم مخالفة قوانين النقابة.</p></div>
+  </div>
+
+  <!-- قانون الانذارات -->
+  <div id="sec-indar" class="content-section">
+    <h3>قسم الإنذاࢪات الخاصة بالإداࢪة ⚠️</h3><div class="meta"> الباب الرابع : كل ما يستحق الإنذار الإداري (المخالفات الشائعة).</div>
+    <div class="law-box"><strong>01- إستغلال السلطة</strong><p>أي استعمال لصلاحيات رتبة المعني لأجل تسوية خلاف شخصي أو التصرف بسبب الضغينة.</p></div>
+    <div class="law-box"><strong>02- مخالفة قانون الترقية</strong><p>أي ترقية غير منطقية وتجاوزت حد مدتها المصرح لها ( 3 أيام في حالة أوج العطاء ) أو تجاوزت رتبة أو رتبتين بشكل غير منطقي يعاقب عليها المرقي بإنذر إداري.</p></div>
+    <div class="law-box"><strong>03- الكلام في التلاميذ دون فائدة</strong><p>الكلام في التلاميذ ممنوع، فقط الحسبات والتوجيهات والانجازات والترقيات والاعفاءات والمؤبدات.</p></div>
+    <div class="law-box"><strong>04- سب وشتم رتبة أخرى</strong><p>واضحة.</p></div>
+    <div class="law-box"><strong>05- إعتراض قرارات رتبة مسؤولة عنك</strong><p>إعتراض قرارات المسؤولين عليك، مثل الأدميرال والدوق والملك والجيروسي والرتب العليا.</p></div>
+    <div class="law-box"><strong>06- إلغاء إنذار أو إعفاء أو مؤبد</strong><p>إلغاء إنذار او اعفاء او مؤبد أعلنت عليه رتبة بمستواك (النواب غالبا).</p></div>
+    <div class="law-box"><strong>07- تزوير الحسبات أو المشاركة في ذلك</strong><p>تزوير الحسبات يعد من أسوء الجرائم التي يمكن التورط فيها، انذار اداري قليل في حق المجرم.</p></div>
+    <div class="law-box"><strong>08- النشر بالأساسي</strong><p>من واجبك كرتبة الحد من النشر بالأساسي وليس المشاركة فيه.</p></div>
+    <div class="law-box"><strong>09- التحرش</strong><p>التحرش الجنسي لرتبة سواءا ولد او بنت يعاقب عليه اذا اشتكى عليك.</p></div>
+    <div class="law-box"><strong>10- تجاهل أوامر رتبة عليا أو رتبة مسؤولة عليك</strong><p>تجاهل الأوامر وفعل ما يحلو لك.</p></div>
+    <div class="law-box"><strong>11- التهريب</strong><p>مساعدة عضو أو رتبة على  التعدد عبر اعطاءه رابط نقابة لا ينتمي اليها أو بطريقة أخرى.</p></div>
+    <div class="law-box"><strong>12- السياحة</strong><p>التواجد في نقابات غير نقاباتك الرسمية دون اذن الزيارة.</p></div>
+    <div class="law-box"><strong>13- الطرد</strong><p>طرد رتبة بمستواك من أحد الفروع او النقابة، أعلى منك إعفاء مباشر.</p></div>
+    <div class="law-box"><strong>14- الرياكتات المخلة</strong><p>أي رياكت مخل في التلاميذ يعاقب عليه.</p></div>
+    <div class="law-box"><strong>15- منح الإشراف لرتبة ليست بمستواه</strong><p>إعطاء أدمن لرتبة ليس لها الحق فيه.</p></div>
+    <div class="law-box"><strong>16- إنشاء نقابة دون علم المسؤولين</strong><p>إنشاء نقابة دون علم الملك والجيروسي في حالة كنت دوق، أو دون علم الجيروسي في حالة كنت ملك.</p></div>
+    <div class="law-box"><strong>17- التهديد بالاعتزال</strong><p>التهديد بالاعتزال ما اذا لم ينفذ طلبك.</p></div>
+    <div class="law-box"><strong>18- ترقية معتزل</strong><p>ترقية معتزل لرتبة غير مشرف تدريبي.</p></div>
+  </div>
+  
+  <!--قانون الفروع الترفيهية-->
+  <div id="sec-branches" class="content-section">
+    <h3>🎏 قوانين الفࢪوع التࢪفيهية</h3><div class="meta"> الباب الخامس : شروط التعيين كمسؤول فرع + المواضبة داخل الفروع.</div>
+    <div class="badge"><h2>الشروط 📃:  رتبة تشيبوكاي أو أكثر في أي نقابة + توفر المنصب + اجتياز الاختبار.</h2></div>
+    <div class="law-box"><strong>المادة 1: المواضبة</strong><p>يمنع السب او نشر رسائل غير لائقة بالنسبة لمشرف الفرع، ويمنع الرياكتات المخلة او ازعاج المشرفين في الخاص بالنسبة للاعضاء.</p></div>
+    <div class="law-box"><strong>المادة 2: المسؤولية</strong><p>من واجب كل مسؤول فرع أن يهتم بفرعه مظهرا وجودة، أن يحافظ على نشاط الفرع وأن لا يهمله.</p></div>
+  </div>
+</main>
+
+<script>
+  document.addEventListener('touchstart', e => {
+  touchStartX = e.touches[0].clientX; // بدل changedTouches بـ touches
+}, {passive: true});
+  
+  document.addEventListener('touchend', e => {
+  touchEndX = e.changedTouches[0].clientX;
+  handleSwipe();
+}, {passive: true});
+  function toggleMusic(){
+  if(isPlaying){bgMusic.pause();musicBtn.textContent='🎵';musicBtn.classList.remove('playing');isPlaying=false;}
+  else{bgMusic.play();musicBtn.textContent='🔊';musicBtn.classList.add('playing');isPlaying=true;}
+  }
+  const bgMusic = document.getElementById('bgMusic');
+const rankMusic = document.getElementById('rankMusic');
+const musicBtn = document.getElementById('musicBtn');
+let isPlaying = false;
+let bgWasPlaying = false;
+bgMusic.volume = 0.20;
+  window.addEventListener('load', () => {
+  bgMusic.play().then(()=>{isPlaying=true;musicBtn.textContent='🔊';musicBtn.classList.add('playing');}).catch(()=>{musicBtn.textContent='🎵';});
+});
+document.body.addEventListener('click', () => {
+  if(!isPlaying){bgMusic.play().then(()=>{isPlaying=true;musicBtn.textContent='🔊';musicBtn.classList.add('playing');});}
+}, { once: true });
+  const btn=document.getElementById('menuBtn'), drop=document.getElementById('dropdown');
+  btn.onclick=(e)=>{e.stopPropagation();drop.classList.toggle('active')}
+  document.addEventListener('click',()=>drop.classList.remove('active'));
+  function openSec(id){
+    document.querySelectorAll('.content-section').forEach(s=>{s.classList.remove('active');s.style.display='none'});
+    document.querySelectorAll('.dropdown a').forEach(a=>a.classList.remove('active'));
+    const target=document.getElementById('sec-'+id);
+    target.style.display='block'; setTimeout(()=>target.classList.add('active'),10);
+    document.getElementById('link-'+id).classList.add('active');
+    drop.classList.remove('active');
+    if(id!=='home') window.scrollTo({top:0,behavior:'smooth'});
+  }
+</script>
+</body>
+</html>
