@@ -63,6 +63,35 @@ const sseClients = new Set();
 let latestPairingCode = null;
 let latestPairingPhone = null;
 
+// Anti-spam tracker (messages transférés): key = "groupId:userId" -> { count: number, firstTimestamp: number }
+const forwardSpamTracker = new Map();
+const groupSpamCooldown = new Map();
+
+/**
+ * Détecter si un message est un message transféré (forwarded message)
+ */
+function isForwardedMessage(msg) {
+  if (!msg || !msg.message) return false;
+  let m = msg.message;
+  if (m.ephemeralMessage?.message) m = m.ephemeralMessage.message;
+  if (m.viewOnceMessage?.message) m = m.viewOnceMessage.message;
+  if (m.viewOnceMessageV2?.message) m = m.viewOnceMessageV2.message;
+  if (m.documentWithCaptionMessage?.message) m = m.documentWithCaptionMessage.message;
+
+  const content = m.extendedTextMessage 
+    || m.imageMessage 
+    || m.videoMessage 
+    || m.audioMessage 
+    || m.documentMessage 
+    || m.stickerMessage 
+    || m.contactMessage 
+    || m.contactsArrayMessage;
+
+  if (content?.contextInfo?.isForwarded) return true;
+  if (content?.contextInfo?.forwardingScore && content.contextInfo.forwardingScore > 0) return true;
+  return false;
+}
+
 /**
  * Ajouter un log en mémoire et notifier l'interface web via SSE
  */
@@ -354,13 +383,13 @@ async function handleSessionMessages(botPhone, m) {
       if (!rawSender) continue;
       const senderId = normalizeJid(rawSender);
 
-      const messageText = extractMessage(msg);
-      if (!messageText) continue;
-
+      const messageText = extractMessage(msg) || '';
       const trimmedText = messageText.trim();
       const lowerText = trimmedText.toLowerCase();
 
-      logActivity(`[+${botPhone}] [${isGroup ? 'Groupe' : 'Privé'} | ${isFromMe ? 'Moi' : senderId.split('@')[0]}]: "${trimmedText}"`);
+      if (trimmedText) {
+        logActivity(`[+${botPhone}] [${isGroup ? 'Groupe' : 'Privé'} | ${isFromMe ? 'Moi' : senderId.split('@')[0]}]: "${trimmedText}"`);
+      }
 
       let groupData = null;
       let senderIsAdmin = isFromMe;
@@ -387,13 +416,41 @@ async function handleSessionMessages(botPhone, m) {
         }
 
         // 2. Module Anti-Contact
-        const isContact = msg.message.contactMessage || msg.message.contactsArrayMessage;
+        let mContent = msg.message;
+        if (mContent.ephemeralMessage?.message) mContent = mContent.ephemeralMessage.message;
+        if (mContent.viewOnceMessage?.message) mContent = mContent.viewOnceMessage.message;
+        const isContact = Boolean(mContent.contactMessage || mContent.contactsArrayMessage);
         if (!isFromMe && !senderIsAdmin && !senderIsSudoEarly && isContact) {
           await handleAntiContact(sock, jid, senderId, msg.key.id, groupData);
+        }
+
+        // 3. Module Anti-Spam (Transfert de plus de 8 messages vers le groupe)
+        if (!isFromMe && isForwardedMessage(msg)) {
+          const now = Date.now();
+          const trackKey = `${jid}:${senderId}`;
+          const lastGroupTrigger = groupSpamCooldown.get(jid) || 0;
+
+          if (now - lastGroupTrigger > 20000) {
+            let tracker = forwardSpamTracker.get(trackKey);
+            if (!tracker || (now - tracker.firstTimestamp > 15000)) {
+              tracker = { count: 1, firstTimestamp: now };
+            } else {
+              tracker.count += 1;
+            }
+            forwardSpamTracker.set(trackKey, tracker);
+
+            if (tracker.count > 8) {
+              forwardSpamTracker.delete(trackKey);
+              groupSpamCooldown.set(jid, now);
+              await handleForwardSpam(sock, jid, senderId, groupData);
+            }
+          }
         }
       } else {
         senderIsAdmin = true;
       }
+
+      if (!trimmedText) continue;
 
       // 3. Commandes
       const isCmd = (name) => lowerText === `!${name}` || lowerText === `.${name}` || lowerText === `/${name}`;
@@ -621,6 +678,46 @@ async function handleSessionMessages(botPhone, m) {
           continue;
         }
         await handleAllowedLinksListCommand(sock, jid);
+        continue;
+      }
+
+      // Commande .close / .lock / .قفل (Group Admins / Sudo)
+      if (isCmd('close') || isCmd('lock') || isCmd('قفل') || isCmd('غلق')) {
+        await reactToMessage(sock, jid, msg.key, '🔒');
+        if (!isGroup) {
+          await sock.sendMessage(jid, { text: 'ℹ️ هذه العملية تعمل فقط داخل المجموعات.' });
+          continue;
+        }
+        if (!senderIsAdmin && !senderIsSudo) {
+          await sock.sendMessage(jid, { text: '⚠️ *عـذراً!* هذا الأمر مخصص لمشرفي المجموعة فقط.', mentions: [senderId] });
+          continue;
+        }
+        try {
+          await sock.groupSettingUpdate(jid, 'announcement');
+          await sock.sendMessage(jid, { text: '🔒 *تـم قـفـل الـمـجـمـوعـة (الـمـشـرفـيـن فـقـط يـمـكـنـهـم الإرسـال الآن)*' });
+        } catch (lockErr) {
+          await sock.sendMessage(jid, { text: `❌ تعذر قفل المجموعة: ${lockErr.message}` });
+        }
+        continue;
+      }
+
+      // Commande .open / .unlock / .فتح (Group Admins / Sudo)
+      if (isCmd('open') || isCmd('unlock') || isCmd('فتح')) {
+        await reactToMessage(sock, jid, msg.key, '🔓');
+        if (!isGroup) {
+          await sock.sendMessage(jid, { text: 'ℹ️ هذه العملية تعمل فقط داخل المجموعات.' });
+          continue;
+        }
+        if (!senderIsAdmin && !senderIsSudo) {
+          await sock.sendMessage(jid, { text: '⚠️ *عـذراً!* هذا الأمر مخصص لمشرفي المجموعة فقط.', mentions: [senderId] });
+          continue;
+        }
+        try {
+          await sock.groupSettingUpdate(jid, 'not_announcement');
+          await sock.sendMessage(jid, { text: '🔓 *تـم فـتـح الـمـجـمـوعـة (الـجـمـيـع يـمـكـنـهـم الإرسـال الآن)*' });
+        } catch (openErr) {
+          await sock.sendMessage(jid, { text: `❌ تعذر فتح المجموعة: ${openErr.message}` });
+        }
         continue;
       }
 
@@ -854,6 +951,115 @@ async function handleAntiContact(sock, jid, senderId, messageId, groupData) {
   }
 }
 
+/**
+ * Module Anti-Spam: Transfert de plus de 8 messages vers le groupe
+ * Ferme le groupe, rétrograde le spammer s'il est admin, mentionne les admins et envoie l'audio Sktona
+ */
+async function handleForwardSpam(sock, jid, senderId, groupData) {
+  try {
+    const senderNumber = senderId.split('@')[0].split(':')[0];
+    logActivity(`[AntiSpam] Détection spam messages transférés (>8) de @${senderNumber} dans ${jid}`, 'warn');
+
+    let currentGroupData = groupData;
+    if (!currentGroupData || !currentGroupData.participants) {
+      currentGroupData = await sock.groupMetadata(jid).catch(() => null);
+    }
+
+    // 1. Fermer le groupe (Admins Only)
+    try {
+      await sock.groupSettingUpdate(jid, 'announcement');
+      logActivity(`[AntiSpam] Groupe ${jid} fermé (announcement mode).`);
+    } catch (lockErr) {
+      logActivity(`[AntiSpam] Échec fermeture groupe: ${lockErr.message}`, 'warn');
+    }
+
+    // 2. Si le spammer est admin, lui retirer l'admin et le rendre membre régulier
+    let wasAdmin = false;
+    const spammerParticipant = currentGroupData?.participants?.find(p => {
+      const pNum = (p.id || p.jid || '').split('@')[0].split(':')[0];
+      return pNum === senderNumber;
+    });
+
+    if (spammerParticipant && (spammerParticipant.admin === 'admin' || spammerParticipant.admin === 'superadmin')) {
+      wasAdmin = true;
+      const jidToDemote = spammerParticipant.id || spammerParticipant.jid || senderId;
+      try {
+        await sock.groupParticipantsUpdate(jid, [jidToDemote], 'demote');
+        logActivity(`[AntiSpam] Spammer @${senderNumber} dégradé de admin à membre.`);
+      } catch (demoteErr) {
+        logActivity(`[AntiSpam] Échec dégradation spammer: ${demoteErr.message}`, 'warn');
+      }
+    }
+
+    // 3. Récupérer les admins du groupe pour les taguer
+    const adminParticipants = currentGroupData?.participants?.filter(p => {
+      if (p.admin !== 'admin' && p.admin !== 'superadmin') return false;
+      const pNum = (p.id || p.jid || '').split('@')[0].split(':')[0];
+      return pNum !== senderNumber;
+    }) || [];
+
+    const allMentions = new Set([senderId]);
+    const adminTags = [];
+
+    for (const adm of adminParticipants) {
+      const rawJid = adm.id || adm.jid;
+      if (rawJid) {
+        allMentions.add(rawJid);
+        if (adm.jid) allMentions.add(adm.jid);
+        if (adm.id) allMentions.add(adm.id);
+        const admNum = (adm.jid || adm.id).split('@')[0].split(':')[0];
+        adminTags.push(`@${admNum}`);
+      }
+    }
+
+    // 4. Message demandé : ياك أ زين؟؟ كتسبامي؟؟ جيلااااااااااااااااااال لغي لحبهم الحسبة
+    let spamText = `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🚨 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+    spamText += `       🏰 *إمـبـراطـوريـة بـاراديـس* 🏰\n`;
+    spamText += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🚨 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n\n`;
+    spamText += `*ياك أ زين؟؟ كتسبامي؟؟ جيلااااااااااااااااااال لغي لحبهم الحسبة* 🚨🔒\n\n`;
+    spamText += `⋄ الـعـضـو : @${senderNumber}\n`;
+    spamText += `⋄ الإجـراء : تـم قـفـل الـمـجـمـوعـة تـلـقـائـيـاً (الـمـشـرفـيـن فـقـط)${wasAdmin ? '\n⋄ تـم تـجـريـد الـعـضـو مـن صـلاحـيـات الإشـراف ⬇️' : ''}\n\n`;
+    if (adminTags.length > 0) {
+      spamText += `👑 *تـنـبـيـه لـلـمـشـرفـيـن* : ${adminTags.join(' ')}\n\n`;
+    }
+    spamText += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚔️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+    spamText += `       🏰 *PARADIS EMPIRE* 🏰`;
+
+    await sock.sendMessage(jid, {
+      text: spamText,
+      mentions: Array.from(allMentions).filter(Boolean)
+    });
+
+    // 5. Envoyer l'audio Sktona
+    const opusPath = path.join(__dirname, 'Media', 'Sktona.opus');
+    const mpegPath = path.join(__dirname, 'Media', 'Sktona.mpeg');
+
+    if (fs.existsSync(opusPath)) {
+      try {
+        await sock.sendMessage(jid, {
+          audio: fs.readFileSync(opusPath),
+          mimetype: 'audio/ogg; codecs=opus',
+          ptt: true
+        });
+      } catch (audioErr) {
+        logActivity(`Échec envoi audio anti-spam opus: ${audioErr.message}`, 'warn');
+      }
+    } else if (fs.existsSync(mpegPath)) {
+      try {
+        await sock.sendMessage(jid, {
+          audio: fs.readFileSync(mpegPath),
+          mimetype: 'audio/mp4',
+          ptt: false
+        });
+      } catch (audioErr) {
+        logActivity(`Échec envoi audio anti-spam mpeg: ${audioErr.message}`, 'warn');
+      }
+    }
+  } catch (err) {
+    console.error('Erreur handleForwardSpam:', err);
+  }
+}
+
 async function handleWarnCommand(sock, jid, messageText, groupData, msg) {
   try {
     const targetUserId = extractTargetUser(messageText, msg);
@@ -1033,6 +1239,8 @@ async function handleHelpCommand(sock, jid, isAdminUser, senderId = null, sessio
     if (isAdminUser || senderIsSudo) {
       helpText += `╭───『 ⚔️ أوامـر إدارة الـمـجـمـوعـة 』───⊷\n`;
       helpText += `│ ⋄ *.mention* ⇠ نـداء ومـنـشـن شـامـل لـكـافـة الأعـضـاء 📢\n`;
+      helpText += `│ ⋄ *.open* ⇠ فـتـح الـمـجـمـوعـة (الـكـل يـرسـل) 🔓\n`;
+      helpText += `│ ⋄ *.close* ⇠ قـفـل الـمـجـمـوعـة (الـمـشـرفـيـن فـقـط) 🔒\n`;
       helpText += `│ ⋄ *.promote @عضو* ⇠ تـرقـيـة عـضـو إلـى مـشـرف 🎖️\n`;
       helpText += `│ ⋄ *.demote @عضو* ⇠ تـنـزيـل مـشـرف إلـى عـضـو ⬇️\n`;
       helpText += `│ ⋄ *.demoteall* ⇠ تـنـزيـل كـافـة الـمـشـرفـيـن (حـصـري لـلـبـوت) 🧹\n`;
@@ -1057,8 +1265,9 @@ async function handleHelpCommand(sock, jid, isAdminUser, senderId = null, sessio
     }
 
     helpText += `╭───『 🛡️ أنـظـمـة الـحـمـايـة 』───⊷\n`;
-    helpText += `│ ⋄ 🚫 *مـنـع الـروابـط* : حـذف فـوري + إنـذار\n`;
-    helpText += `│ ⋄ 📵 *مـنـع جـهـات الاتـصـال* : طـرد فـوري ومـبـاشـر\n`;
+    helpText += `│ ⋄ 🚫 *مـنـع الـروابـط* : حـذف فـوري + إنـذار + صـوتـيـة\n`;
+    helpText += `│ ⋄ 📵 *مـنـع جـهـات الاتـصـال* : حـذف فـوري + إنـذار\n`;
+    helpText += `│ ⋄ 🚨 *مـضـاد الـسـبـام* : قـفـل الـمـجـمـوعـة + إنـزال الـرتـبـة عـنـد تـحـويـل >8 رسـائـل + صـوتـيـة\n`;
     helpText += `╰─────────────────────⊷\n\n`;
 
     helpText += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚔️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
