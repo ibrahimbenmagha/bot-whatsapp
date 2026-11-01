@@ -437,7 +437,7 @@ async function handleSessionMessages(botPhone, m) {
       // Commande .menu
       if (isCmd('help') || isCmd('aide') || isCmd('menu') || isCmd('اوامر') || isCmd('الاوامر')) {
         await reactToMessage(sock, jid, msg.key, '🤖');
-        await handleHelpCommand(sock, jid, senderIsAdmin, senderId, session, senderIsSudo);
+        await handleHelpCommand(sock, jid, senderIsAdmin, senderId, session, senderIsSudo, msg);
         continue;
       }
 
@@ -535,18 +535,21 @@ async function handleSessionMessages(botPhone, m) {
         continue;
       }
 
-      // Commande .demoteall (Group Admins / Sudo)
+      // Commande .demoteall (Strictement réservé au compte bot lui-même)
       if (isCmd('demoteall') || startsWithCmd('demoteall') || isCmd('تنزيل_الكل') || startsWithCmd('تنزيل_الكل')) {
         await reactToMessage(sock, jid, msg.key, '🧹');
         if (!isGroup) {
           await sock.sendMessage(jid, { text: 'ℹ️ هذه العملية تعمل فقط داخل المجموعات.' });
           continue;
         }
-        if (!senderIsAdmin && !senderIsSudo) {
-          await sock.sendMessage(jid, { text: '⚠️ *عـذراً!* هذا الأمر مخصص لمشرفي المجموعة فقط.', mentions: [senderId] });
+        if (!isFromMe) {
+          await sock.sendMessage(jid, { 
+            text: '⛔ *عـذراً!* أمـر تـنـزيـل الـكـل مـخـصـص حـصـراً لـحـسـاب الـبـوت نـفـسـه (لا يـمـكـن اسـتـخـدامـه حـتـى مـن الـمـطـوريـن) 🛡️',
+            mentions: [senderId] 
+          });
           continue;
         }
-        await handleDemoteAllCommand(sock, jid, groupData, senderId, senderIsAdmin, senderIsSudo, isFromMe);
+        await handleDemoteAllCommand(sock, jid, groupData);
         continue;
       }
 
@@ -562,6 +565,29 @@ async function handleSessionMessages(botPhone, m) {
           continue;
         }
         await handleDemoteCommand(sock, jid, messageText, msg, groupData);
+        continue;
+      }
+
+      // 4. Commande inconnue / inexistante (ex: .xyz)
+      // "si quelqu un utilise . avec commnde qui n existe pas ile repond avec (هدشي واللهم كين) avec le audio Shubady.mpeg"
+      if (isPrefixCommand && trimmedText.length > 1 && !trimmedText.startsWith('..') && !trimmedText.startsWith('...')) {
+        await reactToMessage(sock, jid, msg.key, '❓');
+        await sock.sendMessage(jid, { 
+          text: 'هدشي واللهم كين' 
+        }, { quoted: msg });
+
+        const audioPath = path.join(__dirname, 'Media', 'Shubady.mpeg');
+        if (fs.existsSync(audioPath)) {
+          try {
+            await sock.sendMessage(jid, {
+              audio: fs.readFileSync(audioPath),
+              mimetype: 'audio/mpeg',
+              ptt: true
+            }, { quoted: msg });
+          } catch (audioErr) {
+            console.error('Erreur envoi audio Shubady:', audioErr);
+          }
+        }
         continue;
       }
     }
@@ -825,7 +851,7 @@ async function handleMentionCommand(sock, jid, messageText, groupData, senderId)
   }
 }
 
-async function handleHelpCommand(sock, jid, isAdminUser, senderId = null, session = null, senderIsSudo = false) {
+async function handleHelpCommand(sock, jid, isAdminUser, senderId = null, session = null, senderIsSudo = false, quotedMsg = null) {
   try {
     const userPhone = session?.user?.phone || (session?.phone ? `+${session.phone}` : '');
     const botMode = getBotMode();
@@ -851,7 +877,7 @@ async function handleHelpCommand(sock, jid, isAdminUser, senderId = null, sessio
       helpText += `│ ⋄ *.mention* ⇠ نـداء ومـنـشـن شـامـل لـكـافـة الأعـضـاء 📢\n`;
       helpText += `│ ⋄ *.promote @عضو* ⇠ تـرقـيـة عـضـو إلـى مـشـرف 🎖️\n`;
       helpText += `│ ⋄ *.demote @عضو* ⇠ تـنـزيـل مـشـرف إلـى عـضـو ⬇️\n`;
-      helpText += `│ ⋄ *.demoteall* ⇠ تـنـزيـل كـافـة الـمـشـرفـيـن دُفـعـة واحـدة 🧹\n`;
+      helpText += `│ ⋄ *.demoteall* ⇠ تـنـزيـل كـافـة الـمـشـرفـيـن (حـصـري لـلـبـوت) 🧹\n`;
       helpText += `│ ⋄ *.warn @عضو* ⇠ إعـطـاء إنـذار (${CONFIG.maxWarnings} = طرد) ⚠️\n`;
       helpText += `│ ⋄ *.warnings @عضو* ⇠ فـحـص إنـذارات عـضـو 📋\n`;
       helpText += `│ ⋄ *.resetwarn @عضو* ⇠ تـصـفـيـر إنـذارات عـضـو 🔄\n`;
@@ -876,12 +902,22 @@ async function handleHelpCommand(sock, jid, isAdminUser, senderId = null, sessio
     helpText += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚔️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
     helpText += `       🏰 *PARADIS EMPIRE* 🏰`;
 
-    const options = { text: helpText };
-    if (senderId) {
-      options.mentions = [senderId];
-    }
+    const mentions = senderId ? [senderId] : [];
+    const menuImagePath = path.join(__dirname, 'Media', 'Menu.jpeg');
+    const sendOptions = quotedMsg ? { quoted: quotedMsg } : {};
 
-    await sock.sendMessage(jid, options);
+    if (fs.existsSync(menuImagePath)) {
+      await sock.sendMessage(jid, {
+        image: fs.readFileSync(menuImagePath),
+        caption: helpText,
+        mentions
+      }, sendOptions);
+    } else {
+      await sock.sendMessage(jid, {
+        text: helpText,
+        mentions
+      }, sendOptions);
+    }
   } catch (err) {
     console.error('Erreur !help:', err);
   }
@@ -1332,9 +1368,10 @@ async function handleDemoteCommand(sock, jid, messageText, msg, groupData) {
 }
 
 /**
- * Commande .demoteall (Group Admins / Sudo)
+ * Commande .demoteall (Strictement réservé au compte bot lui-même)
+ * Rétrograde tous les administrateurs du groupe sauf le bot lui-même
  */
-async function handleDemoteAllCommand(sock, jid, groupData, senderId, senderIsAdmin, senderIsSudo, isFromMe) {
+async function handleDemoteAllCommand(sock, jid, groupData) {
   try {
     let currentGroupData = groupData;
     if (!currentGroupData || !currentGroupData.participants) {
@@ -1352,38 +1389,46 @@ async function handleDemoteAllCommand(sock, jid, groupData, senderId, senderIsAd
       return;
     }
 
-    const botNumber = sock?.user?.id ? sock.user.id.split('@')[0].split(':')[0] : null;
-    const ownerNumber = currentGroupData.owner ? currentGroupData.owner.split('@')[0].split(':')[0] : null;
+    const botRaw = sock?.user?.id || '';
+    const botNumber = botRaw.split('@')[0].split(':')[0];
 
-    // Trouver tous les admins sauf le bot et le owner du groupe
+    // Trouver tous les admins sauf le bot lui-même
     const adminsToDemote = currentGroupData.participants.filter(p => {
       const isAdm = p.admin === 'admin' || p.admin === 'superadmin';
       if (!isAdm) return false;
       const pNumber = (p.id || p.jid || '').split('@')[0].split(':')[0];
       if (botNumber && pNumber === botNumber) return false;
-      if (ownerNumber && pNumber === ownerNumber) return false;
       return true;
     });
 
     if (adminsToDemote.length === 0) {
-      await sock.sendMessage(jid, { text: 'ℹ️ لا يـوجـد مـشـرفـيـن آخـريـن لـتـنـزيـلـهـم (تـم اسـتـثـنـاء الـبـوت ومـالـك الـمـجـمـوعـة).' });
+      await sock.sendMessage(jid, { text: 'ℹ️ لا يـوجـد مـشـرفـيـن آخـريـن لـتـنـزيـلـهـم (الـبـوت هـو الـمـشـرف الـوحـيـد).' });
       return;
     }
 
-    const jidsToDemote = adminsToDemote.map(p => p.id || p.jid);
-    await sock.groupParticipantsUpdate(jid, jidsToDemote, 'demote');
+    let demotedCount = 0;
+    // Rétrograder chaque admin un par un
+    for (const admin of adminsToDemote) {
+      const targetJid = admin.id || admin.jid;
+      try {
+        await sock.groupParticipantsUpdate(jid, [targetJid], 'demote');
+        demotedCount++;
+      } catch (err) {
+        logActivity(`[DemoteAll] Échec demote pour ${targetJid}: ${err.message}`, 'warn');
+      }
+    }
 
     let text = `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🧹 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
     text += `       🏰 *إمـبـراطـوريـة بـاراديـس* 🏰\n`;
     text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🧹 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n\n`;
     text += `⚡ *تـم تـنـزيـل كـافـة الـمـشـرفـيـن بـنـجـاح* ⚡\n\n`;
-    text += `⋄ عـدد الـمـشـرفـيـن الـمـنـزلـيـن : ${adminsToDemote.length} مـشـرف\n`;
-    text += `⋄ تـم اسـتـثـنـاء : مـالـك الـمـجـمـوعـة + حـسـاب الـبـوت 🛡️\n\n`;
+    text += `⋄ عـدد الـمـشـرفـيـن الـمـنـزلـيـن : ${demotedCount} مـشـرف\n`;
+    text += `⋄ تـم اسـتـثـنـاء : حـسـاب الـبـوت فـقـط 🤖👑\n\n`;
     text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚔️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
     text += `       🏰 *PARADIS EMPIRE* 🏰`;
 
     await sock.sendMessage(jid, { text });
-    logActivity(`[DemoteAll] ${adminsToDemote.length} admins rétrogradés dans ${jid}`);
+    logActivity(`[DemoteAll] ${demotedCount} admins rétrogradés dans ${jid} par le bot`);
   } catch (err) {
     console.error('Erreur handleDemoteAllCommand:', err);
     await sock.sendMessage(jid, { text: `❌ تـعـذر تـنـزيـل الـمـشـرفـيـن : ${err.message}` });
