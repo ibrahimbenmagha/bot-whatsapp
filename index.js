@@ -11,7 +11,18 @@ import { fileURLToPath } from 'url';
 import makeWASocket, { useMultiFileAuthState, DisconnectReason, Browsers } from '@whiskeysockets/baileys';
 import { Boom } from '@hapi/boom';
 import pino from 'pino';
-import { initializeDatabase, addWarning, getWarningCount, resetWarnings } from './db.js';
+import { 
+  initializeDatabase, 
+  addWarning, 
+  getWarningCount, 
+  resetWarnings,
+  getBotMode,
+  setBotMode,
+  isSudo,
+  addSudo,
+  removeSudo,
+  getSudoList
+} from './db.js';
 import { isAdmin, extractMessage, containsUrl, isGroupMessage, formatMention, normalizeJid } from './utils/helpers.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -375,9 +386,31 @@ async function handleSessionMessages(botPhone, m) {
       // 3. Commandes
       const isCmd = (name) => lowerText === `!${name}` || lowerText === `.${name}` || lowerText === `/${name}`;
       const startsWithCmd = (name) => lowerText.startsWith(`!${name}`) || lowerText.startsWith(`.${name}`) || lowerText.startsWith(`/${name}`);
+      const isPrefixCommand = lowerText.startsWith('.') || lowerText.startsWith('!') || lowerText.startsWith('/');
+
+      const senderIsSudo = isFromMe || isSudo(senderId);
+      const botMode = getBotMode();
+
+      // Vérification du Mode Privé (Private Mode): seuls le bot et les sudos peuvent exécuter des commandes
+      if (isPrefixCommand && botMode === 'private' && !senderIsSudo) {
+        await reactToMessage(sock, jid, msg.key, '🔒');
+        await sock.sendMessage(jid, {
+          text: `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🔒 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n` +
+                `       🏰 *إمـبـراطـوريـة بـاراديـس* 🏰\n` +
+                `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🔒 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n\n` +
+                `⛔ *الـبـوت حـالـيـاً فـي الـوضـع الـخـاص (Private Mode)*\n\n` +
+                `⋄ الأوامـر مـتـاحـة فـقـط لـمـالـك الـبـوت والـمـطـوريـن الـمـعـتـمـديـن (Sudo List).\n` +
+                `⋄ يـمـكـن لـلـمـطـور تـفـعـيـل الـوضـع الـعـام بـأمـر : *.mode public*\n\n` +
+                `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚔️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n` +
+                `       🏰 *PARADIS EMPIRE* 🏰`,
+          mentions: [senderId]
+        });
+        continue;
+      }
 
       // Commande .status
       if (isCmd('status') || isCmd('info') || isCmd('bot') || isCmd('حالة')) {
+        await reactToMessage(sock, jid, msg.key, '⚡');
         await handleStatusCommand(sock, jid, groupData, session);
         continue;
       }
@@ -385,11 +418,12 @@ async function handleSessionMessages(botPhone, m) {
       // Commande .mention / .منشن / .tagall
       if (isCmd('mention') || isCmd('منشن') || isCmd('tagall') || isCmd('الكل') ||
           startsWithCmd('mention') || startsWithCmd('منشن') || startsWithCmd('tagall') || startsWithCmd('الكل')) {
+        await reactToMessage(sock, jid, msg.key, '📢');
         if (!isGroup) {
           await sock.sendMessage(jid, { text: 'ℹ️ هذه العملية تعمل فقط داخل المجموعات.' });
           continue;
         }
-        if (!senderIsAdmin) {
+        if (!senderIsAdmin && !senderIsSudo) {
           await sock.sendMessage(jid, { 
             text: '⚠️ *عـذراً!* أمـر الـمـنـشـن الـجـمـاعـي مـخـصـص لـمـشـرفـي الـمـجـمـوعـة فـقـط 🛡️',
             mentions: [senderId]
@@ -402,53 +436,132 @@ async function handleSessionMessages(botPhone, m) {
 
       // Commande .menu
       if (isCmd('help') || isCmd('aide') || isCmd('menu') || isCmd('اوامر') || isCmd('الاوامر')) {
-        await handleHelpCommand(sock, jid, senderIsAdmin, senderId, session);
+        await reactToMessage(sock, jid, msg.key, '🤖');
+        await handleHelpCommand(sock, jid, senderIsAdmin, senderId, session, senderIsSudo);
         continue;
       }
 
       // Commande .regles
       if (isCmd('regles') || isCmd('rules') || isCmd('قوانين') || isCmd('القوانين')) {
+        await reactToMessage(sock, jid, msg.key, '📜');
         await handleRulesCommand(sock, jid);
         continue;
       }
 
       // Commande .warnings
       if (startsWithCmd('warnings') || startsWithCmd('warns') || startsWithCmd('انذارات') || startsWithCmd('انذاراتي')) {
+        await reactToMessage(sock, jid, msg.key, '📋');
         if (!isGroup) {
           await sock.sendMessage(jid, { text: 'ℹ️ Cette commande fonctionne uniquement dans un groupe.' });
           continue;
         }
-        await handleCheckWarningsCommand(sock, jid, messageText, senderId);
+        await handleCheckWarningsCommand(sock, jid, messageText, senderId, msg);
         continue;
       }
 
-      // Commande .warn (Admins)
-      if ((startsWithCmd('warn ') || startsWithCmd('انذار ')) && senderIsAdmin) {
+      // Commande .warn (Admins / Sudo)
+      if ((startsWithCmd('warn ') || startsWithCmd('انذار ')) && (senderIsAdmin || senderIsSudo)) {
+        await reactToMessage(sock, jid, msg.key, '⚠️');
         if (!isGroup) {
           await sock.sendMessage(jid, { text: 'ℹ️ Cette commande fonctionne uniquement dans un groupe.' });
           continue;
         }
-        await handleWarnCommand(sock, jid, messageText, groupData);
+        await handleWarnCommand(sock, jid, messageText, groupData, msg);
         continue;
       }
 
-      // Commande .resetwarn (Admins)
-      if ((startsWithCmd('resetwarn') || startsWithCmd('تصفير')) && senderIsAdmin) {
+      // Commande .resetwarn (Admins / Sudo)
+      if ((startsWithCmd('resetwarn') || startsWithCmd('تصفير')) && (senderIsAdmin || senderIsSudo)) {
+        await reactToMessage(sock, jid, msg.key, '🔄');
         if (!isGroup) {
           await sock.sendMessage(jid, { text: 'ℹ️ Cette commande fonctionne uniquement dans un groupe.' });
           continue;
         }
-        await handleResetWarnCommand(sock, jid, messageText);
+        await handleResetWarnCommand(sock, jid, messageText, msg);
         continue;
       }
 
-      // Commande .kick (Admins)
-      if ((startsWithCmd('kick') || startsWithCmd('طرد')) && senderIsAdmin) {
+      // Commande .kick (Admins / Sudo)
+      if ((startsWithCmd('kick') || startsWithCmd('طرد')) && (senderIsAdmin || senderIsSudo)) {
+        await reactToMessage(sock, jid, msg.key, '🚪');
         if (!isGroup) {
           await sock.sendMessage(jid, { text: 'ℹ️ Cette commande fonctionne uniquement dans un groupe.' });
           continue;
         }
-        await handleManualKickCommand(sock, jid, messageText, groupData);
+        await handleManualKickCommand(sock, jid, messageText, groupData, msg);
+        continue;
+      }
+
+      // Commande .mode [public/private] (Sudo / Owner)
+      if (startsWithCmd('mode') || startsWithCmd('الوضع')) {
+        await reactToMessage(sock, jid, msg.key, '⚙️');
+        await handleModeCommand(sock, jid, messageText, senderIsSudo);
+        continue;
+      }
+
+      // Commande .sudo / .addsudo @user (Sudo / Owner)
+      if (startsWithCmd('sudo') || startsWithCmd('addsudo') || startsWithCmd('ترقية_بوت')) {
+        await reactToMessage(sock, jid, msg.key, '🛡️');
+        await handleAddSudoCommand(sock, jid, messageText, msg, senderIsSudo);
+        continue;
+      }
+
+      // Commande .delsudo @user (Sudo / Owner)
+      if (startsWithCmd('delsudo') || startsWithCmd('removesudo') || startsWithCmd('حذف_مطور')) {
+        await reactToMessage(sock, jid, msg.key, '🗑️');
+        await handleRemoveSudoCommand(sock, jid, messageText, msg, senderIsSudo);
+        continue;
+      }
+
+      // Commande .sudolist (Sudo / Owner / All)
+      if (isCmd('sudolist') || isCmd('sudos') || isCmd('المطورين') || isCmd('قائمة_المطورين')) {
+        await reactToMessage(sock, jid, msg.key, '👑');
+        await handleSudoListCommand(sock, jid);
+        continue;
+      }
+
+      // Commande .promote @user (Group Admins / Sudo)
+      if (startsWithCmd('promote') || startsWithCmd('ترقية')) {
+        await reactToMessage(sock, jid, msg.key, '🎖️');
+        if (!isGroup) {
+          await sock.sendMessage(jid, { text: 'ℹ️ هذه العملية تعمل فقط داخل المجموعات.' });
+          continue;
+        }
+        if (!senderIsAdmin && !senderIsSudo) {
+          await sock.sendMessage(jid, { text: '⚠️ *عـذراً!* هذا الأمر مخصص لمشرفي المجموعة أو مطوري البوت فقط.', mentions: [senderId] });
+          continue;
+        }
+        await handlePromoteCommand(sock, jid, messageText, msg, groupData);
+        continue;
+      }
+
+      // Commande .demoteall (Group Admins / Sudo)
+      if (isCmd('demoteall') || startsWithCmd('demoteall') || isCmd('تنزيل_الكل') || startsWithCmd('تنزيل_الكل')) {
+        await reactToMessage(sock, jid, msg.key, '🧹');
+        if (!isGroup) {
+          await sock.sendMessage(jid, { text: 'ℹ️ هذه العملية تعمل فقط داخل المجموعات.' });
+          continue;
+        }
+        if (!senderIsAdmin && !senderIsSudo) {
+          await sock.sendMessage(jid, { text: '⚠️ *عـذراً!* هذا الأمر مخصص لمشرفي المجموعة فقط.', mentions: [senderId] });
+          continue;
+        }
+        await handleDemoteAllCommand(sock, jid, groupData, senderId, senderIsAdmin, senderIsSudo, isFromMe);
+        continue;
+      }
+
+      // Commande .demote @user (Group Admins / Sudo)
+      if ((startsWithCmd('demote') && !startsWithCmd('demoteall')) || (startsWithCmd('تنزيل') && !startsWithCmd('تنزيل_الكل'))) {
+        await reactToMessage(sock, jid, msg.key, '⬇️');
+        if (!isGroup) {
+          await sock.sendMessage(jid, { text: 'ℹ️ هذه العملية تعمل فقط داخل المجموعات.' });
+          continue;
+        }
+        if (!senderIsAdmin && !senderIsSudo) {
+          await sock.sendMessage(jid, { text: '⚠️ *عـذراً!* هذا الأمر مخصص لمشرفي المجموعة أو مطوري البوت فقط.', mentions: [senderId] });
+          continue;
+        }
+        await handleDemoteCommand(sock, jid, messageText, msg, groupData);
         continue;
       }
     }
@@ -456,6 +569,62 @@ async function handleSessionMessages(botPhone, m) {
     console.error('Erreur traitement messages:', error);
     logActivity(`Erreur traitement messages: ${error.message}`, 'warn');
   }
+}
+
+/**
+ * Fonctions utilitaires pour messages et commandes
+ */
+
+/**
+ * Envoyer une réaction emoji sur un message spécifique (ex: 🤖 sur .menu)
+ */
+async function reactToMessage(sock, jid, msgKey, emoji) {
+  try {
+    if (!emoji || !msgKey || !sock) return;
+    await sock.sendMessage(jid, {
+      react: { text: emoji, key: msgKey }
+    });
+  } catch (err) {
+    // Réaction optionnelle, ne bloque pas le flux
+  }
+}
+
+/**
+ * Extraire l'ID de l'utilisateur ciblé (soit par @mention, soit par réponse/citation de son message)
+ */
+function extractTargetUser(messageText, msg) {
+  // 1. Participant du message cité en réponse
+  const quotedParticipant = msg?.message?.extendedTextMessage?.contextInfo?.participant;
+  if (quotedParticipant) {
+    return normalizeJid(quotedParticipant);
+  }
+  // 2. Mention @ dans le texte
+  const match = messageText.match(/@(\d+)/);
+  if (match) {
+    return match[1] + '@s.whatsapp.net';
+  }
+  // 3. Mention JID dans contextInfo
+  const mentionedJid = msg?.message?.extendedTextMessage?.contextInfo?.mentionedJid;
+  if (Array.isArray(mentionedJid) && mentionedJid.length > 0) {
+    return normalizeJid(mentionedJid[0]);
+  }
+  return null;
+}
+
+/**
+ * Vérifier si le compte bot est admin dans le groupe
+ */
+function isBotAdmin(sock, groupData) {
+  if (!groupData || !groupData.participants) return false;
+  const botRaw = sock?.user?.id;
+  if (!botRaw) return false;
+  const botNumber = botRaw.split('@')[0].split(':')[0];
+  const botParticipant = groupData.participants.find(p => {
+    const pId = p.id || '';
+    const pJid = p.jid || '';
+    return pId.includes(botNumber) || pJid.includes(botNumber);
+  });
+  return botParticipant?.admin === 'admin' || botParticipant?.admin === 'superadmin';
 }
 
 /**
@@ -501,16 +670,21 @@ async function handleAntiContact(sock, jid, senderId, messageId, groupData) {
   }
 }
 
-async function handleWarnCommand(sock, jid, messageText, groupData) {
+async function handleWarnCommand(sock, jid, messageText, groupData, msg) {
   try {
-    const match = messageText.match(/@(\d+)/);
-    if (!match) {
-      await sock.sendMessage(jid, { text: '❌ Syntaxe incorrecte. Exemple: !warn @numéro' });
+    const targetUserId = extractTargetUser(messageText, msg);
+    if (!targetUserId) {
+      await sock.sendMessage(jid, { text: '❌ Syntaxe incorrecte. Exemple: .warn @numéro ou répondez au message avec .warn' });
       return;
     }
 
-    const targetUserId = match[1] + '@s.whatsapp.net';
-    const targetParticipant = groupData?.participants?.find((p) => p.id === targetUserId);
+    const targetNumber = targetUserId.split('@')[0].split(':')[0];
+    const targetParticipant = groupData?.participants?.find((p) => {
+      const pId = p.id || '';
+      const pJid = p.jid || '';
+      return pId.includes(targetNumber) || pJid.includes(targetNumber);
+    });
+
     if (!targetParticipant) {
       await sock.sendMessage(jid, { text: '❌ Utilisateur introuvable dans ce groupe.' });
       return;
@@ -521,7 +695,8 @@ async function handleWarnCommand(sock, jid, messageText, groupData) {
     let responseText = `⚠️ Avertissement ajouté pour ${targetMention}. Total: ${newWarningCount}/${CONFIG.maxWarnings}`;
 
     if (newWarningCount >= CONFIG.maxWarnings) {
-      await sock.groupParticipantsUpdate(jid, [targetUserId], 'remove');
+      const jidToRemove = targetParticipant.id || targetParticipant.jid || targetUserId;
+      await sock.groupParticipantsUpdate(jid, [jidToRemove], 'remove');
       resetWarnings(jid, targetUserId);
       responseText += `\n\n❌ ${targetMention} a été exclu (${CONFIG.maxWarnings} avertissements atteints).`;
     }
@@ -650,30 +825,46 @@ async function handleMentionCommand(sock, jid, messageText, groupData, senderId)
   }
 }
 
-async function handleHelpCommand(sock, jid, isAdminUser, senderId = null, session = null) {
+async function handleHelpCommand(sock, jid, isAdminUser, senderId = null, session = null, senderIsSudo = false) {
   try {
     const userPhone = session?.user?.phone || (session?.phone ? `+${session.phone}` : '');
+    const botMode = getBotMode();
 
-    let helpText = `مرحبا بك في البوت الرسمي ل امبراطورية باراديس \n`;
+    let helpText = `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🤖 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+    helpText += `       🏰 *إمـبـراطـوريـة بـاراديـس* 🏰\n`;
+    helpText += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🤖 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n\n`;
+    helpText += `مـرحـبـاً بـك فـي الـبـوت الـرسـمـي لإمـبـراطـوريـة بـاراديـس ⚔️\n`;
     if (userPhone) {
       helpText += `📱 *رقم البوت المتصل* : ${userPhone}\n`;
     }
-    helpText += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🌿 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n\n`;
+    helpText += `⚙️ *الـوضـع الـحـالـي* : ${botMode === 'private' ? '🔒 خـاص (Private)' : '🌍 عـام (Public)'}\n\n`;
 
     helpText += `╭───『 📜 أوامـر الأعـضـاء 』───⊷\n`;
-    helpText += `│ ⋄ *.menu* ⇠ عـرض قـائـمـة الأوامـر\n`;
-    helpText += `│ ⋄ *.status* ⇠ مـعـلـومـات الـحـسـاب والـبـوت\n`;
-    helpText += `│ ⋄ *.regles* ⇠ قـوانـيـن الإمـبـراطـوريـة\n`;
-    helpText += `│ ⋄ *.warnings* ⇠ فـحـص إنـذاراتـك\n`;
+    helpText += `│ ⋄ *.menu* ⇠ عـرض قـائـمـة الأوامـر 🤖\n`;
+    helpText += `│ ⋄ *.status* ⇠ مـعـلـومـات وحـالـة الـبـوت ⚡\n`;
+    helpText += `│ ⋄ *.regles* ⇠ قـوانـيـن الإمـبـراطـوريـة 📜\n`;
+    helpText += `│ ⋄ *.warnings* ⇠ فـحـص الإنـذارات 📋\n`;
     helpText += `╰─────────────────────⊷\n\n`;
 
-    if (isAdminUser) {
-      helpText += `╭───『 ⚔️ أوامـر الـمـشـرفـيـن 』───⊷\n`;
-      helpText += `│ ⋄ *.mention* ⇠ نـداء ومـنـشـن شـامـل لـكـافـة الأعـضـاء\n`;
-      helpText += `│ ⋄ *.warn @عضو* ⇠ إعـطـاء إنـذار (${CONFIG.maxWarnings} = طرد)\n`;
-      helpText += `│ ⋄ *.warnings @عضو* ⇠ فـحـص إنـذارات عـضـو\n`;
-      helpText += `│ ⋄ *.resetwarn @عضو* ⇠ تـصـفـيـر إنـذارات عـضـو\n`;
-      helpText += `│ ⋄ *.kick @عضو* ⇠ طـرد عـضـو مـن الـمـجـمـوعـة\n`;
+    if (isAdminUser || senderIsSudo) {
+      helpText += `╭───『 ⚔️ أوامـر إدارة الـمـجـمـوعـة 』───⊷\n`;
+      helpText += `│ ⋄ *.mention* ⇠ نـداء ومـنـشـن شـامـل لـكـافـة الأعـضـاء 📢\n`;
+      helpText += `│ ⋄ *.promote @عضو* ⇠ تـرقـيـة عـضـو إلـى مـشـرف 🎖️\n`;
+      helpText += `│ ⋄ *.demote @عضو* ⇠ تـنـزيـل مـشـرف إلـى عـضـو ⬇️\n`;
+      helpText += `│ ⋄ *.demoteall* ⇠ تـنـزيـل كـافـة الـمـشـرفـيـن دُفـعـة واحـدة 🧹\n`;
+      helpText += `│ ⋄ *.warn @عضو* ⇠ إعـطـاء إنـذار (${CONFIG.maxWarnings} = طرد) ⚠️\n`;
+      helpText += `│ ⋄ *.warnings @عضو* ⇠ فـحـص إنـذارات عـضـو 📋\n`;
+      helpText += `│ ⋄ *.resetwarn @عضو* ⇠ تـصـفـيـر إنـذارات عـضـو 🔄\n`;
+      helpText += `│ ⋄ *.kick @عضو* ⇠ طـرد عـضـو مـن الـمـجـمـوعـة 🚪\n`;
+      helpText += `╰─────────────────────⊷\n\n`;
+    }
+
+    if (senderIsSudo) {
+      helpText += `╭───『 👑 أوامـر الـمـطـوريـن والـمـالـك (Sudo) 』───⊷\n`;
+      helpText += `│ ⋄ *.mode [public/private]* ⇠ تـحـويـل وضـع الـبـوت ⚙️\n`;
+      helpText += `│ ⋄ *.sudo @عضو* ⇠ إضـافـة مـطـور لـقـائـمـة الـبـوت 🛡️\n`;
+      helpText += `│ ⋄ *.delsudo @عضو* ⇠ حـذف مـطـور مـن الـقـائـمـة 🗑️\n`;
+      helpText += `│ ⋄ *.sudolist* ⇠ عـرض قـائـمـة الـمـطـوريـن 👑\n`;
       helpText += `╰─────────────────────⊷\n\n`;
     }
 
@@ -702,14 +893,18 @@ async function handleStatusCommand(sock, jid, groupData = null, session = null) 
     const userName = session?.user?.name || session?.name || 'Bot WhatsApp';
     const groupName = groupData?.subject || 'Discussion Privée';
     const totalActive = Array.from(sessions.values()).filter(s => s.status === 'connected').length;
+    const botMode = getBotMode();
+    const sudoCount = getSudoList().length;
 
-    let text = `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🌿 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+    let text = `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚡ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
     text += `       🏰 *حـالـة الـحـسـاب والـبـوت* 🏰\n`;
-    text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🌿 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n\n`;
+    text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚡ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n\n`;
     text += `📱 *الـواتـسـاب الـمـتـصـل* : ${userPhone}\n`;
     text += `👤 *اسـم الـحـسـاب* : ${userName}\n`;
     text += `⚡ *حـالـة الـخـادم* : 🟢 مـتـصـل ونـشـط 24/7\n`;
     text += `🤖 *إجمالي البوتات المتصلة* : ${totalActive} حساب\n`;
+    text += `⚙️ *وضـع الـبـوت* : ${botMode === 'private' ? '🔒 خـاص (Private)' : '🌍 عـام (Public)'}\n`;
+    text += `👑 *عـدد الـمـطـوريـن (Sudo)* : ${sudoCount}\n`;
     text += `🏰 *الـمـجـمـوعـة الـحـالـيـة* : ${groupName}\n`;
     text += `🛡️ *أنـظـمـة الـحـمـايـة* : مـضـاد الـروابـط + مـضـاد جـهـات الاتـصـال\n`;
     text += `⚠️ *الـحـد الأقـصـى لـلإنـذارات* : ${CONFIG.maxWarnings}\n\n`;
@@ -743,11 +938,9 @@ async function handleRulesCommand(sock, jid) {
   }
 }
 
-async function handleCheckWarningsCommand(sock, jid, messageText, senderId) {
+async function handleCheckWarningsCommand(sock, jid, messageText, senderId, msg) {
   try {
-    const match = messageText.match(/@(\d+)/);
-    let targetUserId = senderId;
-    if (match) targetUserId = match[1] + '@s.whatsapp.net';
+    let targetUserId = extractTargetUser(messageText, msg) || senderId;
 
     const count = getWarningCount(jid, targetUserId);
     const targetMention = formatMention(targetUserId);
@@ -765,15 +958,14 @@ async function handleCheckWarningsCommand(sock, jid, messageText, senderId) {
   }
 }
 
-async function handleResetWarnCommand(sock, jid, messageText) {
+async function handleResetWarnCommand(sock, jid, messageText, msg) {
   try {
-    const match = messageText.match(/@(\d+)/);
-    if (!match) {
-      await sock.sendMessage(jid, { text: '❌ Syntaxe incorrecte. Exemple : *!resetwarn @numéro*' });
+    const targetUserId = extractTargetUser(messageText, msg);
+    if (!targetUserId) {
+      await sock.sendMessage(jid, { text: '❌ Syntaxe incorrecte. Exemple : *.resetwarn @numéro* ou répondez au message avec *.resetwarn*' });
       return;
     }
 
-    const targetUserId = match[1] + '@s.whatsapp.net';
     resetWarnings(jid, targetUserId);
 
     const targetMention = formatMention(targetUserId);
@@ -786,22 +978,415 @@ async function handleResetWarnCommand(sock, jid, messageText) {
   }
 }
 
-async function handleManualKickCommand(sock, jid, messageText, groupData) {
+async function handleManualKickCommand(sock, jid, messageText, groupData, msg) {
   try {
-    const match = messageText.match(/@(\d+)/);
-    if (!match) {
-      await sock.sendMessage(jid, { text: '❌ Syntaxe incorrecte. Exemple : *!kick @numéro*' });
+    const targetUserId = extractTargetUser(messageText, msg);
+    if (!targetUserId) {
+      await sock.sendMessage(jid, { text: '❌ Syntaxe incorrecte. Exemple : *.kick @numéro* ou répondez au message avec *.kick*' });
       return;
     }
 
-    const targetUserId = match[1] + '@s.whatsapp.net';
-    const targetMention = formatMention(targetUserId);
+    const targetNumber = targetUserId.split('@')[0].split(':')[0];
+    const targetParticipant = groupData?.participants?.find((p) => {
+      const pId = p.id || '';
+      const pJid = p.jid || '';
+      return pId.includes(targetNumber) || pJid.includes(targetNumber);
+    });
 
+    const targetMention = formatMention(targetUserId);
     await sock.sendMessage(jid, { text: `👋 Expulsion de ${targetMention} par un administrateur...`, mentions: [targetUserId] });
-    await sock.groupParticipantsUpdate(jid, [targetUserId], 'remove');
+    const jidToRemove = targetParticipant?.id || targetParticipant?.jid || targetUserId;
+    await sock.groupParticipantsUpdate(jid, [jidToRemove], 'remove');
     resetWarnings(jid, targetUserId);
   } catch (err) {
     console.error('Erreur !kick:', err);
+  }
+}
+
+/**
+ * Commande .mode [public/private]
+ */
+async function handleModeCommand(sock, jid, messageText, senderIsSudo) {
+  try {
+    if (!senderIsSudo) {
+      await sock.sendMessage(jid, { 
+        text: '⚠️ *عـذراً!* أمـر تـغـيـيـر وضـع الـبـوت مـخـصـص لـمـالـك الـبـوت والـمـطـوريـن (Sudo) فـقـط 🛡️' 
+      });
+      return;
+    }
+
+    const words = messageText.trim().split(/\s+/);
+    const arg = (words[1] || '').toLowerCase();
+
+    if (arg === 'public' || arg === 'عام') {
+      setBotMode('public');
+      let text = `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚙️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+      text += `       🏰 *إمـبـراطـوريـة بـاراديـس* 🏰\n`;
+      text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚙️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n\n`;
+      text += `🌍 *تـم تـفـعـيـل الـوضـع الـعـام (Public Mode)* 🌍\n\n`;
+      text += `⋄ أصـبـح بـإمـكـان كـافـة الأعـضـاء اسـتـخـدام أوامـر الـبـوت الـمـتـاحـة.\n\n`;
+      text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚔️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+      text += `       🏰 *PARADIS EMPIRE* 🏰`;
+      await sock.sendMessage(jid, { text });
+      logActivity(`[Mode] Changé à PUBLIC par sudo`);
+      return;
+    }
+
+    if (arg === 'private' || arg === 'خاص') {
+      setBotMode('private');
+      let text = `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🔒 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+      text += `       🏰 *إمـبـراطـوريـة بـاراديـس* 🏰\n`;
+      text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🔒 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n\n`;
+      text += `🔒 *تـم تـفـعـيـل الـوضـع الـخـاص (Private Mode)* 🔒\n\n`;
+      text += `⋄ لا يـمـكـن لأحـد اسـتـخـدام الـبـوت سـوى مـالـك الـبـوت وقـائـمـة الـمـطـوريـن (Sudo List) فـقـط.\n\n`;
+      text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚔️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+      text += `       🏰 *PARADIS EMPIRE* 🏰`;
+      await sock.sendMessage(jid, { text });
+      logActivity(`[Mode] Changé à PRIVATE par sudo`);
+      return;
+    }
+
+    // Afficher le mode actuel
+    const currentMode = getBotMode();
+    let text = `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚙️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+    text += `       🏰 *إمـبـراطـوريـة بـاراديـس* 🏰\n`;
+    text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚙️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n\n`;
+    text += `⚙️ *وضـع الـبـوت الـحـالـي* : ${currentMode === 'private' ? '🔒 خـاص (Private)' : '🌍 عـام (Public)'}\n\n`;
+    text += `⋄ لـلـتـحـويـل إلـى الـعـام : *.mode public*\n`;
+    text += `⋄ لـلـتـحـويـل إلـى الـخـاص : *.mode private*\n\n`;
+    text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚔️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+    text += `       🏰 *PARADIS EMPIRE* 🏰`;
+    await sock.sendMessage(jid, { text });
+  } catch (err) {
+    console.error('Erreur handleModeCommand:', err);
+  }
+}
+
+/**
+ * Commande .sudo / .addsudo @user
+ */
+async function handleAddSudoCommand(sock, jid, messageText, msg, senderIsSudo) {
+  try {
+    if (!senderIsSudo) {
+      await sock.sendMessage(jid, { 
+        text: '⚠️ *عـذراً!* هـذا الأمـر مـخـصـص لـمـالـك الـبـوت والـمـطـوريـن الـمـعـتـمـديـن فـقـط 🛡️' 
+      });
+      return;
+    }
+
+    const targetUserId = extractTargetUser(messageText, msg);
+    if (!targetUserId) {
+      await sock.sendMessage(jid, { 
+        text: '❌ *يـرجـى تـحـديـد الـعـضـو* :\n⋄ قـم بـعـمـل مـنـشـن : *.sudo @عضو*\n⋄ أو قـم بـالـرد عـلـى رسـالـتـه بـكـتـابـة *.sudo*' 
+      });
+      return;
+    }
+
+    const targetNumber = targetUserId.split('@')[0].split(':')[0];
+    if (isSudo(targetUserId)) {
+      await sock.sendMessage(jid, { 
+        text: `ℹ️ الـعـضـو @${targetNumber} مـوجـود بـالـفـعـل فـي قـائـمـة الـمـطـوريـن (Sudo).`,
+        mentions: [targetUserId]
+      });
+      return;
+    }
+
+    addSudo(targetUserId);
+
+    let text = `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🛡️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+    text += `       🏰 *إمـبـراطـوريـة بـاراديـس* 🏰\n`;
+    text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🛡️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n\n`;
+    text += `👑 *تـمـت إضـافـة مـطـور جـديـد (Sudo)* 👑\n\n`;
+    text += `⋄ الـعـضـو : @${targetNumber}\n`;
+    text += `⋄ الـصـلاحـيـة : اسـتـخـدام وإدارة الـبـوت فـي الـوضـعـيـن الـعـام والـخـاص.\n\n`;
+    text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚔️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+    text += `       🏰 *PARADIS EMPIRE* 🏰`;
+
+    await sock.sendMessage(jid, { text, mentions: [targetUserId] });
+    logActivity(`[Sudo] @${targetNumber} ajouté aux sudos`);
+  } catch (err) {
+    console.error('Erreur handleAddSudoCommand:', err);
+  }
+}
+
+/**
+ * Commande .delsudo @user
+ */
+async function handleRemoveSudoCommand(sock, jid, messageText, msg, senderIsSudo) {
+  try {
+    if (!senderIsSudo) {
+      await sock.sendMessage(jid, { 
+        text: '⚠️ *عـذراً!* هـذا الأمـر مـخـصـص لـمـالـك الـبـوت والـمـطـوريـن فـقـط 🛡️' 
+      });
+      return;
+    }
+
+    const targetUserId = extractTargetUser(messageText, msg);
+    if (!targetUserId) {
+      await sock.sendMessage(jid, { 
+        text: '❌ *يـرجـى تـحـديـد الـعـضـو* :\n⋄ قـم بـعـمـل مـنـشـن : *.delsudo @عضو*\n⋄ أو قـم بـالـرد عـلـى رسـالـتـه بـكـتـابـة *.delsudo*' 
+      });
+      return;
+    }
+
+    const targetNumber = targetUserId.split('@')[0].split(':')[0];
+    removeSudo(targetUserId);
+
+    let text = `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🗑️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+    text += `       🏰 *إمـبـراطـوريـة بـاراديـس* 🏰\n`;
+    text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🗑️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n\n`;
+    text += `🛡️ *تـم حـذف الـعـضـو مـن قـائـمـة الـمـطـوريـن (Sudo)* 🛡️\n\n`;
+    text += `⋄ الـعـضـو : @${targetNumber}\n`;
+    text += `⋄ تـم إلـغـاء صـلاحـيـة اسـتـخـدام الـبـوت فـي الـوضـع الـخـاص.\n\n`;
+    text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚔️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+    text += `       🏰 *PARADIS EMPIRE* 🏰`;
+
+    await sock.sendMessage(jid, { text, mentions: [targetUserId] });
+    logActivity(`[Sudo] @${targetNumber} retiré des sudos`);
+  } catch (err) {
+    console.error('Erreur handleRemoveSudoCommand:', err);
+  }
+}
+
+/**
+ * Commande .sudolist
+ */
+async function handleSudoListCommand(sock, jid) {
+  try {
+    const sudoList = getSudoList();
+
+    let text = `⎔⋅• ━ ╼━ ╼╃ ⌬〔 👑 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+    text += `       🏰 *إمـبـراطـوريـة بـاراديـس* 🏰\n`;
+    text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 👑 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n\n`;
+    text += `👑 *قـائـمـة الـمـطـوريـن الـمـعـتـمـديـن (Sudo List)* (${sudoList.length}) :\n\n`;
+
+    if (sudoList.length === 0) {
+      text += `⋄ لا يـوجـد مـطـوريـن إضـافـيـيـن حـالـيـاً.\n⋄ (مـالـك حـسـاب الـبـوت يـمـلـك الـصـلاحـيـة تـلـقـائـيـاً).\n\n`;
+    } else {
+      for (let i = 0; i < sudoList.length; i++) {
+        const u = sudoList[i];
+        const num = u.split('@')[0];
+        text += `│ ${i + 1}. @${num}\n`;
+      }
+      text += `\n`;
+    }
+
+    text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚔️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+    text += `       🏰 *PARADIS EMPIRE* 🏰`;
+
+    await sock.sendMessage(jid, { text, mentions: sudoList });
+  } catch (err) {
+    console.error('Erreur handleSudoListCommand:', err);
+  }
+}
+
+/**
+ * Commande .promote @user (Group Admins / Sudo)
+ */
+async function handlePromoteCommand(sock, jid, messageText, msg, groupData) {
+  try {
+    let currentGroupData = groupData;
+    if (!currentGroupData || !currentGroupData.participants) {
+      currentGroupData = await sock.groupMetadata(jid).catch(() => null);
+    }
+    if (!currentGroupData) {
+      await sock.sendMessage(jid, { text: '❌ تعذر الحصول على بيانات المجموعة.' });
+      return;
+    }
+
+    if (!isBotAdmin(sock, currentGroupData)) {
+      await sock.sendMessage(jid, { 
+        text: '❌ *فـشـل الإجـراء* : يـجـب تـرقـيـة الـبـوت مـشـرفـاً (Admin) فـي الـمـجـمـوعـة أولاً لـتـمـكـيـنـه مـن إدارة الـرتـب 🛡️' 
+      });
+      return;
+    }
+
+    const targetUserId = extractTargetUser(messageText, msg);
+    if (!targetUserId) {
+      await sock.sendMessage(jid, { 
+        text: '❌ *يـرجـى تـحـديـد الـعـضـو* :\n⋄ قـم بـعـمـل مـنـشـن : *.promote @عضو*\n⋄ أو قـم بـالـرد عـلـى رسـالـتـه بـكـتـابـة *.promote*' 
+      });
+      return;
+    }
+
+    const targetNumber = targetUserId.split('@')[0].split(':')[0];
+    const participant = currentGroupData.participants.find(p => {
+      const pId = p.id || '';
+      const pJid = p.jid || '';
+      return pId.includes(targetNumber) || pJid.includes(targetNumber);
+    });
+
+    if (!participant) {
+      await sock.sendMessage(jid, { text: '❌ الـعـضـو غـيـر مـوجـود فـي هـذه الـمـجـمـوعـة.' });
+      return;
+    }
+
+    if (participant.admin === 'admin' || participant.admin === 'superadmin') {
+      await sock.sendMessage(jid, { 
+        text: `ℹ️ الـعـضـو @${targetNumber} مـشـرف بـالـفـعـل فـي الـمـجـمـوعـة 👑`,
+        mentions: [participant.id, participant.jid || `${targetNumber}@s.whatsapp.net`].filter(Boolean)
+      });
+      return;
+    }
+
+    const jidToPromote = participant.id || participant.jid || `${targetNumber}@s.whatsapp.net`;
+    await sock.groupParticipantsUpdate(jid, [jidToPromote], 'promote');
+
+    let text = `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🎖️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+    text += `       🏰 *إمـبـراطـوريـة بـاراديـس* 🏰\n`;
+    text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🎖️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n\n`;
+    text += `👑 *تـمـت الـتـرقـيـة إلـى مـشـرف بـنـجـاح* 👑\n\n`;
+    text += `⋄ الـعـضـو : @${targetNumber}\n`;
+    text += `⋄ الـرتـبـة : مـشـرف الـمـجـمـوعـة (Group Admin)\n\n`;
+    text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚔️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+    text += `       🏰 *PARADIS EMPIRE* 🏰`;
+
+    await sock.sendMessage(jid, {
+      text,
+      mentions: [participant.id, participant.jid || `${targetNumber}@s.whatsapp.net`].filter(Boolean)
+    });
+    logActivity(`[Promote] @${targetNumber} promu admin dans ${jid}`);
+  } catch (err) {
+    console.error('Erreur handlePromoteCommand:', err);
+    await sock.sendMessage(jid, { text: `❌ تـعـذر تـرقـيـة الـعـضـو : ${err.message}` });
+  }
+}
+
+/**
+ * Commande .demote @user (Group Admins / Sudo)
+ */
+async function handleDemoteCommand(sock, jid, messageText, msg, groupData) {
+  try {
+    let currentGroupData = groupData;
+    if (!currentGroupData || !currentGroupData.participants) {
+      currentGroupData = await sock.groupMetadata(jid).catch(() => null);
+    }
+    if (!currentGroupData) {
+      await sock.sendMessage(jid, { text: '❌ تعذر الحصول على بيانات المجموعة.' });
+      return;
+    }
+
+    if (!isBotAdmin(sock, currentGroupData)) {
+      await sock.sendMessage(jid, { 
+        text: '❌ *فـشـل الإجـراء* : يـجـب تـرقـيـة الـبـوت مـشـرفـاً (Admin) فـي الـمـجـمـوعـة أولاً 🛡️' 
+      });
+      return;
+    }
+
+    const targetUserId = extractTargetUser(messageText, msg);
+    if (!targetUserId) {
+      await sock.sendMessage(jid, { 
+        text: '❌ *يـرجـى تـحـديـد الـعـضـو* :\n⋄ قـم بـعـمـل مـنـشـن : *.demote @عضو*\n⋄ أو قـم بـالـرد عـلـى رسـالـتـه بـكـتـابـة *.demote*' 
+      });
+      return;
+    }
+
+    const targetNumber = targetUserId.split('@')[0].split(':')[0];
+    const participant = currentGroupData.participants.find(p => {
+      const pId = p.id || '';
+      const pJid = p.jid || '';
+      return pId.includes(targetNumber) || pJid.includes(targetNumber);
+    });
+
+    if (!participant) {
+      await sock.sendMessage(jid, { text: '❌ الـعـضـو غـيـر مـوجـود فـي هـذه الـمـجـمـوعـة.' });
+      return;
+    }
+
+    // Protection propriétaire du groupe
+    const ownerNumber = currentGroupData.owner ? currentGroupData.owner.split('@')[0].split(':')[0] : null;
+    if (ownerNumber && targetNumber === ownerNumber) {
+      await sock.sendMessage(jid, { text: '❌ لا يـمـكـن تـنـزيـل مـالـك / مـنـشـئ الـمـجـمـوعـة 🛡️' });
+      return;
+    }
+
+    if (participant.admin !== 'admin' && participant.admin !== 'superadmin') {
+      await sock.sendMessage(jid, { 
+        text: `ℹ️ الـعـضـو @${targetNumber} لـيـس مـشـرفـاً بـالأسـاس.`,
+        mentions: [participant.id, participant.jid || `${targetNumber}@s.whatsapp.net`].filter(Boolean)
+      });
+      return;
+    }
+
+    const jidToDemote = participant.id || participant.jid || `${targetNumber}@s.whatsapp.net`;
+    await sock.groupParticipantsUpdate(jid, [jidToDemote], 'demote');
+
+    let text = `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⬇️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+    text += `       🏰 *إمـبـراطـوريـة بـاراديـس* 🏰\n`;
+    text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⬇️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n\n`;
+    text += `📉 *تـم تـنـزيـل الـرتـبـة إلـى عـضـو* 📉\n\n`;
+    text += `⋄ الـعـضـو : @${targetNumber}\n`;
+    text += `⋄ تـم تـجـريـده مـن صـلاحـيـات الإشـراف بـنـجـاح.\n\n`;
+    text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚔️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+    text += `       🏰 *PARADIS EMPIRE* 🏰`;
+
+    await sock.sendMessage(jid, {
+      text,
+      mentions: [participant.id, participant.jid || `${targetNumber}@s.whatsapp.net`].filter(Boolean)
+    });
+    logActivity(`[Demote] @${targetNumber} rétrogradé membre dans ${jid}`);
+  } catch (err) {
+    console.error('Erreur handleDemoteCommand:', err);
+    await sock.sendMessage(jid, { text: `❌ تـعـذر تـنـزيـل الـعـضـو : ${err.message}` });
+  }
+}
+
+/**
+ * Commande .demoteall (Group Admins / Sudo)
+ */
+async function handleDemoteAllCommand(sock, jid, groupData, senderId, senderIsAdmin, senderIsSudo, isFromMe) {
+  try {
+    let currentGroupData = groupData;
+    if (!currentGroupData || !currentGroupData.participants) {
+      currentGroupData = await sock.groupMetadata(jid).catch(() => null);
+    }
+    if (!currentGroupData) {
+      await sock.sendMessage(jid, { text: '❌ تعذر الحصول على بيانات المجموعة.' });
+      return;
+    }
+
+    if (!isBotAdmin(sock, currentGroupData)) {
+      await sock.sendMessage(jid, { 
+        text: '❌ *فـشـل الإجـراء* : يـجـب تـرقـيـة الـبـوت مـشـرفـاً (Admin) فـي الـمـجـمـوعـة أولاً 🛡️' 
+      });
+      return;
+    }
+
+    const botNumber = sock?.user?.id ? sock.user.id.split('@')[0].split(':')[0] : null;
+    const ownerNumber = currentGroupData.owner ? currentGroupData.owner.split('@')[0].split(':')[0] : null;
+
+    // Trouver tous les admins sauf le bot et le owner du groupe
+    const adminsToDemote = currentGroupData.participants.filter(p => {
+      const isAdm = p.admin === 'admin' || p.admin === 'superadmin';
+      if (!isAdm) return false;
+      const pNumber = (p.id || p.jid || '').split('@')[0].split(':')[0];
+      if (botNumber && pNumber === botNumber) return false;
+      if (ownerNumber && pNumber === ownerNumber) return false;
+      return true;
+    });
+
+    if (adminsToDemote.length === 0) {
+      await sock.sendMessage(jid, { text: 'ℹ️ لا يـوجـد مـشـرفـيـن آخـريـن لـتـنـزيـلـهـم (تـم اسـتـثـنـاء الـبـوت ومـالـك الـمـجـمـوعـة).' });
+      return;
+    }
+
+    const jidsToDemote = adminsToDemote.map(p => p.id || p.jid);
+    await sock.groupParticipantsUpdate(jid, jidsToDemote, 'demote');
+
+    let text = `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🧹 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+    text += `       🏰 *إمـبـراطـوريـة بـاراديـس* 🏰\n`;
+    text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🧹 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n\n`;
+    text += `⚡ *تـم تـنـزيـل كـافـة الـمـشـرفـيـن بـنـجـاح* ⚡\n\n`;
+    text += `⋄ عـدد الـمـشـرفـيـن الـمـنـزلـيـن : ${adminsToDemote.length} مـشـرف\n`;
+    text += `⋄ تـم اسـتـثـنـاء : مـالـك الـمـجـمـوعـة + حـسـاب الـبـوت 🛡️\n\n`;
+    text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚔️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+    text += `       🏰 *PARADIS EMPIRE* 🏰`;
+
+    await sock.sendMessage(jid, { text });
+    logActivity(`[DemoteAll] ${adminsToDemote.length} admins rétrogradés dans ${jid}`);
+  } catch (err) {
+    console.error('Erreur handleDemoteAllCommand:', err);
+    await sock.sendMessage(jid, { text: `❌ تـعـذر تـنـزيـل الـمـشـرفـيـن : ${err.message}` });
   }
 }
 

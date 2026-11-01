@@ -10,7 +10,7 @@ let db = null;
 let SQL = null;
 
 /**
- * Initialiser la base de données SQLite et créer la table des warnings
+ * Initialiser la base de données SQLite et créer les tables nécessaires
  */
 export async function initializeDatabase() {
   try {
@@ -25,7 +25,7 @@ export async function initializeDatabase() {
 
     db = data ? new SQL.Database(data) : new SQL.Database();
 
-    // Créer la table des warnings si elle n'existe pas
+    // 1. Table des avertissements (warnings)
     db.run(`
       CREATE TABLE IF NOT EXISTS warnings (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -38,8 +38,24 @@ export async function initializeDatabase() {
       )
     `);
 
+    // 2. Table des paramètres globaux (mode public/private, etc.)
+    db.run(`
+      CREATE TABLE IF NOT EXISTS settings (
+        key TEXT PRIMARY KEY,
+        value TEXT
+      )
+    `);
+
+    // 3. Table des utilisateurs Sudo (autorisés à utiliser le bot en mode private)
+    db.run(`
+      CREATE TABLE IF NOT EXISTS sudos (
+        userId TEXT PRIMARY KEY,
+        addedAt DATETIME DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
     saveDatabase();
-    console.log('✅ Base de données initialisée avec succès');
+    console.log('✅ Base de données initialisée avec succès (tables warnings, settings, sudos)');
     return db;
   } catch (error) {
     console.error('❌ Erreur lors de l\'initialisation de la base de données:', error);
@@ -60,13 +76,9 @@ function saveDatabase() {
 
 /**
  * Ajouter un warning à un utilisateur (ou augmenter le compte +1)
- * @param {string} groupId - ID du groupe
- * @param {string} userId - ID de l'utilisateur
- * @returns {number} Le nouveau nombre de warnings
  */
 export function addWarning(groupId, userId) {
   try {
-    // Vérifier si l'utilisateur existe déjà
     const result = db.exec(
       'SELECT count FROM warnings WHERE groupId = ? AND userId = ?',
       [groupId, userId]
@@ -74,7 +86,6 @@ export function addWarning(groupId, userId) {
 
     if (result.length > 0 && result[0].values.length > 0) {
       const count = result[0].values[0][0];
-      // Incrémenter le compte
       db.run(
         'UPDATE warnings SET count = count + 1, updatedAt = CURRENT_TIMESTAMP WHERE groupId = ? AND userId = ?',
         [groupId, userId]
@@ -82,7 +93,6 @@ export function addWarning(groupId, userId) {
       saveDatabase();
       return count + 1;
     } else {
-      // Créer une nouvelle entrée
       db.run(
         'INSERT INTO warnings (groupId, userId, count) VALUES (?, ?, 1)',
         [groupId, userId]
@@ -98,9 +108,6 @@ export function addWarning(groupId, userId) {
 
 /**
  * Récupérer le nombre de warnings d'un utilisateur
- * @param {string} groupId - ID du groupe
- * @param {string} userId - ID de l'utilisateur
- * @returns {number} Le nombre de warnings
  */
 export function getWarningCount(groupId, userId) {
   try {
@@ -121,8 +128,6 @@ export function getWarningCount(groupId, userId) {
 
 /**
  * Réinitialiser les warnings d'un utilisateur
- * @param {string} groupId - ID du groupe
- * @param {string} userId - ID de l'utilisateur
  */
 export function resetWarnings(groupId, userId) {
   try {
@@ -139,8 +144,6 @@ export function resetWarnings(groupId, userId) {
 
 /**
  * Récupérer tous les warnings d'un groupe
- * @param {string} groupId - ID du groupe
- * @returns {Array} Liste des warnings
  */
 export function getGroupWarnings(groupId) {
   try {
@@ -166,6 +169,98 @@ export function getGroupWarnings(groupId) {
     return [];
   } catch (error) {
     console.error('❌ Erreur lors de la récupération des warnings du groupe:', error);
+    return [];
+  }
+}
+
+// ----------------------------------------------------
+// Gestion des paramètres (Mode Public / Private)
+// ----------------------------------------------------
+
+export function getSetting(key, defaultValue = null) {
+  try {
+    const result = db.exec('SELECT value FROM settings WHERE key = ?', [key]);
+    if (result.length > 0 && result[0].values.length > 0) {
+      return result[0].values[0][0];
+    }
+    return defaultValue;
+  } catch (error) {
+    console.error('❌ Erreur getSetting:', error);
+    return defaultValue;
+  }
+}
+
+export function setSetting(key, value) {
+  try {
+    db.run('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', [key, String(value)]);
+    saveDatabase();
+    return true;
+  } catch (error) {
+    console.error('❌ Erreur setSetting:', error);
+    return false;
+  }
+}
+
+export function getBotMode() {
+  return getSetting('bot_mode', 'public');
+}
+
+export function setBotMode(mode) {
+  const cleanMode = mode === 'private' ? 'private' : 'public';
+  return setSetting('bot_mode', cleanMode);
+}
+
+// ----------------------------------------------------
+// Gestion des utilisateurs SUDO
+// ----------------------------------------------------
+
+export function isSudo(userId) {
+  try {
+    if (!userId) return false;
+    const cleanUser = userId.split('@')[0].split(':')[0] + '@s.whatsapp.net';
+    const result = db.exec('SELECT userId FROM sudos WHERE userId = ?', [cleanUser]);
+    return result.length > 0 && result[0].values.length > 0;
+  } catch (error) {
+    console.error('❌ Erreur isSudo:', error);
+    return false;
+  }
+}
+
+export function addSudo(userId) {
+  try {
+    if (!userId) return false;
+    const cleanUser = userId.split('@')[0].split(':')[0] + '@s.whatsapp.net';
+    db.run('INSERT OR IGNORE INTO sudos (userId) VALUES (?)', [cleanUser]);
+    saveDatabase();
+    return true;
+  } catch (error) {
+    console.error('❌ Erreur addSudo:', error);
+    return false;
+  }
+}
+
+export function removeSudo(userId) {
+  try {
+    if (!userId) return false;
+    const cleanUser = userId.split('@')[0].split(':')[0] + '@s.whatsapp.net';
+    db.run('DELETE FROM sudos WHERE userId = ?', [cleanUser]);
+    saveDatabase();
+    return true;
+  } catch (error) {
+    console.error('❌ Erreur removeSudo:', error);
+    return false;
+  }
+}
+
+export function getSudoList() {
+  try {
+    const result = db.exec('SELECT userId FROM sudos ORDER BY addedAt ASC');
+    if (result.length > 0 && result[0].values.length > 0) {
+      return result[0].values.map(v => v[0]);
+    }
+    return [];
+  } catch (error) {
+    console.error('❌ Erreur getSudoList:', error);
     return [];
   }
 }
