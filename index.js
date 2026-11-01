@@ -726,7 +726,7 @@ function isBotAdmin(sock, groupData) {
  */
 async function handleAntiLink(sock, jid, senderId, messageId, groupData) {
   try {
-    // Supprimer le message contenant le lien en tant qu'admin
+    // 1. Supprimer le message contenant le lien en tant qu'admin
     try {
       await sock.sendMessage(jid, { 
         delete: { 
@@ -743,8 +743,31 @@ async function handleAntiLink(sock, jid, senderId, messageId, groupData) {
     const newWarningCount = addWarning(jid, senderId);
     const senderNumber = senderId.split('@')[0].split(':')[0];
 
-    // Format demandé: شكدير؟ سارق أعضاء؟ ابلع انذار 1/3
+    // Récupérer les admins du groupe pour les mentionner
+    let currentGroupData = groupData;
+    if (!currentGroupData || !currentGroupData.participants) {
+      currentGroupData = await sock.groupMetadata(jid).catch(() => null);
+    }
+    const adminParticipants = currentGroupData?.participants?.filter(p => p.admin === 'admin' || p.admin === 'superadmin') || [];
+    const allMentions = new Set([senderId]);
+    const adminTags = [];
+
+    for (const adm of adminParticipants) {
+      const rawJid = adm.id || adm.jid;
+      if (rawJid) {
+        allMentions.add(rawJid);
+        if (adm.jid) allMentions.add(adm.jid);
+        if (adm.id) allMentions.add(adm.id);
+        const admNum = (adm.jid || adm.id).split('@')[0].split(':')[0];
+        adminTags.push(`@${admNum}`);
+      }
+    }
+
+    // Message demandé: شكدير؟ سارق أعضاء؟ ابلع انذار 1/3 + tag admins
     let notificationText = `⚠️ @${senderNumber}\n*شكدير؟ سارق أعضاء؟ ابلع انذار ${newWarningCount}/${CONFIG.maxWarnings}*`;
+    if (adminTags.length > 0) {
+      notificationText += `\n\n👑 *تـنـبـيـه لـلـمـشـرفـيـن* : ${adminTags.join(' ')}`;
+    }
 
     if (newWarningCount >= CONFIG.maxWarnings) {
       try {
@@ -756,8 +779,37 @@ async function handleAntiLink(sock, jid, senderId, messageId, groupData) {
       notificationText += `\n\n❌ *تـم طـرد @${senderNumber} مـن الـمـجـمـوعـة لـتـجـاوز الـحـد الأقـصـى لـلإنـذارات.*`;
     }
 
-    await sock.sendMessage(jid, { text: notificationText, mentions: [senderId] });
+    await sock.sendMessage(jid, { 
+      text: notificationText, 
+      mentions: Array.from(allMentions).filter(Boolean) 
+    });
     logActivity(`[AntiLink] Lien supprimé et warn #${newWarningCount}/${CONFIG.maxWarnings} pour ${senderNumber}`);
+
+    // 2. Envoyer l'audio shadooh
+    const opusPath = path.join(__dirname, 'Media', 'shadooh.opus');
+    const mp3Path = path.join(__dirname, 'Media', 'shadooh.mp3');
+
+    if (fs.existsSync(opusPath)) {
+      try {
+        await sock.sendMessage(jid, {
+          audio: fs.readFileSync(opusPath),
+          mimetype: 'audio/ogg; codecs=opus',
+          ptt: true
+        });
+      } catch (audioErr) {
+        logActivity(`Échec envoi audio anti-link opus: ${audioErr.message}`, 'warn');
+      }
+    } else if (fs.existsSync(mp3Path)) {
+      try {
+        await sock.sendMessage(jid, {
+          audio: fs.readFileSync(mp3Path),
+          mimetype: 'audio/mp4',
+          ptt: false
+        });
+      } catch (audioErr) {
+        logActivity(`Échec envoi audio anti-link mp3: ${audioErr.message}`, 'warn');
+      }
+    }
   } catch (err) {
     console.error('Erreur anti-lien:', err);
   }
