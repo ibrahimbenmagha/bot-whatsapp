@@ -63,7 +63,8 @@ const sseClients = new Set();
 let latestPairingCode = null;
 let latestPairingPhone = null;
 
-// Anti-spam tracker (messages transférés): key = "groupId:userId" -> { count: number, firstTimestamp: number }
+// Anti-spam tracker (messages transférés successifs dans le groupe):
+// key = jid -> Array<{ senderId: string, timestamp: number }>
 const forwardSpamTracker = new Map();
 const groupSpamCooldown = new Map();
 
@@ -424,25 +425,24 @@ async function handleSessionMessages(botPhone, m) {
           await handleAntiContact(sock, jid, senderId, msg.key.id, groupData);
         }
 
-        // 3. Module Anti-Spam (Transfert de plus de 8 messages vers le groupe)
+        // 3. Module Anti-Spam (Transfert de messages successifs vers le groupe - 2 fois ou plus)
         if (!isFromMe && isForwardedMessage(msg)) {
           const now = Date.now();
-          const trackKey = `${jid}:${senderId}`;
           const lastGroupTrigger = groupSpamCooldown.get(jid) || 0;
 
-          if (now - lastGroupTrigger > 20000) {
-            let tracker = forwardSpamTracker.get(trackKey);
-            if (!tracker || (now - tracker.firstTimestamp > 15000)) {
-              tracker = { count: 1, firstTimestamp: now };
-            } else {
-              tracker.count += 1;
-            }
-            forwardSpamTracker.set(trackKey, tracker);
+          if (now - lastGroupTrigger > 25000) {
+            let forwards = forwardSpamTracker.get(jid) || [];
+            // Garder les transferts successifs récents (dans une fenêtre de 20s)
+            forwards = forwards.filter((item) => now - item.timestamp <= 20000);
+            forwards.push({ senderId, timestamp: now });
+            forwardSpamTracker.set(jid, forwards);
 
-            if (tracker.count > 8) {
-              forwardSpamTracker.delete(trackKey);
+            // Dès 2 transferts successifs (2 à 8 fois ou moins, même entre personnes différentes)
+            if (forwards.length >= 2) {
+              const spammers = Array.from(new Set(forwards.map((f) => f.senderId)));
+              forwardSpamTracker.delete(jid);
               groupSpamCooldown.set(jid, now);
-              await handleForwardSpam(sock, jid, senderId, groupData);
+              await handleForwardSpam(sock, jid, spammers, groupData);
             }
           }
         }
@@ -952,13 +952,14 @@ async function handleAntiContact(sock, jid, senderId, messageId, groupData) {
 }
 
 /**
- * Module Anti-Spam: Transfert de plus de 8 messages vers le groupe
- * Ferme le groupe, rétrograde le spammer s'il est admin, mentionne les admins et envoie l'audio Sktona
+ * Module Anti-Spam: Transfert de messages successifs vers le groupe (2 fois ou plus)
+ * Ferme le groupe, rétrograde les spammers s'ils sont admins, mentionne les admins et envoie l'audio Sktona
  */
-async function handleForwardSpam(sock, jid, senderId, groupData) {
+async function handleForwardSpam(sock, jid, spammersInput, groupData) {
   try {
-    const senderNumber = senderId.split('@')[0].split(':')[0];
-    logActivity(`[AntiSpam] Détection spam messages transférés (>8) de @${senderNumber} dans ${jid}`, 'warn');
+    const spammersList = Array.isArray(spammersInput) ? spammersInput : [spammersInput];
+    const spammerNumbers = spammersList.map((s) => (s || '').split('@')[0].split(':')[0]);
+    logActivity(`[AntiSpam] Détection spam messages transférés successifs de [${spammerNumbers.join(', ')}] dans ${jid}`, 'warn');
 
     let currentGroupData = groupData;
     if (!currentGroupData || !currentGroupData.participants) {
@@ -973,32 +974,35 @@ async function handleForwardSpam(sock, jid, senderId, groupData) {
       logActivity(`[AntiSpam] Échec fermeture groupe: ${lockErr.message}`, 'warn');
     }
 
-    // 2. Si le spammer est admin, lui retirer l'admin et le rendre membre régulier
-    let wasAdmin = false;
-    const spammerParticipant = currentGroupData?.participants?.find(p => {
-      const pNum = (p.id || p.jid || '').split('@')[0].split(':')[0];
-      return pNum === senderNumber;
-    });
+    // 2. Si un ou plusieurs spammers sont admins, leur retirer l'admin et les rendre membres réguliers
+    const demotedAdmins = [];
+    for (const spammerId of spammersList) {
+      const spammerNumber = spammerId.split('@')[0].split(':')[0];
+      const spammerParticipant = currentGroupData?.participants?.find((p) => {
+        const pNum = (p.id || p.jid || '').split('@')[0].split(':')[0];
+        return pNum === spammerNumber;
+      });
 
-    if (spammerParticipant && (spammerParticipant.admin === 'admin' || spammerParticipant.admin === 'superadmin')) {
-      wasAdmin = true;
-      const jidToDemote = spammerParticipant.id || spammerParticipant.jid || senderId;
-      try {
-        await sock.groupParticipantsUpdate(jid, [jidToDemote], 'demote');
-        logActivity(`[AntiSpam] Spammer @${senderNumber} dégradé de admin à membre.`);
-      } catch (demoteErr) {
-        logActivity(`[AntiSpam] Échec dégradation spammer: ${demoteErr.message}`, 'warn');
+      if (spammerParticipant && (spammerParticipant.admin === 'admin' || spammerParticipant.admin === 'superadmin')) {
+        const jidToDemote = spammerParticipant.id || spammerParticipant.jid || spammerId;
+        try {
+          await sock.groupParticipantsUpdate(jid, [jidToDemote], 'demote');
+          demotedAdmins.push(`@${spammerNumber}`);
+          logActivity(`[AntiSpam] Spammer @${spammerNumber} dégradé de admin à membre.`);
+        } catch (demoteErr) {
+          logActivity(`[AntiSpam] Échec dégradation spammer @${spammerNumber}: ${demoteErr.message}`, 'warn');
+        }
       }
     }
 
-    // 3. Récupérer les admins du groupe pour les taguer
-    const adminParticipants = currentGroupData?.participants?.filter(p => {
+    // 3. Récupérer les autres admins du groupe pour les taguer
+    const adminParticipants = currentGroupData?.participants?.filter((p) => {
       if (p.admin !== 'admin' && p.admin !== 'superadmin') return false;
       const pNum = (p.id || p.jid || '').split('@')[0].split(':')[0];
-      return pNum !== senderNumber;
+      return !spammerNumbers.includes(pNum);
     }) || [];
 
-    const allMentions = new Set([senderId]);
+    const allMentions = new Set(spammersList);
     const adminTags = [];
 
     for (const adm of adminParticipants) {
@@ -1012,13 +1016,15 @@ async function handleForwardSpam(sock, jid, senderId, groupData) {
       }
     }
 
+    const spammerMentionsText = spammerNumbers.map((n) => `@${n}`).join(' و ');
+
     // 4. Message demandé : ياك أ زين؟؟ كتسبامي؟؟ جيلااااااااااااااااااال لغي لحبهم الحسبة
     let spamText = `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🚨 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
     spamText += `       🏰 *إمـبـراطـوريـة بـاراديـس* 🏰\n`;
     spamText += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🚨 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n\n`;
     spamText += `*ياك أ زين؟؟ كتسبامي؟؟ جيلااااااااااااااااااال لغي لحبهم الحسبة* 🚨🔒\n\n`;
-    spamText += `⋄ الـعـضـو : @${senderNumber}\n`;
-    spamText += `⋄ الإجـراء : تـم قـفـل الـمـجـمـوعـة تـلـقـائـيـاً (الـمـشـرفـيـن فـقـط)${wasAdmin ? '\n⋄ تـم تـجـريـد الـعـضـو مـن صـلاحـيـات الإشـراف ⬇️' : ''}\n\n`;
+    spamText += `⋄ الـعـضـو : ${spammerMentionsText}\n`;
+    spamText += `⋄ الإجـراء : تـم قـفـل الـمـجـمـوعـة تـلـقـائـيـاً (الـمـشـرفـيـن فـقـط)${demotedAdmins.length > 0 ? `\n⋄ تـم تـجـريـد ${demotedAdmins.join(' و ')} مـن صـلاحـيـات الإشـراف ⬇️` : ''}\n\n`;
     if (adminTags.length > 0) {
       spamText += `👑 *تـنـبـيـه لـلـمـشـرفـيـن* : ${adminTags.join(' ')}\n\n`;
     }
