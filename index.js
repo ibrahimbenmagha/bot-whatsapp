@@ -510,8 +510,8 @@ async function handleSessionMessages(botPhone, m) {
         continue;
       }
 
-      // Commande .regles
-      if (isCmd('regles') || isCmd('rules') || isCmd('قوانين') || isCmd('القوانين')) {
+      // Commande .rulls / .rules
+      if (isCmd('rulls') || isCmd('rules') || isCmd('regles') || isCmd('قوانين') || isCmd('القوانين')) {
         await reactToMessage(sock, jid, msg.key, '📜');
         await handleRulesCommand(sock, jid);
         continue;
@@ -1232,7 +1232,7 @@ async function handleHelpCommand(sock, jid, isAdminUser, senderId = null, sessio
     helpText += `╭───『 📜 أوامـر الأعـضـاء 』───⊷\n`;
     helpText += `│ ⋄ *.menu* ⇠ عـرض قـائـمـة الأوامـر 🤖\n`;
     helpText += `│ ⋄ *.status* ⇠ مـعـلـومـات وحـالـة الـبـوت ⚡\n`;
-    helpText += `│ ⋄ *.regles* ⇠ قـوانـيـن الإمـبـراطـوريـة 📜\n`;
+    helpText += `│ ⋄ *.rulls* ⇠ قـوانـيـن الـمـجـمـوعـة 📜\n`;
     helpText += `│ ⋄ *.warnings* ⇠ فـحـص الإنـذارات 📋\n`;
     helpText += `╰─────────────────────⊷\n\n`;
 
@@ -1326,22 +1326,20 @@ async function handleStatusCommand(sock, jid, groupData = null, session = null) 
 
 async function handleRulesCommand(sock, jid) {
   try {
-    let rulesText = `📜 *قـوانـيـن إمـبـراطـوريـة بـاراديـس* 📜\n`;
-    rulesText += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚔️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n\n`;
-    rulesText += `1️⃣ *مـمـنـوع نـشـر الـروابـط* 🚫\n`;
-    rulesText += `أي رابـط خـارجـي يُـحـذف فـوراً مـع إنـذار.\n\n`;
-    rulesText += `2️⃣ *مـمـنـوع جـهـات الاتـصـال* 📵\n`;
-    rulesText += `مـشـاركـة بـطـاقـات الاتـصـال تـعـرضـك لـلـطـرد الـمـبـاشـر.\n\n`;
-    rulesText += `3️⃣ *نـظـام الإنـذارات* ⚠️\n`;
-    rulesText += `الـحـد الأقـصـى ${CONFIG.maxWarnings} إنـذارات، بـعـدهـا يـتـم الـطـرد تـلـقـائـيـاً.\n\n`;
-    rulesText += `4️⃣ *الاحـتـرام والـتـقـديـر* 🤝\n`;
-    rulesText += `يُـمـنـع الـسـب أو الـشـتـم، الـمـعـامـلـة بـاحـتـرام واجـبـة.\n\n`;
-    rulesText += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🌿 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
-    rulesText += `_نـظـام الـحـمـايـة شـغـال 24/7_`;
+    let rulesText = `⚠️ قــوانــيــن الـمـجـمـوعـة | الإلــتــزام واجــب ⚠️\n\n\n`;
+    rulesText += `🌿🌿🚫 مـمـنـوع الـسـبـام والإزعـاج\n\n`;
+    rulesText += `🌿🚫 مـمـنـوع الـصـور أو الـمـلـصـقـات الـمـخـلـة\n\n`;
+    rulesText += `🌿🚫 مـمـنـوع فـتـح الـمـكـالـمـات الـصـوتـيـة\n\n`;
+    rulesText += `🌿🚫 مـمـنـوع الـسـب والـشـتـم\n\n`;
+    rulesText += `🌿🚫 مـمـنـوع الـتـرويـج والـروابـط\n\n`;
+    rulesText += `🌿🚫 مـمـنـوع الـتـحـرش أو الـمـواضـيـع الـجـنـسـيـة\n\n`;
+    rulesText += `🌿🚫 مـمـنـوع الـتـنـمـر أو الـتـقـلـيـل مـن الأعـضـاء\n\n`;
+    rulesText += `🌿🚫 مـمـنـوع إفـتـعـال الـمـشـاكـل أو الـتـهـديـد\n\n`;
+    rulesText += `🌿✨ إحترامك دليل على رقيك ✨🌿`;
 
     await sock.sendMessage(jid, { text: rulesText });
   } catch (err) {
-    console.error('Erreur !regles:', err);
+    console.error('Erreur !rulls:', err);
   }
 }
 
