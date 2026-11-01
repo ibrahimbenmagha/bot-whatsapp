@@ -21,7 +21,13 @@ import {
   isSudo,
   addSudo,
   removeSudo,
-  getSudoList
+  getSudoList,
+  isAntiLinkEnabled,
+  setAntiLinkEnabled,
+  allowLinkUser,
+  disallowLinkUser,
+  isLinkAllowed,
+  getAllowedLinkUsers
 } from './db.js';
 import { isAdmin, extractMessage, containsUrl, isGroupMessage, formatMention, normalizeJid } from './utils/helpers.js';
 
@@ -369,14 +375,20 @@ async function handleSessionMessages(botPhone, m) {
           logActivity(`Avertissement groupMetadata: ${err.message}`, 'warn');
         }
 
+        const senderIsSudoEarly = isFromMe || isSudo(senderId);
+
         // 1. Module Anti-Lien
-        if (!isFromMe && !senderIsAdmin && containsUrl(messageText)) {
-          await handleAntiLink(sock, jid, senderId, msg.key.id, groupData);
+        if (!isFromMe && !senderIsAdmin && !senderIsSudoEarly && containsUrl(messageText)) {
+          const antilinkActive = isAntiLinkEnabled(jid);
+          const userAllowed = isLinkAllowed(jid, senderId);
+          if (antilinkActive && !userAllowed) {
+            await handleAntiLink(sock, jid, senderId, msg.key.id, groupData);
+          }
         }
 
         // 2. Module Anti-Contact
         const isContact = msg.message.contactMessage || msg.message.contactsArrayMessage;
-        if (!isFromMe && !senderIsAdmin && isContact) {
+        if (!isFromMe && !senderIsAdmin && !senderIsSudoEarly && isContact) {
           await handleAntiContact(sock, jid, senderId, msg.key.id, groupData);
         }
       } else {
@@ -568,24 +580,80 @@ async function handleSessionMessages(botPhone, m) {
         continue;
       }
 
+      // Commande .antilink [on/off] (Group Admins / Sudo)
+      if (startsWithCmd('antilink') || startsWithCmd('مضاد_الروابط')) {
+        await reactToMessage(sock, jid, msg.key, '🛡️');
+        if (!isGroup) {
+          await sock.sendMessage(jid, { text: 'ℹ️ هذه العملية تعمل فقط داخل المجموعات.' });
+          continue;
+        }
+        await handleAntiLinkToggleCommand(sock, jid, messageText, senderIsAdmin, senderIsSudo);
+        continue;
+      }
+
+      // Commande .allowlink / .allowlinks @user (Group Admins / Sudo)
+      if (startsWithCmd('allowlink') || startsWithCmd('allowlinks') || startsWithCmd('سماح_روابط')) {
+        await reactToMessage(sock, jid, msg.key, '🔗');
+        if (!isGroup) {
+          await sock.sendMessage(jid, { text: 'ℹ️ هذه العملية تعمل فقط داخل المجموعات.' });
+          continue;
+        }
+        await handleAllowLinkCommand(sock, jid, messageText, msg, senderIsAdmin, senderIsSudo);
+        continue;
+      }
+
+      // Commande .disallowlink / .dellink @user (Group Admins / Sudo)
+      if (startsWithCmd('disallowlink') || startsWithCmd('dellink') || startsWithCmd('منع_روابط')) {
+        await reactToMessage(sock, jid, msg.key, '🚫');
+        if (!isGroup) {
+          await sock.sendMessage(jid, { text: 'ℹ️ هذه العملية تعمل فقط داخل المجموعات.' });
+          continue;
+        }
+        await handleDisallowLinkCommand(sock, jid, messageText, msg, senderIsAdmin, senderIsSudo);
+        continue;
+      }
+
+      // Commande .allowedlinks / .allowlinklist (Group Admins / Sudo / All)
+      if (isCmd('allowedlinks') || isCmd('allowlinklist') || isCmd('قائمة_الروابط')) {
+        await reactToMessage(sock, jid, msg.key, '📋');
+        if (!isGroup) {
+          await sock.sendMessage(jid, { text: 'ℹ️ هذه العملية تعمل فقط داخل المجموعات.' });
+          continue;
+        }
+        await handleAllowedLinksListCommand(sock, jid);
+        continue;
+      }
+
       // 4. Commande inconnue / inexistante (ex: .xyz)
-      // "si quelqu un utilise . avec commnde qui n existe pas ile repond avec (هدشي واللهم كين) avec le audio Shubady.mpeg"
+      // "si quelqu un utilise . avec commnde qui n existe pas ile repond avec (هدشي واللهم كين) avec le audio Shubady"
       if (isPrefixCommand && trimmedText.length > 1 && !trimmedText.startsWith('..') && !trimmedText.startsWith('...')) {
         await reactToMessage(sock, jid, msg.key, '❓');
         await sock.sendMessage(jid, { 
           text: 'هدشي واللهم كين' 
         }, { quoted: msg });
 
-        const audioPath = path.join(__dirname, 'Media', 'Shubady.mpeg');
-        if (fs.existsSync(audioPath)) {
+        const opusPath = path.join(__dirname, 'Media', 'Shubady.opus');
+        const mpegPath = path.join(__dirname, 'Media', 'Shubady.mpeg');
+
+        if (fs.existsSync(opusPath)) {
           try {
             await sock.sendMessage(jid, {
-              audio: fs.readFileSync(audioPath),
-              mimetype: 'audio/mpeg',
+              audio: fs.readFileSync(opusPath),
+              mimetype: 'audio/ogg; codecs=opus',
               ptt: true
             }, { quoted: msg });
           } catch (audioErr) {
-            console.error('Erreur envoi audio Shubady:', audioErr);
+            console.error('Erreur envoi audio Shubady opus:', audioErr);
+          }
+        } else if (fs.existsSync(mpegPath)) {
+          try {
+            await sock.sendMessage(jid, {
+              audio: fs.readFileSync(mpegPath),
+              mimetype: 'audio/mp4',
+              ptt: false
+            }, { quoted: msg });
+          } catch (audioErr) {
+            console.error('Erreur envoi audio Shubady mpeg:', audioErr);
           }
         }
         continue;
@@ -658,20 +726,38 @@ function isBotAdmin(sock, groupData) {
  */
 async function handleAntiLink(sock, jid, senderId, messageId, groupData) {
   try {
-    await sock.sendMessage(jid, { delete: { remoteJid: jid, fromMe: false, id: messageId } });
-    const newWarningCount = addWarning(jid, senderId);
-
-    const senderMention = formatMention(senderId);
-    let notificationText = `⚠️ ${senderMention} Lien détecté et supprimé ! Avertissement ${newWarningCount}/${CONFIG.maxWarnings}`;
-
-    if (newWarningCount >= CONFIG.maxWarnings) {
-      await sock.groupParticipantsUpdate(jid, [senderId], 'remove');
-      resetWarnings(jid, senderId);
-      notificationText += `\n\n❌ Utilisateur ${senderMention} exclu du groupe (${CONFIG.maxWarnings} avertissements atteints).`;
+    // Supprimer le message contenant le lien en tant qu'admin
+    try {
+      await sock.sendMessage(jid, { 
+        delete: { 
+          remoteJid: jid, 
+          fromMe: false, 
+          id: messageId, 
+          participant: senderId 
+        } 
+      });
+    } catch (delErr) {
+      logActivity(`Échec suppression lien: ${delErr.message}`, 'warn');
     }
 
-    await sock.sendMessage(jid, { text: notificationText });
-    logActivity(`Anti-lien: message supprimé, warn #${newWarningCount} pour ${senderId}`);
+    const newWarningCount = addWarning(jid, senderId);
+    const senderNumber = senderId.split('@')[0].split(':')[0];
+
+    // Format demandé: شكدير؟ سارق أعضاء؟ ابلع انذار 1/3
+    let notificationText = `⚠️ @${senderNumber}\n*شكدير؟ سارق أعضاء؟ ابلع انذار ${newWarningCount}/${CONFIG.maxWarnings}*`;
+
+    if (newWarningCount >= CONFIG.maxWarnings) {
+      try {
+        await sock.groupParticipantsUpdate(jid, [senderId], 'remove');
+      } catch (rmErr) {
+        logActivity(`Échec expulsion lien ${senderId}: ${rmErr.message}`, 'warn');
+      }
+      resetWarnings(jid, senderId);
+      notificationText += `\n\n❌ *تـم طـرد @${senderNumber} مـن الـمـجـمـوعـة لـتـجـاوز الـحـد الأقـصـى لـلإنـذارات.*`;
+    }
+
+    await sock.sendMessage(jid, { text: notificationText, mentions: [senderId] });
+    logActivity(`[AntiLink] Lien supprimé et warn #${newWarningCount}/${CONFIG.maxWarnings} pour ${senderNumber}`);
   } catch (err) {
     console.error('Erreur anti-lien:', err);
   }
@@ -679,18 +765,38 @@ async function handleAntiLink(sock, jid, senderId, messageId, groupData) {
 
 async function handleAntiContact(sock, jid, senderId, messageId, groupData) {
   try {
-    await sock.sendMessage(jid, { delete: { remoteJid: jid, fromMe: false, id: messageId } });
-    await sock.groupParticipantsUpdate(jid, [senderId], 'remove');
-    resetWarnings(jid, senderId);
+    // Supprimer la fiche contact en tant qu'admin
+    try {
+      await sock.sendMessage(jid, { 
+        delete: { 
+          remoteJid: jid, 
+          fromMe: false, 
+          id: messageId, 
+          participant: senderId 
+        } 
+      });
+    } catch (delErr) {
+      logActivity(`Échec suppression contact: ${delErr.message}`, 'warn');
+    }
 
-    const admins = groupData?.participants?.filter(p => p.admin === 'admin' || p.admin === 'superadmin')?.map(p => p.id) || [];
-    const senderMention = formatMention(senderId);
-    const adminMentions = admins.map(adminId => formatMention(adminId)).join(' ');
+    const newWarningCount = addWarning(jid, senderId);
+    const senderNumber = senderId.split('@')[0].split(':')[0];
 
-    const notificationText = `${adminMentions}\n🚫 ${senderMention} a partagé un contact et a été exclu du groupe.`;
-    await sock.sendMessage(jid, { text: notificationText, mentions: [senderId, ...admins] });
+    // Format demandé: تاشو هه كيباني ب جهة اتصال وااع علي قديم ابلع انذار 1/2
+    let notificationText = `📵 @${senderNumber}\n*تاشو هه كيباني ب جهة اتصال وااع علي قديم ابلع انذار ${newWarningCount}/${CONFIG.maxWarnings}*`;
 
-    logActivity(`Anti-contact: ${senderId} exclu pour partage de fiche contact`);
+    if (newWarningCount >= CONFIG.maxWarnings) {
+      try {
+        await sock.groupParticipantsUpdate(jid, [senderId], 'remove');
+      } catch (rmErr) {
+        logActivity(`Échec expulsion contact ${senderId}: ${rmErr.message}`, 'warn');
+      }
+      resetWarnings(jid, senderId);
+      notificationText += `\n\n❌ *تـم طـرد @${senderNumber} مـن الـمـجـمـوعـة لـتـجـاوز الـحـد الأقـصـى لـلإنـذارات.*`;
+    }
+
+    await sock.sendMessage(jid, { text: notificationText, mentions: [senderId] });
+    logActivity(`[AntiContact] Contact supprimé et warn #${newWarningCount}/${CONFIG.maxWarnings} pour ${senderNumber}`);
   } catch (err) {
     console.error('Erreur anti-contact:', err);
   }
@@ -878,6 +984,10 @@ async function handleHelpCommand(sock, jid, isAdminUser, senderId = null, sessio
       helpText += `│ ⋄ *.promote @عضو* ⇠ تـرقـيـة عـضـو إلـى مـشـرف 🎖️\n`;
       helpText += `│ ⋄ *.demote @عضو* ⇠ تـنـزيـل مـشـرف إلـى عـضـو ⬇️\n`;
       helpText += `│ ⋄ *.demoteall* ⇠ تـنـزيـل كـافـة الـمـشـرفـيـن (حـصـري لـلـبـوت) 🧹\n`;
+      helpText += `│ ⋄ *.antilink [on/off]* ⇠ تـفـعـيـل أو تـعـطـيـل مـضـاد الـروابـط 🛡️\n`;
+      helpText += `│ ⋄ *.allowlink @عضو* ⇠ الـسـمـاح لـعـضـو بـإرسـال الـروابـط 🔗\n`;
+      helpText += `│ ⋄ *.disallowlink @عضو* ⇠ إلـغـاء الـسـمـاح بـالـروابـط 🚫\n`;
+      helpText += `│ ⋄ *.allowedlinks* ⇠ قـائـمـة الأعـضـاء الـمـسـمـوح لـهـم بـالـروابـط 📋\n`;
       helpText += `│ ⋄ *.warn @عضو* ⇠ إعـطـاء إنـذار (${CONFIG.maxWarnings} = طرد) ⚠️\n`;
       helpText += `│ ⋄ *.warnings @عضو* ⇠ فـحـص إنـذارات عـضـو 📋\n`;
       helpText += `│ ⋄ *.resetwarn @عضو* ⇠ تـصـفـيـر إنـذارات عـضـو 🔄\n`;
@@ -1432,6 +1542,170 @@ async function handleDemoteAllCommand(sock, jid, groupData) {
   } catch (err) {
     console.error('Erreur handleDemoteAllCommand:', err);
     await sock.sendMessage(jid, { text: `❌ تـعـذر تـنـزيـل الـمـشـرفـيـن : ${err.message}` });
+  }
+}
+
+/**
+ * Commande .antilink on / .antilink off
+ */
+async function handleAntiLinkToggleCommand(sock, jid, messageText, senderIsAdmin, senderIsSudo) {
+  try {
+    if (!senderIsAdmin && !senderIsSudo) {
+      await sock.sendMessage(jid, { text: '⚠️ *عـذراً!* هذا الأمر مخصص لمشرفي المجموعة أو مطوري البوت فقط.' });
+      return;
+    }
+
+    const words = messageText.trim().split(/\s+/);
+    const arg = (words[1] || '').toLowerCase();
+
+    if (arg === 'on' || arg === 'تشغيل' || arg === 'تفعيل') {
+      setAntiLinkEnabled(jid, true);
+      let text = `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🛡️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+      text += `       🏰 *إمـبـراطـوريـة بـاراديـس* 🏰\n`;
+      text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🛡️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n\n`;
+      text += `🛡️ *تـم تـفـعـيـل مـضـاد الـروابـط (Anti-Link ON)*\n\n`;
+      text += `⋄ سـيـتـم حـذف أي رابـط تـلـقـائـيـاً وإعـطـاء إنـذار لـصـاحـبـه ⚠️.\n`;
+      text += `⋄ (الـمـشـرفـيـن والأعـضـاء الـمـسـمـوح لـهـم مـسـتـثـنـون).\n\n`;
+      text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚔️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+      text += `       🏰 *PARADIS EMPIRE* 🏰`;
+      await sock.sendMessage(jid, { text });
+      logActivity(`[AntiLink] Activé dans ${jid}`);
+      return;
+    }
+
+    if (arg === 'off' || arg === 'تعطيل' || arg === 'ايقاف') {
+      setAntiLinkEnabled(jid, false);
+      let text = `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚠️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+      text += `       🏰 *إمـبـراطـوريـة بـاراديـس* 🏰\n`;
+      text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚠️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n\n`;
+      text += `⚠️ *تـم إيـقـاف مـضـاد الـروابـط (Anti-Link OFF)*\n\n`;
+      text += `⋄ مـسـمـوح بـنـشـر الـروابـط حـالـيـاً داخـل هـذه الـمـجـمـوعـة.\n\n`;
+      text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚔️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+      text += `       🏰 *PARADIS EMPIRE* 🏰`;
+      await sock.sendMessage(jid, { text });
+      logActivity(`[AntiLink] Désactivé dans ${jid}`);
+      return;
+    }
+
+    // Afficher statut actuel
+    const currentStatus = isAntiLinkEnabled(jid);
+    let text = `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🛡️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+    text += `       🏰 *إمـبـراطـوريـة بـاراديـس* 🏰\n`;
+    text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🛡️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n\n`;
+    text += `🛡️ *حـالـة مـضـاد الـروابـط* : ${currentStatus ? '🟢 مـفـعـل (ON)' : '🔴 مـعـطـل (OFF)'}\n\n`;
+    text += `⋄ لـلـتـفـعـيـل : *.antilink on*\n`;
+    text += `⋄ لـلـتـعـطـيـل : *.antilink off*\n\n`;
+    text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚔️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+    text += `       🏰 *PARADIS EMPIRE* 🏰`;
+    await sock.sendMessage(jid, { text });
+  } catch (err) {
+    console.error('Erreur handleAntiLinkToggleCommand:', err);
+  }
+}
+
+/**
+ * Commande .allowlink / .allowlinks @user
+ */
+async function handleAllowLinkCommand(sock, jid, messageText, msg, senderIsAdmin, senderIsSudo) {
+  try {
+    if (!senderIsAdmin && !senderIsSudo) {
+      await sock.sendMessage(jid, { text: '⚠️ *عـذراً!* هذا الأمر مخصص لمشرفي المجموعة أو مطوري البوت فقط.' });
+      return;
+    }
+
+    const targetUserId = extractTargetUser(messageText, msg);
+    if (!targetUserId) {
+      await sock.sendMessage(jid, { 
+        text: '❌ *يـرجـى تـحـديـد الـعـضـو* :\n⋄ قـم بـعـمـل مـنـشـن : *.allowlink @عضو*\n⋄ أو قـم بـالـرد عـلـى رسـالـتـه بـكـتـابـة *.allowlink*' 
+      });
+      return;
+    }
+
+    const targetNumber = targetUserId.split('@')[0].split(':')[0];
+    allowLinkUser(jid, targetUserId);
+
+    let text = `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🔗 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+    text += `       🏰 *إمـبـراطـوريـة بـاراديـس* 🏰\n`;
+    text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🔗 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n\n`;
+    text += `✅ *تـم الـسـمـاح بـالـروابـط لـلـعـضـو* 🔗\n\n`;
+    text += `⋄ الـعـضـو : @${targetNumber}\n`;
+    text += `⋄ أصـبـح بـإمـكـانـه نـشـر الـروابـط بـحـريـة دون حـذف أو إنـذارات.\n\n`;
+    text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚔️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+    text += `       🏰 *PARADIS EMPIRE* 🏰`;
+
+    await sock.sendMessage(jid, { text, mentions: [targetUserId] });
+    logActivity(`[AllowLink] @${targetNumber} autorisé aux liens dans ${jid}`);
+  } catch (err) {
+    console.error('Erreur handleAllowLinkCommand:', err);
+  }
+}
+
+/**
+ * Commande .disallowlink / .dellink @user
+ */
+async function handleDisallowLinkCommand(sock, jid, messageText, msg, senderIsAdmin, senderIsSudo) {
+  try {
+    if (!senderIsAdmin && !senderIsSudo) {
+      await sock.sendMessage(jid, { text: '⚠️ *عـذراً!* هذا الأمر مخصص لمشرفي المجموعة أو مطوري البوت فقط.' });
+      return;
+    }
+
+    const targetUserId = extractTargetUser(messageText, msg);
+    if (!targetUserId) {
+      await sock.sendMessage(jid, { 
+        text: '❌ *يـرجـى تـحـديـد الـعـضـو* :\n⋄ قـم بـعـمـل مـنـشـن : *.disallowlink @عضو*\n⋄ أو قـم بـالـرد عـلـى رسـالـتـه بـكـتـابـة *.disallowlink*' 
+      });
+      return;
+    }
+
+    const targetNumber = targetUserId.split('@')[0].split(':')[0];
+    disallowLinkUser(jid, targetUserId);
+
+    let text = `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🚫 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+    text += `       🏰 *إمـبـراطـوريـة بـاراديـس* 🏰\n`;
+    text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🚫 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n\n`;
+    text += `🚫 *تـم إلـغـاء الـسـمـاح بـالـروابـط* 🚫\n\n`;
+    text += `⋄ الـعـضـو : @${targetNumber}\n`;
+    text += `⋄ سـيـتـم حـذف روابـطـه ومـعـاقـبـتـه بـالإنـذار كـبـاقـي الأعـضـاء.\n\n`;
+    text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚔️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+    text += `       🏰 *PARADIS EMPIRE* 🏰`;
+
+    await sock.sendMessage(jid, { text, mentions: [targetUserId] });
+    logActivity(`[DisallowLink] @${targetNumber} retiré des liens autorisés dans ${jid}`);
+  } catch (err) {
+    console.error('Erreur handleDisallowLinkCommand:', err);
+  }
+}
+
+/**
+ * Commande .allowedlinks / .allowlinklist
+ */
+async function handleAllowedLinksListCommand(sock, jid) {
+  try {
+    const list = getAllowedLinkUsers(jid);
+
+    let text = `⎔⋅• ━ ╼━ ╼╃ ⌬〔 📋 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+    text += `       🏰 *إمـبـراطـوريـة بـاراديـس* 🏰\n`;
+    text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 📋 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n\n`;
+    text += `📋 *قـائـمـة الأعـضـاء الـمـسـمـوح لـهـم بـالـروابـط* (${list.length}) :\n\n`;
+
+    if (list.length === 0) {
+      text += `⋄ لا يـوجـد أعـضـاء فـي الـقـائـمـة الـبـيـضـاء حـالـيـاً.\n⋄ (الـمـشـرفـيـن مـسـتـثـنـون تـلـقـائـيـاً).\n\n`;
+    } else {
+      for (let i = 0; i < list.length; i++) {
+        const u = list[i];
+        const num = u.split('@')[0];
+        text += `│ ${i + 1}. @${num}\n`;
+      }
+      text += `\n`;
+    }
+
+    text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚔️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+    text += `       🏰 *PARADIS EMPIRE* 🏰`;
+
+    await sock.sendMessage(jid, { text, mentions: list });
+  } catch (err) {
+    console.error('Erreur handleAllowedLinksListCommand:', err);
   }
 }
 

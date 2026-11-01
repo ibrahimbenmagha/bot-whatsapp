@@ -54,8 +54,18 @@ export async function initializeDatabase() {
       )
     `);
 
+    // 4. Table des utilisateurs autorisés à envoyer des liens (Whitelist liens)
+    db.run(`
+      CREATE TABLE IF NOT EXISTS allowed_links (
+        groupId TEXT NOT NULL,
+        userId TEXT NOT NULL,
+        addedAt DATETIME DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY(groupId, userId)
+      )
+    `);
+
     saveDatabase();
-    console.log('✅ Base de données initialisée avec succès (tables warnings, settings, sudos)');
+    console.log('✅ Base de données initialisée avec succès (tables warnings, settings, sudos, allowed_links)');
     return db;
   } catch (error) {
     console.error('❌ Erreur lors de l\'initialisation de la base de données:', error);
@@ -261,6 +271,76 @@ export function getSudoList() {
     return [];
   } catch (error) {
     console.error('❌ Erreur getSudoList:', error);
+    return [];
+  }
+}
+
+// ----------------------------------------------------
+// Gestion de l'Anti-Link et Liste Blanche (Allowed Links)
+// ----------------------------------------------------
+
+export function isAntiLinkEnabled(groupId) {
+  try {
+    if (!groupId) return true;
+    const val = getSetting(`antilink_${groupId}`, 'on');
+    return val !== 'off';
+  } catch (error) {
+    return true;
+  }
+}
+
+export function setAntiLinkEnabled(groupId, enabled) {
+  return setSetting(`antilink_${groupId}`, enabled ? 'on' : 'off');
+}
+
+export function allowLinkUser(groupId, userId) {
+  try {
+    if (!groupId || !userId) return false;
+    const cleanUser = userId.split('@')[0].split(':')[0] + '@s.whatsapp.net';
+    db.run('INSERT OR IGNORE INTO allowed_links (groupId, userId) VALUES (?, ?)', [groupId, cleanUser]);
+    saveDatabase();
+    return true;
+  } catch (error) {
+    console.error('❌ Erreur allowLinkUser:', error);
+    return false;
+  }
+}
+
+export function disallowLinkUser(groupId, userId) {
+  try {
+    if (!groupId || !userId) return false;
+    const cleanUser = userId.split('@')[0].split(':')[0] + '@s.whatsapp.net';
+    db.run('DELETE FROM allowed_links WHERE groupId = ? AND userId = ?', [groupId, cleanUser]);
+    saveDatabase();
+    return true;
+  } catch (error) {
+    console.error('❌ Erreur disallowLinkUser:', error);
+    return false;
+  }
+}
+
+export function isLinkAllowed(groupId, userId) {
+  try {
+    if (!groupId || !userId) return false;
+    const cleanUser = userId.split('@')[0].split(':')[0] + '@s.whatsapp.net';
+    const result = db.exec('SELECT userId FROM allowed_links WHERE groupId = ? AND userId = ?', [groupId, cleanUser]);
+    return result.length > 0 && result[0].values.length > 0;
+  } catch (error) {
+    console.error('❌ Erreur isLinkAllowed:', error);
+    return false;
+  }
+}
+
+export function getAllowedLinkUsers(groupId) {
+  try {
+    if (!groupId) return [];
+    const result = db.exec('SELECT userId FROM allowed_links WHERE groupId = ? ORDER BY addedAt ASC', [groupId]);
+    if (result.length > 0 && result[0].values.length > 0) {
+      return result[0].values.map(v => v[0]);
+    }
+    return [];
+  } catch (error) {
+    console.error('❌ Erreur getAllowedLinkUsers:', error);
     return [];
   }
 }
