@@ -351,3 +351,21 @@ export function getAllowedLinkUsers(groupId) {
     return [];
   }
 }
+
+// ----------------------------------------------------
+// Gestion de l'Anti-Bot (Détection des appareils liés / bots)
+// ----------------------------------------------------
+
+export function isAntiBotEnabled(groupId) {
+  try {
+    if (!groupId) return true;
+    const val = getSetting(`antibot_${groupId}`, 'on');
+    return val !== 'off';
+  } catch (error) {
+    return true;
+  }
+}
+
+export function setAntiBotEnabled(groupId, enabled) {
+  return setSetting(`antibot_${groupId}`, enabled ? 'on' : 'off');
+}

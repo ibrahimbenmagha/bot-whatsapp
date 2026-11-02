@@ -28,7 +28,9 @@ import {
   allowLinkUser,
   disallowLinkUser,
   isLinkAllowed,
-  getAllowedLinkUsers
+  getAllowedLinkUsers,
+  isAntiBotEnabled,
+  setAntiBotEnabled
 } from './db.js';
 import { isAdmin, extractMessage, containsUrl, isGroupMessage, formatMention, normalizeJid } from './utils/helpers.js';
 
@@ -265,9 +267,10 @@ async function startSession(phone, options = {}) {
     }
   });
 
-  // Protection contre le spam d'ajouts de membres (Anti-Tabneed / Anti-Crash / Anti-Ban Group)
+  // Protection contre le spam d'ajouts de membres (Anti-Tabneed / Anti-Crash / Anti-Ban) et Détection Anti-Bot
   sock.ev.on('group-participants.update', async (update) => {
     await handleGroupParticipantsSecurity(phone, sock, update);
+    await handleAntiBotParticipantCheck(phone, sock, update);
   });
 
   return sessionObj;
@@ -757,6 +760,28 @@ async function handleSessionMessages(botPhone, m) {
           continue;
         }
         await handleDemoteCommand(sock, jid, messageText, msg, groupData);
+        continue;
+      }
+
+      // Commande .antibot [on/off] (Group Admins / Sudo)
+      if (startsWithCmd('antibot') || startsWithCmd('مضاد_البوتات') || lowerText === 'antibot on' || lowerText === 'antibot off') {
+        await reactToMessage(sock, jid, msg.key, '🤖');
+        if (!isGroup) {
+          await sock.sendMessage(jid, { text: 'ℹ️ هذه العملية تعمل فقط داخل المجموعات.' });
+          continue;
+        }
+        await handleAntiBotToggleCommand(sock, jid, messageText, senderIsAdmin, senderIsSudo);
+        continue;
+      }
+
+      // Commande .scan (Group Admins / Sudo)
+      if (isCmd('scan') || startsWithCmd('scan') || isCmd('فحص') || startsWithCmd('فحص') || isCmd('سكان') || startsWithCmd('سكان')) {
+        await reactToMessage(sock, jid, msg.key, '🔍');
+        if (!isGroup) {
+          await sock.sendMessage(jid, { text: 'ℹ️ هذه العملية تعمل فقط داخل المجموعات.' });
+          continue;
+        }
+        await handleScanCommand(sock, jid, groupData, senderIsAdmin, senderIsSudo);
         continue;
       }
 
@@ -1504,6 +1529,164 @@ async function handleGroupParticipantsSecurity(botPhone, sock, update) {
   }
 }
 
+/**
+ * Module de Détection et Défense Anti-Bot lors de l'entrée dans le groupe
+ * Si un utilisateur entre et qu'il est lié à un appareil/bot:
+ * 1. Ferme le groupe
+ * 2. Tag l'utilisateur et dit (وينو عندو بوت)
+ * 3. Envoie l'audio TomLaugh1.opus (PTT)
+ * 4. Kick l'utilisateur
+ * 5. Tag les admins pour les informer
+ * 6. Rouvre le groupe
+ */
+async function handleAntiBotParticipantCheck(botPhone, sock, update) {
+  try {
+    const { id: jid, participants, action } = update;
+    if (!jid || action !== 'add' || !participants || participants.length === 0) return;
+
+    // Vérifier si l'Anti-Bot est activé dans ce groupe
+    if (!isAntiBotEnabled(jid)) return;
+
+    const botNumber = (sock.user?.id || '').split('@')[0].split(':')[0];
+    const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
+
+    for (const p of participants) {
+      const pNum = (p || '').split('@')[0].split(':')[0];
+      if (!pNum || pNum === botNumber) continue;
+      if (isSudo(p)) continue;
+
+      let hasLinkedDevice = false;
+      let linkedDeviceCount = 0;
+
+      try {
+        if (typeof sock.getUSyncDevices === 'function') {
+          const userJid = p.includes('@') ? p : `${p}@s.whatsapp.net`;
+          const devices = await sock.getUSyncDevices([userJid], false, false);
+          if (Array.isArray(devices)) {
+            const linked = devices.filter((d) => d.device && d.device !== 0);
+            if (linked.length > 0) {
+              hasLinkedDevice = true;
+              linkedDeviceCount = linked.length;
+            }
+          }
+        }
+      } catch (usyncErr) {
+        logActivity(`[AntiBot] Erreur USync check pour ${pNum}: ${usyncErr.message}`, 'warn');
+      }
+
+      if (!hasLinkedDevice) continue;
+
+      logActivity(`[AntiBot] ALERTE: Nouvel arrivant @${pNum} lié à ${linkedDeviceCount} appareil(s)/bot dans ${jid}!`, 'warn');
+
+      // 1. Fermer le groupe d'urgence
+      try {
+        await sock.groupSettingUpdate(jid, 'announcement');
+        logActivity(`[AntiBot] Groupe fermé pour neutralisation.`);
+      } catch (err) {
+        logActivity(`[AntiBot] Échec fermeture groupe: ${err.message}`, 'warn');
+      }
+
+      // Résoudre le participant pour une mention propre sans code LID
+      const resolved = await resolveGroupParticipant(sock, jid, p, null);
+
+      // 2. Tag l'utilisateur et dire (وينو عندو بوت)
+      await sock.sendMessage(jid, {
+        text: `(وينو عندو بوت) ${resolved.tag}`,
+        mentions: resolved.mentions
+      });
+
+      // 3. Envoyer l'audio TomLaugh1.opus (PTT)
+      const laugh1Opus = path.join(__dirname, 'Media', 'TomLaugh1.opus');
+      const laugh1Mpeg = path.join(__dirname, 'Media', 'TomLaugh1.mpeg');
+      if (fs.existsSync(laugh1Opus)) {
+        try {
+          await sock.sendMessage(jid, {
+            audio: fs.readFileSync(laugh1Opus),
+            mimetype: 'audio/ogg; codecs=opus',
+            ptt: true
+          });
+        } catch (aErr) {
+          logActivity(`Échec audio TomLaugh1 opus: ${aErr.message}`, 'warn');
+        }
+      } else if (fs.existsSync(laugh1Mpeg)) {
+        try {
+          await sock.sendMessage(jid, {
+            audio: fs.readFileSync(laugh1Mpeg),
+            mimetype: 'audio/mp4',
+            ptt: false
+          });
+        } catch (aErr) {
+          logActivity(`Échec audio TomLaugh1 mpeg: ${aErr.message}`, 'warn');
+        }
+      }
+
+      // 4. Kick l'utilisateur
+      try {
+        await sock.groupParticipantsUpdate(jid, [resolved.participant?.id || p], 'remove');
+        logActivity(`[AntiBot] Utilisateur ${resolved.tag} expulsé.`);
+      } catch (kickErr) {
+        logActivity(`[AntiBot] Erreur expulsion ${resolved.tag}: ${kickErr.message}`, 'warn');
+      }
+
+      // 5. Récupérer et taguer les admins pour les informer
+      let currentGroupData = null;
+      try {
+        currentGroupData = await sock.groupMetadata(jid);
+      } catch (_) {}
+
+      const adminParticipants = currentGroupData?.participants?.filter((adm) => {
+        if (adm.admin !== 'admin' && adm.admin !== 'superadmin') return false;
+        const admNum = (adm.id || adm.jid || '').split('@')[0].split(':')[0];
+        return admNum !== resolved.phone && admNum !== botNumber;
+      }) || [];
+
+      const adminMentions = [];
+      const adminTags = [];
+      for (const adm of adminParticipants) {
+        const rawJid = adm.id || adm.jid;
+        if (rawJid) {
+          adminMentions.push(rawJid);
+          const admNum = (adm.jid || adm.id).split('@')[0].split(':')[0];
+          adminTags.push(`@${admNum}`);
+        }
+      }
+
+      let alertText = `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🤖 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+      alertText += `       🏰 *إمـبـراطـوريـة بـاراديـس* 🏰\n`;
+      alertText += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🚨 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n\n`;
+      alertText += `🤖 *رادار الـدفـاع: طـرد حـسـاب مـرتـبـط بـبـوت!* 🤖\n\n`;
+      alertText += `حـاول هـذا الـحـسـاب الانـضـمـام إلـى الـمـجـمـوعـة وهـو مـرتـبـط بـأجـهـزة خـارجـيـة / بـوت!\n\n`;
+      alertText += `⋄ الـعـضـو : ${resolved.tag}\n`;
+      alertText += `⋄ الأجـهـزة الـمـرتـبـطـة : ${linkedDeviceCount}\n`;
+      alertText += `⋄ الإجـراء : تـم الـطـرد الـفـوري مـن الـمـجـمـوعـة 👢\n\n`;
+      if (adminTags.length > 0) {
+        alertText += `👑 *إشـعـار لـلإدارة والـمـشـرفـيـن* :\n${adminTags.join(' ')}\n\n`;
+      }
+      alertText += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚔️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+      alertText += `       🏰 *PARADIS EMPIRE DEFENSE* 🏰`;
+
+      await sock.sendMessage(jid, {
+        text: alertText,
+        mentions: [...adminMentions, ...resolved.mentions]
+      });
+
+      // 6. Rouvrir le groupe après 2 secondes
+      await sleep(2000);
+      try {
+        await sock.groupSettingUpdate(jid, 'not_announcement');
+        logActivity(`[AntiBot] Groupe rouvert.`);
+      } catch (openErr) {
+        logActivity(`Échec réouverture groupe: ${openErr.message}`, 'warn');
+      }
+    }
+  } catch (err) {
+    console.error('Erreur handleAntiBotParticipantCheck:', err);
+    try {
+      await sock.groupSettingUpdate(update?.id, 'not_announcement');
+    } catch (_) {}
+  }
+}
+
 async function handleWarnCommand(sock, jid, messageText, groupData, msg) {
   try {
     const targetUserId = extractTargetUser(messageText, msg);
@@ -1694,7 +1877,9 @@ async function handleHelpCommand(sock, jid, isAdminUser, senderId = null, sessio
       helpText += `│ ⋄ *.promote @عضو* ⇠ تـرقـيـة عـضـو إلـى مـشـرف 🎖️\n`;
       helpText += `│ ⋄ *.demote @عضو* ⇠ تـنـزيـل مـشـرف إلـى عـضـو ⬇️\n`;
       helpText += `│ ⋄ *.demoteall* ⇠ تـنـزيـل كـافـة الـمـشـرفـيـن (حـصـري لـلـبـوت) 🧹\n`;
-      helpText += `│ ⋄ *.antilink [on/off]* ⇠ تـفـعـيـل أو تـعـطـيـل مـضـاد الـروابـط 🛡️\n`;
+      helpText += `│ ⋄ *.scan* ⇠ فـحـص كـافـة الأعـضـاء لـكـشـف الأجـهـزة والـبـوتـات 🔍\n` +
+`│ ⋄ *.antibot [on/off]* ⇠ تـفـعـيـل أو تـعـطـيـل طـرد الـبـوتـات تـلـقـائـيـاً 🤖\n` +
+`│ ⋄ *.antilink [on/off]* ⇠ تـفـعـيـل أو تـعـطـيـل مـضـاد الـروابـط 🛡️\n`;
       helpText += `│ ⋄ *.allowlink @عضو* ⇠ الـسـمـاح لـعـضـو بـإرسـال الـروابـط 🔗\n`;
       helpText += `│ ⋄ *.disallowlink @عضو* ⇠ إلـغـاء الـسـمـاح بـالـروابـط 🚫\n`;
       helpText += `│ ⋄ *.allowedlinks* ⇠ قـائـمـة الأعـضـاء الـمـسـمـوح لـهـم بـالـروابـط 📋\n`;
@@ -1718,6 +1903,7 @@ async function handleHelpCommand(sock, jid, isAdminUser, senderId = null, sessio
     helpText += `│ ⋄ 🚫 *مـنـع الـروابـط* : حـذف فـوري + إنـذار + صـوتـيـة\n`;
     helpText += `│ ⋄ 📵 *مـنـع جـهـات الاتـصـال* : حـذف فـوري + إنـذار\n`;
     helpText += `│ ⋄ 🚨 *مـضـاد الـسـبـام* : قـفـل الـمـجـمـوعـة + إنـزال الـرتـبـة عـنـد تـحـويـل >8 رسـائـل + صـوتـيـة\n`;
+    helpText += `│ ⋄ 🤖 *مـضـاد الـبـوتـات* : كـشـف الأجـهـزة الـمـرتـبـطـة + قـفـل الـمـجـمـوعـة + طـرد + صـوتـيـة\n`;
     helpText += `╰─────────────────────⊷\n\n`;
 
     helpText += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚔️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
@@ -2439,6 +2625,171 @@ async function handleDemoteAllCommand(sock, jid, groupData) {
   } catch (err) {
     console.error('Erreur handleDemoteAllCommand:', err);
     await sock.sendMessage(jid, { text: `❌ تـعـذر تـنـزيـل الـمـشـرفـيـن : ${err.message}` });
+  }
+}
+
+/**
+ * Commande .antibot on / .antibot off (Group Admins / Sudo)
+ */
+async function handleAntiBotToggleCommand(sock, jid, messageText, senderIsAdmin, senderIsSudo) {
+  try {
+    if (!senderIsAdmin && !senderIsSudo) {
+      await sock.sendMessage(jid, { text: '⚠️ *عـذراً!* هذا الأمر مخصص لمشرفي المجموعة أو مطوري البوت فقط.' });
+      return;
+    }
+
+    const words = messageText.trim().split(/\s+/);
+    const arg = (words[1] || '').toLowerCase();
+
+    if (arg === 'on' || arg === 'تشغيل' || arg === 'تفعيل') {
+      setAntiBotEnabled(jid, true);
+      let text = `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🤖 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+      text += `       🏰 *إمـبـراطـوريـة بـاراديـس* 🏰\n`;
+      text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🤖 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n\n`;
+      text += `🤖 *تـم تـفـعـيـل مـضـاد الـبـوتـات (Anti-Bot ON)*\n\n`;
+      text += `⋄ سـيـتـم فـحـص أي عـضـو جـديـد يـنـضـم لـلـمـجـمـوعـة.\n`;
+      text += `⋄ إذا تـبـيـن أنـه مـرتـبـط بـجـهـاز خـارجـي أو بـوت، سـيـتـم قـفـل الـمـجـمـوعـة وطـرده فـوراً 🚫.\n\n`;
+      text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚔️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+      text += `       🏰 *PARADIS EMPIRE* 🏰`;
+      await sock.sendMessage(jid, { text });
+      logActivity(`[AntiBot] Activé dans ${jid}`);
+      return;
+    }
+
+    if (arg === 'off' || arg === 'تعطيل' || arg === 'ايقاف') {
+      setAntiBotEnabled(jid, false);
+      let text = `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚠️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+      text += `       🏰 *إمـبـراطـوريـة بـاراديـس* 🏰\n`;
+      text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚠️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n\n`;
+      text += `⚠️ *تـم إيـقـاف مـضـاد الـبـوتـات (Anti-Bot OFF)*\n\n`;
+      text += `⋄ تـم تـعـطـيـل الـطـرد الـتـلـقـائـي لـلـحـسـابـات والـبـوتـات الـمـرتـبـطـة.\n\n`;
+      text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚔️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+      text += `       🏰 *PARADIS EMPIRE* 🏰`;
+      await sock.sendMessage(jid, { text });
+      logActivity(`[AntiBot] Désactivé dans ${jid}`);
+      return;
+    }
+
+    // Afficher statut actuel
+    const currentStatus = isAntiBotEnabled(jid);
+    let text = `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🤖 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+    text += `       🏰 *إمـبـراطـوريـة بـاراديـس* 🏰\n`;
+    text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🤖 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n\n`;
+    text += `🤖 *حـالـة مـضـاد الـبـوتـات* : ${currentStatus ? '🟢 مـفـعـل (ON)' : '🔴 مـعـطـل (OFF)'}\n\n`;
+    text += `⋄ لـلـتـفـعـيـل : *.antibot on*\n`;
+    text += `⋄ لـلـتـعـطـيـل : *.antibot off*\n\n`;
+    text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚔️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+    text += `       🏰 *PARADIS EMPIRE* 🏰`;
+    await sock.sendMessage(jid, { text });
+  } catch (err) {
+    console.error('Erreur handleAntiBotToggleCommand:', err);
+  }
+}
+
+/**
+ * Commande .scan (Group Admins / Sudo)
+ * Scanne tous les membres du groupe pour détecter ceux qui ont lié leur WhatsApp à un appareil/bot
+ */
+async function handleScanCommand(sock, jid, groupData, senderIsAdmin, senderIsSudo) {
+  try {
+    if (!senderIsAdmin && !senderIsSudo) {
+      await sock.sendMessage(jid, { 
+        text: '⚠️ *عـذراً!* أمـر الـفـحـص مـخـصـص لـمـشـرفـي الـمـجـمـوعـة أو الـمـطـوريـن فـقـط 🛡️' 
+      });
+      return;
+    }
+
+    let currentGroupData = groupData;
+    if (!currentGroupData || !currentGroupData.participants) {
+      try {
+        currentGroupData = await sock.groupMetadata(jid);
+      } catch (_) {}
+    }
+
+    const participants = currentGroupData?.participants || [];
+    if (participants.length === 0) {
+      await sock.sendMessage(jid, { text: '❌ تـعـذر جـلـب بـيـانـات أعـضـاء الـمـجـمـوعـة.' });
+      return;
+    }
+
+    await sock.sendMessage(jid, {
+      text: `🔍 *جـاري فـحـص أعـضـاء الـمـجـمـوعـة (${participants.length} عـضـو) لـكـشـف الأجـهـزة الـمـرتـبـطـة والـبـوتـات...*`
+    });
+
+    const botNumber = (sock.user?.id || '').split('@')[0].split(':')[0];
+    const detected = [];
+
+    // Diviser les participants en lots de 25
+    const jidList = participants.map((p) => p.id || p.jid).filter(Boolean);
+    const chunkSize = 25;
+
+    for (let i = 0; i < jidList.length; i += chunkSize) {
+      const batch = jidList.slice(i, i + chunkSize);
+      try {
+        if (typeof sock.getUSyncDevices === 'function') {
+          const devices = await sock.getUSyncDevices(batch, false, false);
+          if (Array.isArray(devices)) {
+            for (const dev of devices) {
+              if (dev.device && dev.device !== 0) {
+                const userPhone = dev.user;
+                if (userPhone === botNumber) continue;
+
+                let entry = detected.find((d) => d.phone === userPhone);
+                if (!entry) {
+                  const pObj = participants.find((p) => (p.id || p.jid || '').includes(userPhone));
+                  const resolved = await resolveGroupParticipant(sock, jid, userPhone, currentGroupData);
+                  entry = {
+                    phone: userPhone,
+                    tag: resolved.tag,
+                    mentions: resolved.mentions,
+                    deviceCount: 0,
+                    isAdmin: pObj && (pObj.admin === 'admin' || pObj.admin === 'superadmin')
+                  };
+                  detected.push(entry);
+                }
+                entry.deviceCount += 1;
+              }
+            }
+          }
+        }
+      } catch (batchErr) {
+        logActivity(`[Scan] Erreur USync batch: ${batchErr.message}`, 'warn');
+      }
+    }
+
+    let text = `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🔍 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+    text += `       🏰 *إمـبـراطـوريـة بـاراديـس* 🏰\n`;
+    text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🔍 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n\n`;
+    text += `📊 *تـقـريـر فـحـص الأجـهـزة الـمـرتـبـطـة والـبـوتـات (Scan)* 📊\n\n`;
+    text += `⋄ إجـمـالـي الأعـضـاء الـمـفـحـوصـيـن : *${participants.length}*\n`;
+    text += `⋄ الـحـسـابـات الـمـرتـبـطـة بـأجـهـزة / بـوت : *${detected.length}*\n\n`;
+
+    const allMentions = [];
+
+    if (detected.length === 0) {
+      text += `✅ *الـمـجـمـوعـة نـظـيـفـة تـمـامـاً* 🛡️\n`;
+      text += `لا يـوجـد أي حـسـاب مـرتـبـط بـجـهـاز خـارجـي (Web/Desktop/Bot).\n\n`;
+    } else {
+      text += `⚠️ *قـائـمـة الـحـسـابـات الـمـرتـبـطـة* :\n`;
+      detected.forEach((item, idx) => {
+        const role = item.isAdmin ? '👑 مشرف' : '👤 عضو';
+        text += `${idx + 1}️⃣ ${item.tag} (${role}) ↬ *${item.deviceCount} جهاز مرتبط* 🤖\n`;
+        allMentions.push(...item.mentions);
+      });
+      text += `\n💡 *مـلاحـظـة* : تـشـمـل هـذه الـقـائـمـة الـبـوتـات وأيـضـاً مـسـتـخـدمـي واتـسـاب ويـب / كـمـبـيـوتـر.\n\n`;
+    }
+
+    text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚔️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+    text += `       🏰 *PARADIS EMPIRE SCANNER* 🏰`;
+
+    await sock.sendMessage(jid, {
+      text,
+      mentions: Array.from(new Set(allMentions))
+    });
+
+  } catch (err) {
+    console.error('Erreur handleScanCommand:', err);
+    await sock.sendMessage(jid, { text: `❌ حـدث خـطـأ أثـنـاء الـفـحـص : ${err.message}` });
   }
 }
 
