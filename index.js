@@ -1023,7 +1023,9 @@ async function handleAntiLink(sock, jid, senderId, messageId, groupData) {
 
 async function handleAntiContact(sock, jid, senderId, messageId, groupData) {
   try {
-    // Supprimer la fiche contact en tant qu'admin
+    const senderNumber = senderId.split('@')[0].split(':')[0];
+
+    // 1. Supprimer la fiche contact en tant qu'admin
     try {
       await sock.sendMessage(jid, { 
         delete: { 
@@ -1037,24 +1039,44 @@ async function handleAntiContact(sock, jid, senderId, messageId, groupData) {
       logActivity(`Échec suppression contact: ${delErr.message}`, 'warn');
     }
 
-    const newWarningCount = addWarning(jid, senderId);
-    const senderNumber = senderId.split('@')[0].split(':')[0];
+    // 2. Message demandé avec mention
+    const notificationText = `📵 @${senderNumber}\n*تاشو ههههههه باقي كيباني بجهة الإتصال ههه وااا على قديم ههه انا و كنعرف نباني حسن منك هبط تشم الصبابط* 🥾`;
+    await sock.sendMessage(jid, { text: notificationText, mentions: [senderId] });
 
-    // Format demandé: تاشو هه كيباني ب جهة اتصال وااع علي قديم ابلع انذار 1/2
-    let notificationText = `📵 @${senderNumber}\n*تاشو هه كيباني ب جهة اتصال وااع علي قديم ابلع انذار ${newWarningCount}/${CONFIG.maxWarnings}*`;
+    // 3. Envoyer l'audio StoneSciecle
+    const opusPath = path.join(__dirname, 'Media', 'StoneSciecle.opus');
+    const mpegPath = path.join(__dirname, 'Media', 'StoneSciecle.mpeg');
 
-    if (newWarningCount >= CONFIG.maxWarnings) {
+    if (fs.existsSync(opusPath)) {
       try {
-        await sock.groupParticipantsUpdate(jid, [senderId], 'remove');
-      } catch (rmErr) {
-        logActivity(`Échec expulsion contact ${senderId}: ${rmErr.message}`, 'warn');
+        await sock.sendMessage(jid, {
+          audio: fs.readFileSync(opusPath),
+          mimetype: 'audio/ogg; codecs=opus',
+          ptt: true
+        });
+      } catch (audioErr) {
+        logActivity(`Échec envoi audio anti-contact opus: ${audioErr.message}`, 'warn');
       }
-      resetWarnings(jid, senderId);
-      notificationText += `\n\n❌ *تـم طـرد @${senderNumber} مـن الـمـجـمـوعـة لـتـجـاوز الـحـد الأقـصـى لـلإنـذارات.*`;
+    } else if (fs.existsSync(mpegPath)) {
+      try {
+        await sock.sendMessage(jid, {
+          audio: fs.readFileSync(mpegPath),
+          mimetype: 'audio/mp4',
+          ptt: false
+        });
+      } catch (audioErr) {
+        logActivity(`Échec envoi audio anti-contact mpeg: ${audioErr.message}`, 'warn');
+      }
     }
 
-    await sock.sendMessage(jid, { text: notificationText, mentions: [senderId] });
-    logActivity(`[AntiContact] Contact supprimé et warn #${newWarningCount}/${CONFIG.maxWarnings} pour ${senderNumber}`);
+    // 4. Expulser l'utilisateur directement sans avertissement (Kick direct)
+    try {
+      await sock.groupParticipantsUpdate(jid, [senderId], 'remove');
+      logActivity(`[AntiContact] @${senderNumber} expulsé directement du groupe suite à l'envoi d'un contact.`);
+    } catch (rmErr) {
+      logActivity(`Échec expulsion contact @${senderNumber}: ${rmErr.message}`, 'warn');
+    }
+
   } catch (err) {
     console.error('Erreur anti-contact:', err);
   }
