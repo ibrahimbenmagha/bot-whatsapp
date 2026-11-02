@@ -64,8 +64,18 @@ export async function initializeDatabase() {
       )
     `);
 
+    // 5. Table des utilisateurs autorisés à utiliser un appareil lié/bot (Whitelist Anti-Bot)
+    db.run(`
+      CREATE TABLE IF NOT EXISTS allowed_bots (
+        groupId TEXT NOT NULL,
+        userId TEXT NOT NULL,
+        addedAt DATETIME DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY(groupId, userId)
+      )
+    `);
+
     saveDatabase();
-    console.log('✅ Base de données initialisée avec succès (tables warnings, settings, sudos, allowed_links)');
+    console.log('✅ Base de données initialisée avec succès (tables warnings, settings, sudos, allowed_links, allowed_bots)');
     return db;
   } catch (error) {
     console.error('❌ Erreur lors de l\'initialisation de la base de données:', error);
@@ -368,4 +378,60 @@ export function isAntiBotEnabled(groupId) {
 
 export function setAntiBotEnabled(groupId, enabled) {
   return setSetting(`antibot_${groupId}`, enabled ? 'on' : 'off');
+}
+
+// ----------------------------------------------------
+// Whitelist Anti-Bot (Personnes autorisées à utiliser WhatsApp lié / bot)
+// ----------------------------------------------------
+
+export function allowBotUser(groupId, userId) {
+  try {
+    if (!groupId || !userId) return false;
+    const cleanUser = userId.split('@')[0].split(':')[0] + '@s.whatsapp.net';
+    db.run('INSERT OR IGNORE INTO allowed_bots (groupId, userId) VALUES (?, ?)', [groupId, cleanUser]);
+    saveDatabase();
+    return true;
+  } catch (error) {
+    console.error('❌ Erreur allowBotUser:', error);
+    return false;
+  }
+}
+
+export function disallowBotUser(groupId, userId) {
+  try {
+    if (!groupId || !userId) return false;
+    const cleanUser = userId.split('@')[0].split(':')[0] + '@s.whatsapp.net';
+    db.run('DELETE FROM allowed_bots WHERE groupId = ? AND userId = ?', [groupId, cleanUser]);
+    saveDatabase();
+    return true;
+  } catch (error) {
+    console.error('❌ Erreur disallowBotUser:', error);
+    return false;
+  }
+}
+
+export function isBotAllowed(groupId, userId) {
+  try {
+    if (!groupId || !userId) return false;
+    const cleanUser = userId.split('@')[0].split(':')[0] + '@s.whatsapp.net';
+    const result = db.exec('SELECT userId FROM allowed_bots WHERE groupId = ? AND userId = ?', [groupId, cleanUser]);
+    return result.length > 0 && result[0].values.length > 0;
+  } catch (error) {
+    console.error('❌ Erreur isBotAllowed:', error);
+    return false;
+  }
+}
+
+export function getAllowedBotUsers(groupId) {
+  try {
+    if (!groupId) return [];
+    const result = db.exec('SELECT userId FROM allowed_bots WHERE groupId = ? ORDER BY addedAt ASC', [groupId]);
+    if (result.length > 0 && result[0].values.length > 0) {
+      return result[0].values.map(v => v[0]);
+    }
+    return [];
+  } catch (error) {
+    console.error('❌ Erreur getAllowedBotUsers:', error);
+    return [];
+  }
 }

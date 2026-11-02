@@ -30,7 +30,11 @@ import {
   isLinkAllowed,
   getAllowedLinkUsers,
   isAntiBotEnabled,
-  setAntiBotEnabled
+  setAntiBotEnabled,
+  allowBotUser,
+  disallowBotUser,
+  isBotAllowed,
+  getAllowedBotUsers
 } from './db.js';
 import { isAdmin, extractMessage, containsUrl, isGroupMessage, formatMention, normalizeJid } from './utils/helpers.js';
 
@@ -271,6 +275,11 @@ async function startSession(phone, options = {}) {
   sock.ev.on('group-participants.update', async (update) => {
     await handleGroupParticipantsSecurity(phone, sock, update);
     await handleAntiBotParticipantCheck(phone, sock, update);
+  });
+
+  // Détection des bots dans les demandes d'adhésion (Group Join Requests)
+  sock.ev.on('group.join-request', async (update) => {
+    await handleGroupJoinRequestSecurity(phone, sock, update);
   });
 
   return sessionObj;
@@ -835,6 +844,72 @@ async function handleSessionMessages(botPhone, m) {
           continue;
         }
         await handleAllowedLinksListCommand(sock, jid);
+        continue;
+      }
+
+      // Commande .allowbot / .allowbots @user / number (Group Admins / Sudo)
+      if (startsWithCmd('allowbot') || startsWithCmd('allowbots') || startsWithCmd('سماح_بوت') || startsWithCmd('سماح_البوت')) {
+        await reactToMessage(sock, jid, msg.key, '🛡️');
+        if (!isGroup) {
+          await sock.sendMessage(jid, { text: 'ℹ️ هذه العملية تعمل فقط داخل المجموعات.' });
+          continue;
+        }
+        await handleAllowBotCommand(sock, jid, messageText, msg, senderIsAdmin, senderIsSudo);
+        continue;
+      }
+
+      // Commande .disallowbot / .delbot @user / number (Group Admins / Sudo)
+      if (startsWithCmd('disallowbot') || startsWithCmd('delbot') || startsWithCmd('منع_بوت') || startsWithCmd('حذف_بوت')) {
+        await reactToMessage(sock, jid, msg.key, '🚫');
+        if (!isGroup) {
+          await sock.sendMessage(jid, { text: 'ℹ️ هذه العملية تعمل فقط داخل المجموعات.' });
+          continue;
+        }
+        await handleDisallowBotCommand(sock, jid, messageText, msg, senderIsAdmin, senderIsSudo);
+        continue;
+      }
+
+      // Commande .allowedbots / .botwhitelist (Group Admins / Sudo / All)
+      if (isCmd('allowedbots') || isCmd('botwhitelist') || isCmd('قائمة_البوتات') || isCmd('المسموح_لهم_بوت')) {
+        await reactToMessage(sock, jid, msg.key, '📋');
+        if (!isGroup) {
+          await sock.sendMessage(jid, { text: 'ℹ️ هذه العملية تعمل فقط داخل المجموعات.' });
+          continue;
+        }
+        await handleAllowedBotsListCommand(sock, jid, senderIsAdmin, senderIsSudo);
+        continue;
+      }
+
+      // Commande .requests / .طلبات (Group Admins / Sudo)
+      if (isCmd('requests') || isCmd('طلبات') || startsWithCmd('requests') || startsWithCmd('طلبات')) {
+        await reactToMessage(sock, jid, msg.key, '📥');
+        if (!isGroup) {
+          await sock.sendMessage(jid, { text: 'ℹ️ هذه العملية تعمل فقط داخل المجموعات.' });
+          continue;
+        }
+        await handleJoinRequestsListCommand(sock, jid, senderIsAdmin, senderIsSudo);
+        continue;
+      }
+
+      // Commande .accept [number] / .قبول (Group Admins / Sudo)
+      if (startsWithCmd('accept') || startsWithCmd('قبول') || startsWithCmd('وافق')) {
+        await reactToMessage(sock, jid, msg.key, '✅');
+        if (!isGroup) {
+          await sock.sendMessage(jid, { text: 'ℹ️ هذه العملية تعمل فقط داخل المجموعات.' });
+          continue;
+        }
+        await handleJoinRequestActionCommand(sock, jid, messageText, 'accept', senderIsAdmin, senderIsSudo);
+        continue;
+      }
+
+      // Commande .reject [number] / .رفض (Group Admins / Sudo)
+      if (startsWithCmd('reject') || startsWithCmd('رفض')) {
+        await reactToMessage(sock, jid, msg.key, '❌');
+        if (!isGroup) {
+          await sock.sendMessage(jid, { text: 'ℹ️ هذه العملية تعمل فقط داخل المجموعات.' });
+          continue;
+        }
+        await handleJoinRequestActionCommand(sock, jid, messageText, 'reject', senderIsAdmin, senderIsSudo);
         continue;
       }
 
@@ -1630,6 +1705,12 @@ async function executeAntiBotProcedure(sock, jid, targetJid, groupData) {
       return;
     }
 
+    // Vérifier si la cible est autorisée dans la whitelist Anti-Bot
+    if (isBotAllowed(jid, targetJid) || isBotAllowed(jid, resolved.phone)) {
+      logActivity(`[AntiBot] Cible ${resolved.tag} autorisée dans la whitelist, expulsion ignorée.`);
+      return;
+    }
+
     const coolKey = `${jid}:${resolved.phone}`;
     const lastTrigger = antibotCooldown.get(coolKey) || 0;
     if (Date.now() - lastTrigger < 10000) return;
@@ -1770,6 +1851,7 @@ async function handleAntiBotParticipantCheck(botPhone, sock, update) {
       const pNum = (p || '').split('@')[0].split(':')[0];
       if (!pNum || pNum === botNumber) continue;
       if (isSudo(p)) continue;
+      if (isBotAllowed(jid, p) || isBotAllowed(jid, pNum)) continue;
 
       const check = await checkUserHasLinkedDevices(sock, p);
       if (check.hasLinked) {
@@ -1779,6 +1861,91 @@ async function handleAntiBotParticipantCheck(botPhone, sock, update) {
     }
   } catch (err) {
     console.error('Erreur handleAntiBotParticipantCheck:', err);
+  }
+}
+
+/**
+ * Module de Détection Anti-Bot dans les demandes d'adhésion au groupe (Group Join Requests)
+ * Alerte l'administration si le demandeur est lié à un bot/appareil et propose de le whitelister
+ */
+async function handleGroupJoinRequestSecurity(botPhone, sock, update) {
+  try {
+    const { id: jid, participant, action } = update;
+    if (!jid || !participant) return;
+
+    logActivity(`[JoinRequest] Demande d'adhésion de ${participant} dans ${jid} (action: ${action})`);
+
+    const applicantPhone = participant.split('@')[0].split(':')[0];
+
+    // Vérifier si le demandeur a des appareils liés (Web / Bot)
+    const check = await checkUserHasLinkedDevices(sock, participant);
+    if (!check.hasLinked) {
+      logActivity(`[JoinRequest] Demandeur @${applicantPhone} est un compte WhatsApp normal (0 appareil).`);
+      return;
+    }
+
+    logActivity(`[JoinRequest] ALERTE: Demandeur @${applicantPhone} a ${check.count} appareil(s) lié(s)!`, 'warn');
+
+    // Vérifier s'il est déjà dans la whitelist
+    const isWhitelisted = isBotAllowed(jid, participant) || isBotAllowed(jid, applicantPhone);
+
+    // Récupérer les admins du groupe pour les notifier
+    let groupData = null;
+    try {
+      groupData = await sock.groupMetadata(jid);
+    } catch (_) {}
+
+    const botNumber = (sock.user?.id || '').split('@')[0].split(':')[0];
+    const adminParticipants = groupData?.participants?.filter((adm) => {
+      if (adm.admin !== 'admin' && adm.admin !== 'superadmin') return false;
+      const admNum = (adm.id || adm.jid || '').split('@')[0].split(':')[0];
+      return admNum !== applicantPhone && admNum !== botNumber;
+    }) || [];
+
+    const adminMentions = [];
+    const adminTags = [];
+    for (const adm of adminParticipants) {
+      const rawJid = adm.id || adm.jid;
+      if (rawJid) {
+        adminMentions.push(rawJid);
+        const admNum = (adm.jid || adm.id).split('@')[0].split(':')[0];
+        adminTags.push(`@${admNum}`);
+      }
+    }
+
+    let alertText = `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚠️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+    alertText += `       🏰 *إمـبـراطـوريـة بـاراديـس* 🏰\n`;
+    alertText += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🚨 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n\n`;
+    alertText += `🤖 *رادار الـكـشـف: طـلـب انـضـمـام مـن حـسـاب مـرتـبـط بـبـوت / ويـب!* 🤖\n\n`;
+    alertText += `تـم رصـد طـلـب انـضـمـام جـديـد مـن حـسـاب مـرتـبـط بـأجـهـزة خـارجـيـة قـبـل قـبـولـه:\n\n`;
+    alertText += `⋄ الـحـسـاب : @${applicantPhone}\n`;
+    alertText += `⋄ عـدد الأجـهـزة الـمـرتـبـطـة : *${check.count} أجهزة* 📱\n`;
+    alertText += `⋄ الـحـالـة : *مـعـلـق فـي الانـتـظـار (لـم يـتـم قـبـولـه)* ⏳\n\n`;
+
+    if (isWhitelisted) {
+      alertText += `🛡️ *حـالـة الـحـسـاب* : هـذا الـحـسـاب مـوجـود بـالـفـعـل فـي الـقـائـمـة الـبـيـضـاء (Whitelisted) لـن يـتـم طـرده عـنـد الـقـبـول ✅.\n\n`;
+    } else {
+      alertText += `⚠️ *تـنـبـيـه لـلإدارة* :\n`;
+      alertText += `إذا تـم قـبـولـه دون إضـافـتـه لـلـقـائـمـة الـبـيـضـاء، فـسـيـقـوم مـضـاد الـبـوتـات بـطـرده فـوراً.\n\n`;
+      alertText += `🛡️ *لإضـافـتـه لـلـقـائـمـة الـبـيـضـاء (الـسـمـاح لـه)* :\n`;
+      alertText += `*.allowbot ${applicantPhone}*\n\n`;
+      alertText += `✅ *لـقـبـول الـطـلـب* : *.accept ${applicantPhone}*\n`;
+      alertText += `❌ *لـرفـض الـطـلـب* : *.reject ${applicantPhone}*\n\n`;
+    }
+
+    if (adminTags.length > 0) {
+      alertText += `👑 *إشـعـار لـلـمـشـرفـيـن* :\n${adminTags.join(' ')}\n\n`;
+    }
+    alertText += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚔️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+    alertText += `       🏰 *PARADIS EMPIRE SECURITY* 🏰`;
+
+    await sock.sendMessage(jid, {
+      text: alertText,
+      mentions: [...adminMentions, `${applicantPhone}@s.whatsapp.net`]
+    });
+
+  } catch (err) {
+    console.error('Erreur handleGroupJoinRequestSecurity:', err);
   }
 }
 
@@ -1973,7 +2140,13 @@ async function handleHelpCommand(sock, jid, isAdminUser, senderId = null, sessio
       helpText += `│ ⋄ *.demote @عضو* ⇠ تـنـزيـل مـشـرف إلـى عـضـو ⬇️\n`;
       helpText += `│ ⋄ *.demoteall* ⇠ تـنـزيـل كـافـة الـمـشـرفـيـن (حـصـري لـلـبـوت) 🧹\n`;
       helpText += `│ ⋄ *.scan* ⇠ فـحـص كـافـة الأعـضـاء لـكـشـف الأجـهـزة والـبـوتـات 🔍\n` +
+`│ ⋄ *.requests* ⇠ فـحـص طـلـبـات الانـضـمـام وكـشـف الـبـوتـات 📥\n` +
 `│ ⋄ *.antibot [on/off]* ⇠ تـفـعـيـل أو تـعـطـيـل طـرد الـبـوتـات تـلـقـائـيـاً 🤖\n` +
+`│ ⋄ *.allowbot @عضو* ⇠ الـسـمـاح لـعـضـو بـاسـتـخـدام بـوت/ويـب 🛡️\n` +
+`│ ⋄ *.disallowbot @عضو* ⇠ إلـغـاء سـمـاح الـبـوت/ويـب 🚫\n` +
+`│ ⋄ *.allowedbots* ⇠ قـائـمـة الـمـصـرح لـهـم بـالـبـوت والـويـب 📋\n` +
+`│ ⋄ *.accept [رقم]* ⇠ قـبـول طـلـب انـضـمـام ✅\n` +
+`│ ⋄ *.reject [رقم]* ⇠ رفـض طـلـب انـضـمـام ❌\n` +
 `│ ⋄ *.antilink [on/off]* ⇠ تـفـعـيـل أو تـعـطـيـل مـضـاد الـروابـط 🛡️\n`;
       helpText += `│ ⋄ *.allowlink @عضو* ⇠ الـسـمـاح لـعـضـو بـإرسـال الـروابـط 🔗\n`;
       helpText += `│ ⋄ *.disallowlink @عضو* ⇠ إلـغـاء الـسـمـاح بـالـروابـط 🚫\n`;
@@ -2873,9 +3046,12 @@ async function handleScanCommand(sock, jid, groupData, senderIsAdmin, senderIsSu
     } else {
       text += `⚠️ *قـائـمـة الـحـسـابـات الـمـرتـبـطـة* :\n`;
       detected.forEach((item, idx) => {
+        const isWhitelisted = isBotAllowed(jid, item.phone) || isBotAllowed(jid, item.rawJid);
         let statusBadge = '';
         if (item.isAdmin) {
           statusBadge = '👑 مشرف (مستثنى)';
+        } else if (isWhitelisted) {
+          statusBadge = '🛡️ مـسـمـوح لـه (Whitelist)';
         } else if (antibotActive) {
           statusBadge = '👤 عضو ↬ 👢 *جـاري الـطـرد*';
           membersToKick.push(item);
@@ -3071,6 +3247,244 @@ async function handleAllowedLinksListCommand(sock, jid) {
     await sock.sendMessage(jid, { text, mentions: list });
   } catch (err) {
     console.error('Erreur handleAllowedLinksListCommand:', err);
+  }
+}
+
+/**
+ * Commande .allowbot / .allowbots @user / number (Group Admins / Sudo)
+ * Ajoute un utilisateur à la whitelist Anti-Bot
+ */
+async function handleAllowBotCommand(sock, jid, messageText, msg, senderIsAdmin, senderIsSudo) {
+  try {
+    if (!senderIsAdmin && !senderIsSudo) {
+      await sock.sendMessage(jid, { text: '⚠️ *عـذراً!* هذا الأمر مخصص لمشرفي المجموعة أو مطوري البوت فقط.' });
+      return;
+    }
+
+    let targetUserId = extractTargetUser(messageText, msg);
+    if (!targetUserId) {
+      const words = messageText.trim().split(/\s+/);
+      if (words[1]) {
+        const num = words[1].replace(/[^0-9]/g, '');
+        if (num.length >= 7) targetUserId = `${num}@s.whatsapp.net`;
+      }
+    }
+
+    if (!targetUserId) {
+      await sock.sendMessage(jid, { 
+        text: '❌ *يـرجـى تـحـديـد الـعـضـو* :\n⋄ قـم بـعـمـل مـنـشـن : *.allowbot @عضو*\n⋄ أو اكـتـب الـرقـم : *.allowbot 212xxxxxxx*\n⋄ أو قـم بـالـرد عـلـى رسـالـتـه بـكـتـابـة *.allowbot*' 
+      });
+      return;
+    }
+
+    const resolved = await resolveGroupParticipant(sock, jid, targetUserId, null);
+    allowBotUser(jid, resolved.phone);
+
+    let text = `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🛡️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+    text += `       🏰 *إمـبـراطـوريـة بـاراديـس* 🏰\n`;
+    text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🛡️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n\n`;
+    text += `🛡️ *تـمـت الإضـافـة لـلـقـائـمـة الـبـيـضـاء لـمـضـاد الـبـوتـات (Whitelist)*\n\n`;
+    text += `⋄ الـعـضـو : ${resolved.tag}\n`;
+    text += `⋄ أصـبـح مـصـرحـاً لـه بـاسـتـخـدام واتـسـاب ويـب / كـمـبـيـوتـر / بـوت دون أن يـتـم طـرده ✅.\n\n`;
+    text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚔️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+    text += `       🏰 *PARADIS EMPIRE* 🏰`;
+
+    await sock.sendMessage(jid, { text, mentions: resolved.mentions });
+    logActivity(`[AntiBot] ${resolved.tag} ajouté à la whitelist dans ${jid}`);
+  } catch (err) {
+    console.error('Erreur handleAllowBotCommand:', err);
+  }
+}
+
+/**
+ * Commande .disallowbot / .delbot @user / number (Group Admins / Sudo)
+ */
+async function handleDisallowBotCommand(sock, jid, messageText, msg, senderIsAdmin, senderIsSudo) {
+  try {
+    if (!senderIsAdmin && !senderIsSudo) {
+      await sock.sendMessage(jid, { text: '⚠️ *عـذراً!* هذا الأمر مخصص لمشرفي المجموعة أو مطوري البوت فقط.' });
+      return;
+    }
+
+    let targetUserId = extractTargetUser(messageText, msg);
+    if (!targetUserId) {
+      const words = messageText.trim().split(/\s+/);
+      if (words[1]) {
+        const num = words[1].replace(/[^0-9]/g, '');
+        if (num.length >= 7) targetUserId = `${num}@s.whatsapp.net`;
+      }
+    }
+
+    if (!targetUserId) {
+      await sock.sendMessage(jid, { text: '❌ *يـرجـى تـحـديـد الـعـضـو* : *.disallowbot @عضو* أو *.disallowbot 212xxxxxxx*' });
+      return;
+    }
+
+    const resolved = await resolveGroupParticipant(sock, jid, targetUserId, null);
+    disallowBotUser(jid, resolved.phone);
+
+    let text = `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🚫 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+    text += `       🏰 *إمـبـراطـوريـة بـاراديـس* 🏰\n`;
+    text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🚫 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n\n`;
+    text += `🚫 *تـم حـذفـه مـن الـقـائـمـة الـبـيـضـاء لـمـضـاد الـبـوتـات*\n\n`;
+    text += `⋄ الـعـضـو : ${resolved.tag}\n`;
+    text += `⋄ سـيـتـم طـرده تـلـقـائـيـاً إذا اسـتـخـدم واتـسـاب مـرتـبـطـاً بـجـهـاز / بـوت ⚠️.\n\n`;
+    text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚔️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+    text += `       🏰 *PARADIS EMPIRE* 🏰`;
+
+    await sock.sendMessage(jid, { text, mentions: resolved.mentions });
+    logActivity(`[AntiBot] ${resolved.tag} retiré de la whitelist dans ${jid}`);
+  } catch (err) {
+    console.error('Erreur handleDisallowBotCommand:', err);
+  }
+}
+
+/**
+ * Commande .allowedbots / .botwhitelist (Group Admins / Sudo / All)
+ */
+async function handleAllowedBotsListCommand(sock, jid, senderIsAdmin, senderIsSudo) {
+  try {
+    if (!senderIsAdmin && !senderIsSudo) {
+      await sock.sendMessage(jid, { text: '⚠️ *عـذراً!* هذا الأمر مخصص لمشرفي المجموعة أو مطوري البوت فقط.' });
+      return;
+    }
+
+    const allowed = getAllowedBotUsers(jid);
+    let text = `⎔⋅• ━ ╼━ ╼╃ ⌬〔 📋 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+    text += `       🏰 *إمـبـراطـوريـة بـاراديـس* 🏰\n`;
+    text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 📋 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n\n`;
+    text += `🛡️ *الـقـائـمـة الـبـيـضـاء لـمـسـتـخـدمـي الـبـوت والـويـب (Anti-Bot Whitelist)* 🛡️\n\n`;
+
+    if (allowed.length === 0) {
+      text += `⋄ لا يـوجـد أي عـضـو مـسـتـثـنـى حـالـيـاً فـي هـذه الـمـجـمـوعـة.\n`;
+      text += `⋄ لإضـافـة عـضـو : *.allowbot @عضو* أو *.allowbot 212xxxxxxx*\n\n`;
+      text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚔️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+      text += `       🏰 *PARADIS EMPIRE* 🏰`;
+      await sock.sendMessage(jid, { text });
+      return;
+    }
+
+    text += `الأعـضـاء الـمـصـرح لـهـم بـاسـتـخـدام واتـسـاب ويـب / كـمـبـيـوتـر / بـوت :\n\n`;
+    const mentions = [];
+    allowed.forEach((u, i) => {
+      const num = u.split('@')[0].split(':')[0];
+      text += `${i + 1}️⃣ @${num}\n`;
+      mentions.push(`${num}@s.whatsapp.net`);
+    });
+
+    text += `\n⋄ لإلـغـاء الـسـمـاح : *.disallowbot @عضو*\n\n`;
+    text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚔️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+    text += `       🏰 *PARADIS EMPIRE* 🏰`;
+
+    await sock.sendMessage(jid, { text, mentions });
+  } catch (err) {
+    console.error('Erreur handleAllowedBotsListCommand:', err);
+  }
+}
+
+/**
+ * Commande .requests / .طلبات (Group Admins / Sudo)
+ * Affiche la liste des demandes d'adhésion en attente avec analyse des appareils liés/bots
+ */
+async function handleJoinRequestsListCommand(sock, jid, senderIsAdmin, senderIsSudo) {
+  try {
+    if (!senderIsAdmin && !senderIsSudo) {
+      await sock.sendMessage(jid, { text: '⚠️ *عـذراً!* هذا الأمر مخصص لمشرفي المجموعة أو مطوري البوت فقط.' });
+      return;
+    }
+
+    if (typeof sock.groupRequestParticipantsList !== 'function') {
+      await sock.sendMessage(jid, { text: '❌ مـيـزة طـلـبـات الانـضـمـام غـيـر مـدعـومـة فـي هـذا الإصـدار.' });
+      return;
+    }
+
+    await sock.sendMessage(jid, { text: '🔍 *جـاري فـحـص طـلـبـات الانـضـمـام الـمـعـلـقـة وتـحـلـيـل الـبـوتـات...*' });
+
+    const requests = await sock.groupRequestParticipantsList(jid).catch(() => []);
+    if (!requests || requests.length === 0) {
+      await sock.sendMessage(jid, { text: 'ℹ️ لا تـوجـد أي طـلـبـات انـضـمـام مـعـلـقـة حـالـيـاً فـي هـذه الـمـجـمـوعـة.' });
+      return;
+    }
+
+    let text = `⎔⋅• ━ ╼━ ╼╃ ⌬〔 📋 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+    text += `       🏰 *إمـبـراطـوريـة بـاراديـس* 🏰\n`;
+    text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 📋 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n\n`;
+    text += `📥 *قـائـمـة طـلـبـات الانـضـمـام الـمـعـلـقـة (${requests.length})* 📥\n\n`;
+
+    const allMentions = [];
+
+    for (let i = 0; i < requests.length; i++) {
+      const req = requests[i];
+      const rawJid = req.jid || req.id;
+      const phone = (rawJid || '').split('@')[0].split(':')[0];
+      if (!phone) continue;
+
+      const check = await checkUserHasLinkedDevices(sock, rawJid);
+      const isWhitelisted = isBotAllowed(jid, rawJid) || isBotAllowed(jid, phone);
+
+      let badge = '';
+      if (check.hasLinked) {
+        if (isWhitelisted) {
+          badge = `🤖 *مـرتـبـط بـبـوت (${check.count} أجهزة)* ↬ 🛡️ [مسموح في الـ Whitelist]`;
+        } else {
+          badge = `🤖 *مـرتـبـط بـبـوت (${check.count} أجهزة)* ↬ ⚠️ [سـيـطـرد إذا قـبـلـتـه]`;
+        }
+      } else {
+        badge = `👤 *حـسـاب عـادي نـظـيـف (0 أجهزة)* ✅`;
+      }
+
+      text += `${i + 1}️⃣ @${phone}\n`;
+      text += `   ⋄ الـحـالـة : ${badge}\n`;
+      text += `   ⋄ لـلـسـمـاح : *.allowbot ${phone}*\n`;
+      text += `   ⋄ لـلـقـبـول : *.accept ${phone}* | لـلـرفـض : *.reject ${phone}*\n\n`;
+
+      allMentions.push(`${phone}@s.whatsapp.net`);
+    }
+
+    text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚔️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+    text += `       🏰 *PARADIS EMPIRE SECURITY* 🏰`;
+
+    await sock.sendMessage(jid, {
+      text,
+      mentions: allMentions
+    });
+
+  } catch (err) {
+    console.error('Erreur handleJoinRequestsListCommand:', err);
+    await sock.sendMessage(jid, { text: `❌ حـدث خـطـأ أثـنـاء جـلـب طـلـبـات الانـضـمـام: ${err.message}` });
+  }
+}
+
+/**
+ * Commande .accept [number] / .reject [number] (Group Admins / Sudo)
+ */
+async function handleJoinRequestActionCommand(sock, jid, messageText, action, senderIsAdmin, senderIsSudo) {
+  try {
+    if (!senderIsAdmin && !senderIsSudo) {
+      await sock.sendMessage(jid, { text: '⚠️ *عـذراً!* هذا الأمر مخصص لمشرفي المجموعة أو مطوري البوت فقط.' });
+      return;
+    }
+
+    const words = messageText.trim().split(/\s+/);
+    const target = words[1];
+    if (!target) {
+      await sock.sendMessage(jid, { text: `❌ يـرجـى تـحـديـد الـرقـم: *.${action} 212xxxxxxx*` });
+      return;
+    }
+
+    const cleanTarget = target.replace(/[^0-9]/g, '');
+    const targetJid = `${cleanTarget}@s.whatsapp.net`;
+
+    const actType = (action === 'accept' || action === 'قبول') ? 'approve' : 'reject';
+    await sock.groupRequestParticipantsUpdate(jid, [targetJid], actType);
+
+    const actName = actType === 'approve' ? 'قـبـول' : 'رفـض';
+    await sock.sendMessage(jid, {
+      text: `✅ تـم *${actName}* طـلـب انـضـمـام الـعـضـو @${cleanTarget} بـنـجـاح.`,
+      mentions: [targetJid]
+    });
+  } catch (err) {
+    await sock.sendMessage(jid, { text: `❌ تـعـذر تـنـفـيـذ الإجـراء: ${err.message}` });
   }
 }
 
