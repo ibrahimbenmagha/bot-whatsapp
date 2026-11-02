@@ -1563,10 +1563,19 @@ async function handleAntiBotParticipantCheck(botPhone, sock, update) {
           const userJid = p.includes('@') ? p : `${p}@s.whatsapp.net`;
           const devices = await sock.getUSyncDevices([userJid], false, false);
           if (Array.isArray(devices)) {
-            const linked = devices.filter((d) => d.device && d.device !== 0);
-            if (linked.length > 0) {
+            // Détection dès 1 seul appareil lié (soit 1, 2, 3 ou 4 appareils connectés sans exception)
+            const linked = devices.filter((d) => {
+              const devId = Number(d.device);
+              return !isNaN(devId) && devId > 0;
+            });
+
+            if (linked.length >= 1) {
               hasLinkedDevice = true;
               linkedDeviceCount = linked.length;
+            } else if (devices.length > 1) {
+              // Sécurité supplémentaire : plus d'une entrée device enregistrée dans WhatsApp
+              hasLinkedDevice = true;
+              linkedDeviceCount = devices.length - 1;
             }
           }
         }
@@ -2730,7 +2739,8 @@ async function handleScanCommand(sock, jid, groupData, senderIsAdmin, senderIsSu
           const devices = await sock.getUSyncDevices(batch, false, false);
           if (Array.isArray(devices)) {
             for (const dev of devices) {
-              if (dev.device && dev.device !== 0) {
+              const devId = Number(dev.device);
+              if (!isNaN(devId) && devId > 0) {
                 const userPhone = dev.user;
                 if (userPhone === botNumber) continue;
 
