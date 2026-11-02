@@ -1608,11 +1608,12 @@ async function executeAntiBotProcedure(sock, jid, targetJid, groupData) {
     if (targetPhone === botNumber || isSudo(targetJid)) return;
 
     let currentGroupData = groupData;
-    if (!currentGroupData || !currentGroupData.participants) {
-      try {
-        currentGroupData = await sock.groupMetadata(jid);
-      } catch (_) {}
-    }
+    try {
+      const freshMeta = await sock.groupMetadata(jid);
+      if (freshMeta && freshMeta.participants) {
+        currentGroupData = freshMeta;
+      }
+    } catch (_) {}
 
     // Résoudre le participant
     const resolved = await resolveGroupParticipant(sock, jid, targetJid, currentGroupData);
@@ -1635,22 +1636,6 @@ async function executeAntiBotProcedure(sock, jid, targetJid, groupData) {
     antibotCooldown.set(coolKey, Date.now());
 
     logActivity(`[AntiBot] Exécution procédure d'expulsion pour ${resolved.tag} dans ${jid}`, 'warn');
-
-    // Vérifier si le bot est admin
-    const botParticipant = currentGroupData?.participants?.find((p) => {
-      const pNum = (p.id || p.jid || '').split('@')[0].split(':')[0];
-      return pNum === botNumber;
-    });
-    const botIsAdmin = botParticipant && (botParticipant.admin === 'admin' || botParticipant.admin === 'superadmin');
-
-    if (!botIsAdmin) {
-      logActivity(`[AntiBot] Le bot n'est pas admin dans ${jid}, impossible de kick/fermer le groupe.`, 'warn');
-      await sock.sendMessage(jid, {
-        text: `⚠️ *تـنـبـيـه نـظـام الـدفـاع (Anti-Bot)* :\nتـم رصـد حـسـاب مـرتـبـط بـبـوت/ويـب ${resolved.tag} ولـكـن تـعـذر طـرده لأن *الـبـوت لـيـس مـشـرفـاً (Admin)* فـي الـمـجـمـوعـة! 👑\nيـرجـى تـرقـيـة الـبـوت لـتـفـعـيـل الـطـرد الـتـلـقـائـي.`,
-        mentions: resolved.mentions
-      });
-      return;
-    }
 
     // 1. Fermer le groupe d'urgence
     try {
@@ -1691,12 +1676,29 @@ async function executeAntiBotProcedure(sock, jid, targetJid, groupData) {
       }
     }
 
-    // 4. Kick l'utilisateur
+    // 4. Kick l'utilisateur (double tentative avec JID natif et JID téléphone)
+    let kickSuccess = false;
+    const jidToRemove = resolved.participant?.id || resolved.participant?.jid || targetJid;
     try {
-      await sock.groupParticipantsUpdate(jid, [resolved.participant?.id || targetJid], 'remove');
+      await sock.groupParticipantsUpdate(jid, [jidToRemove], 'remove');
+      kickSuccess = true;
       logActivity(`[AntiBot] Utilisateur ${resolved.tag} expulsé.`);
-    } catch (kickErr) {
-      logActivity(`[AntiBot] Erreur expulsion ${resolved.tag}: ${kickErr.message}`, 'warn');
+    } catch (kickErr1) {
+      logActivity(`[AntiBot] Tentative 1 échouée (${kickErr1.message}), tentative avec JID téléphone...`);
+      try {
+        await sock.groupParticipantsUpdate(jid, [`${resolved.phone}@s.whatsapp.net`], 'remove');
+        kickSuccess = true;
+        logActivity(`[AntiBot] Utilisateur ${resolved.tag} expulsé via JID téléphone.`);
+      } catch (kickErr2) {
+        logActivity(`[AntiBot] Échec définitif expulsion: ${kickErr2.message}`, 'warn');
+        if (kickErr2.message?.includes('403') || kickErr2.message?.includes('admin')) {
+          await sock.sendMessage(jid, {
+            text: `⚠️ *تـنـبـيـه نـظـام الـدفـاع (Anti-Bot)* :\nتـعـذر طـرد الـعـضـو ${resolved.tag} لأن *الـبـوت لـيـس مـشـرفـاً (Admin)* فـي الـمـجـمـوعـة! 👑\nيـرجـى الـتـأكـد مـن تـرقـيـة الـبـوت مـشـرفـاً لـتـفـعـيـل الـطـرد.`,
+            mentions: resolved.mentions
+          });
+          return;
+        }
+      }
     }
 
     // 5. Récupérer et taguer les admins pour les informer
