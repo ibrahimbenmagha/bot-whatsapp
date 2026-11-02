@@ -2069,12 +2069,8 @@ async function handlePromoteCommand(sock, jid, messageText, msg, groupData) {
       return;
     }
 
-    const targetNumber = targetUserId.split('@')[0].split(':')[0];
-    const participant = currentGroupData.participants.find(p => {
-      const pId = p.id || '';
-      const pJid = p.jid || '';
-      return pId.includes(targetNumber) || pJid.includes(targetNumber);
-    });
+    const resolved = await resolveGroupParticipant(sock, jid, targetUserId, currentGroupData);
+    const participant = resolved.participant;
 
     if (!participant) {
       await sock.sendMessage(jid, { text: '❌ الـعـضـو غـيـر مـوجـود فـي هـذه الـمـجـمـوعـة.' });
@@ -2083,29 +2079,60 @@ async function handlePromoteCommand(sock, jid, messageText, msg, groupData) {
 
     if (participant.admin === 'admin' || participant.admin === 'superadmin') {
       await sock.sendMessage(jid, { 
-        text: `ℹ️ الـعـضـو @${targetNumber} مـشـرف بـالـفـعـل فـي الـمـجـمـوعـة 👑`,
-        mentions: [participant.id, participant.jid || `${targetNumber}@s.whatsapp.net`].filter(Boolean)
+        text: `ℹ️ الـعـضـو ${resolved.tag} مـشـرف بـالـفـعـل فـي الـمـجـمـوعـة 👑`,
+        mentions: resolved.mentions
       });
       return;
     }
 
-    const jidToPromote = participant.id || participant.jid || `${targetNumber}@s.whatsapp.net`;
+    const jidToPromote = participant.id || participant.jid || `${resolved.phone}@s.whatsapp.net`;
     await sock.groupParticipantsUpdate(jid, [jidToPromote], 'promote');
 
     let text = `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🎖️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
     text += `       🏰 *إمـبـراطـوريـة بـاراديـس* 🏰\n`;
     text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🎖️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n\n`;
     text += `👑 *تـمـت الـتـرقـيـة إلـى مـشـرف بـنـجـاح* 👑\n\n`;
-    text += `⋄ الـعـضـو : @${targetNumber}\n`;
+    text += `⋄ الـعـضـو : ${resolved.tag}\n`;
     text += `⋄ الـرتـبـة : مـشـرف الـمـجـمـوعـة (Group Admin)\n\n`;
     text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚔️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
     text += `       🏰 *PARADIS EMPIRE* 🏰`;
 
     await sock.sendMessage(jid, {
       text,
-      mentions: [participant.id, participant.jid || `${targetNumber}@s.whatsapp.net`].filter(Boolean)
+      mentions: resolved.mentions
     });
-    logActivity(`[Promote] @${targetNumber} promu admin dans ${jid}`);
+    logActivity(`[Promote] ${resolved.tag} promu admin dans ${jid}`);
+
+    // Message supplémentaire demandé : (ها كيفاش كيحس)
+    await sock.sendMessage(jid, {
+      text: `(ها كيفاش كيحس)`
+    });
+
+    // Audio OMGWAW
+    const opusPath = path.join(__dirname, 'Media', 'OMGWAW.opus');
+    const mpegPath = path.join(__dirname, 'Media', 'OMGWAW.mpeg');
+
+    if (fs.existsSync(opusPath)) {
+      try {
+        await sock.sendMessage(jid, {
+          audio: fs.readFileSync(opusPath),
+          mimetype: 'audio/ogg; codecs=opus',
+          ptt: true
+        });
+      } catch (audioErr) {
+        logActivity(`Échec envoi audio promote opus: ${audioErr.message}`, 'warn');
+      }
+    } else if (fs.existsSync(mpegPath)) {
+      try {
+        await sock.sendMessage(jid, {
+          audio: fs.readFileSync(mpegPath),
+          mimetype: 'audio/mp4',
+          ptt: false
+        });
+      } catch (audioErr) {
+        logActivity(`Échec envoi audio promote mpeg: ${audioErr.message}`, 'warn');
+      }
+    }
   } catch (err) {
     console.error('Erreur handlePromoteCommand:', err);
     await sock.sendMessage(jid, { text: `❌ تـعـذر تـرقـيـة الـعـضـو : ${err.message}` });
@@ -2141,12 +2168,8 @@ async function handleDemoteCommand(sock, jid, messageText, msg, groupData) {
       return;
     }
 
-    const targetNumber = targetUserId.split('@')[0].split(':')[0];
-    const participant = currentGroupData.participants.find(p => {
-      const pId = p.id || '';
-      const pJid = p.jid || '';
-      return pId.includes(targetNumber) || pJid.includes(targetNumber);
-    });
+    const resolved = await resolveGroupParticipant(sock, jid, targetUserId, currentGroupData);
+    const participant = resolved.participant;
 
     if (!participant) {
       await sock.sendMessage(jid, { text: '❌ الـعـضـو غـيـر مـوجـود فـي هـذه الـمـجـمـوعـة.' });
@@ -2155,36 +2178,67 @@ async function handleDemoteCommand(sock, jid, messageText, msg, groupData) {
 
     // Protection propriétaire du groupe
     const ownerNumber = currentGroupData.owner ? currentGroupData.owner.split('@')[0].split(':')[0] : null;
-    if (ownerNumber && targetNumber === ownerNumber) {
+    if (ownerNumber && resolved.phone === ownerNumber) {
       await sock.sendMessage(jid, { text: '❌ لا يـمـكـن تـنـزيـل مـالـك / مـنـشـئ الـمـجـمـوعـة 🛡️' });
       return;
     }
 
     if (participant.admin !== 'admin' && participant.admin !== 'superadmin') {
       await sock.sendMessage(jid, { 
-        text: `ℹ️ الـعـضـو @${targetNumber} لـيـس مـشـرفـاً بـالأسـاس.`,
-        mentions: [participant.id, participant.jid || `${targetNumber}@s.whatsapp.net`].filter(Boolean)
+        text: `ℹ️ الـعـضـو ${resolved.tag} لـيـس مـشـرفـاً بـالأسـاس.`,
+        mentions: resolved.mentions
       });
       return;
     }
 
-    const jidToDemote = participant.id || participant.jid || `${targetNumber}@s.whatsapp.net`;
+    const jidToDemote = participant.id || participant.jid || `${resolved.phone}@s.whatsapp.net`;
     await sock.groupParticipantsUpdate(jid, [jidToDemote], 'demote');
 
     let text = `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⬇️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
     text += `       🏰 *إمـبـراطـوريـة بـاراديـس* 🏰\n`;
     text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⬇️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n\n`;
     text += `📉 *تـم تـنـزيـل الـرتـبـة إلـى عـضـو* 📉\n\n`;
-    text += `⋄ الـعـضـو : @${targetNumber}\n`;
+    text += `⋄ الـعـضـو : ${resolved.tag}\n`;
     text += `⋄ تـم تـجـريـده مـن صـلاحـيـات الإشـراف بـنـجـاح.\n\n`;
     text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚔️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
     text += `       🏰 *PARADIS EMPIRE* 🏰`;
 
     await sock.sendMessage(jid, {
       text,
-      mentions: [participant.id, participant.jid || `${targetNumber}@s.whatsapp.net`].filter(Boolean)
+      mentions: resolved.mentions
     });
-    logActivity(`[Demote] @${targetNumber} rétrogradé membre dans ${jid}`);
+    logActivity(`[Demote] ${resolved.tag} rétrogradé membre dans ${jid}`);
+
+    // Message supplémentaire demandé : (خخخ شو كيبكي)
+    await sock.sendMessage(jid, {
+      text: `(خخخ شو كيبكي)`
+    });
+
+    // Audio CRY
+    const opusPath = path.join(__dirname, 'Media', 'CRY.opus');
+    const mpegPath = path.join(__dirname, 'Media', 'CRY.mpeg');
+
+    if (fs.existsSync(opusPath)) {
+      try {
+        await sock.sendMessage(jid, {
+          audio: fs.readFileSync(opusPath),
+          mimetype: 'audio/ogg; codecs=opus',
+          ptt: true
+        });
+      } catch (audioErr) {
+        logActivity(`Échec envoi audio demote opus: ${audioErr.message}`, 'warn');
+      }
+    } else if (fs.existsSync(mpegPath)) {
+      try {
+        await sock.sendMessage(jid, {
+          audio: fs.readFileSync(mpegPath),
+          mimetype: 'audio/mp4',
+          ptt: false
+        });
+      } catch (audioErr) {
+        logActivity(`Échec envoi audio demote mpeg: ${audioErr.message}`, 'warn');
+      }
+    }
   } catch (err) {
     console.error('Erreur handleDemoteCommand:', err);
     await sock.sendMessage(jid, { text: `❌ تـعـذر تـنـزيـل الـعـضـو : ${err.message}` });
