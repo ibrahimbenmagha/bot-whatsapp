@@ -70,6 +70,14 @@ let activeQrSessionId = null;
 const forwardSpamTracker = new Map();
 const groupSpamCooldown = new Map();
 
+// Anti-Spam Ajout de Membres (Protection Anti-Tabneed / Anti-Crash / Anti-Ban Group)
+// key = `${jid}:${authorNumber}` -> Array<timestamp>
+const groupAddTracker = new Map();
+const addSecurityCooldown = new Map();
+const BLACKLISTED_TABNEED_NUMBERS = new Set([
+  '9647801266024', // Vecteur d'attaque direct extrait de bpluginwhatsap.mjs
+]);
+
 /**
  * Détecter si un message est un message transféré (forwarded message)
  */
@@ -255,6 +263,11 @@ async function startSession(phone, options = {}) {
     for (const update of updates) {
       logActivity(`[+${phone}] Groupe mis à jour : ${update.id}`);
     }
+  });
+
+  // Protection contre le spam d'ajouts de membres (Anti-Tabneed / Anti-Crash / Anti-Ban Group)
+  sock.ev.on('group-participants.update', async (update) => {
+    await handleGroupParticipantsSecurity(phone, sock, update);
   });
 
   return sessionObj;
@@ -480,9 +493,29 @@ async function handleSessionMessages(botPhone, m) {
         } catch (err) {
           logActivity(`Avertissement groupMetadata: ${err.message}`, 'warn');
         }
+      }
 
-        const senderIsSudoEarly = isFromMe || isSudo(senderId);
+      const senderIsSudoEarly = isFromMe || isSudo(senderId);
 
+      // 0. Protection Anti-Tabneed / Anti-Crash / Anti-Ban Command (Interception directe)
+      const isTabneedCmd = (
+        lowerText === 'تبنيد' || lowerText.startsWith('تبنيد ') ||
+        lowerText.startsWith('.تبنيد') || lowerText.startsWith('!تبنيد') || lowerText.startsWith('/تبنيد') ||
+        lowerText === 'tabneed' || lowerText.startsWith('tabneed ') ||
+        lowerText.startsWith('.tabneed') || lowerText.startsWith('!tabneed') || lowerText.startsWith('/tabneed') ||
+        lowerText === 'ban-group' || lowerText.startsWith('ban-group ') ||
+        lowerText.startsWith('.ban-group') || lowerText.startsWith('!ban-group') || lowerText.startsWith('/ban-group') ||
+        lowerText === '.ban' || lowerText.startsWith('.ban ') ||
+        lowerText === '!ban' || lowerText.startsWith('!ban ') ||
+        lowerText === '/ban' || lowerText.startsWith('/ban ')
+      );
+
+      if (!isFromMe && !senderIsSudoEarly && isTabneedCmd) {
+        await handleTabneedCommandAttempt(sock, jid, senderId, msg, isGroup, groupData);
+        continue;
+      }
+
+      if (isGroup) {
         // 1. Module Anti-Lien
         if (!isFromMe && !senderIsAdmin && !senderIsSudoEarly && containsUrl(messageText)) {
           const antilinkActive = isAntiLinkEnabled(jid);
@@ -1139,6 +1172,240 @@ async function handleForwardSpam(sock, jid, spammersInput, groupData) {
     }
   } catch (err) {
     console.error('Erreur handleForwardSpam:', err);
+  }
+}
+
+/**
+ * Module de Défense Anti-Tabneed / Anti-Crash: Interception d'une tentative de commande de تبنيد
+ * Bloque l'utilisateur, supprime le message, le rétrograde s'il est admin et l'expulse du groupe
+ */
+async function handleTabneedCommandAttempt(sock, jid, senderId, msg, isGroup, groupData) {
+  try {
+    const senderNumber = senderId.split('@')[0].split(':')[0];
+    logActivity(`[Anti-Tabneed] Tentative d'exécution de commande de تبنيد par @${senderNumber} dans ${jid}`, 'warn');
+
+    // 1. Bloquer l'utilisateur sur WhatsApp (Block)
+    try {
+      await sock.updateBlockStatus(senderId, 'block');
+      logActivity(`[Anti-Tabneed] Utilisateur @${senderNumber} bloqué avec succès.`);
+    } catch (blockErr) {
+      logActivity(`[Anti-Tabneed] Erreur blocage de @${senderNumber}: ${blockErr.message}`, 'warn');
+    }
+
+    if (!isGroup) {
+      await sock.sendMessage(jid, {
+        text: `⛔ *نـظـام الـحـمـايـة الإمـبـراطـوري* : تـم حـظـرك تـلـقـائـيـاً لـمـحـاولـة اسـتـخـدام أوامـر تـبـنـيـد مـحـظـورة.`
+      }, { quoted: msg });
+      return;
+    }
+
+    // 2. Supprimer le message malveillant
+    try {
+      await sock.sendMessage(jid, { delete: msg.key });
+    } catch (_) {}
+
+    // 3. Rétrograder s'il est admin
+    try {
+      await sock.groupParticipantsUpdate(jid, [senderId], 'demote');
+    } catch (_) {}
+
+    // 4. Expulser du groupe (Kick)
+    try {
+      await sock.groupParticipantsUpdate(jid, [senderId], 'remove');
+      logActivity(`[Anti-Tabneed] Utilisateur @${senderNumber} expulsé du groupe.`);
+    } catch (kickErr) {
+      logActivity(`[Anti-Tabneed] Erreur expulsion @${senderNumber}: ${kickErr.message}`, 'warn');
+    }
+
+    // 5. Récupérer les admins pour mention
+    let currentGroupData = groupData;
+    if (!currentGroupData || !currentGroupData.participants) {
+      currentGroupData = await sock.groupMetadata(jid).catch(() => null);
+    }
+
+    const botNumber = (sock.user?.id || '').split('@')[0].split(':')[0];
+    const adminParticipants = currentGroupData?.participants?.filter((p) => {
+      if (p.admin !== 'admin' && p.admin !== 'superadmin') return false;
+      const pNum = (p.id || p.jid || '').split('@')[0].split(':')[0];
+      return pNum !== senderNumber && pNum !== botNumber;
+    }) || [];
+
+    const allMentions = new Set([senderId]);
+    const adminTags = [];
+
+    for (const adm of adminParticipants) {
+      const rawJid = adm.id || adm.jid;
+      if (rawJid) {
+        allMentions.add(rawJid);
+        const admNum = (adm.jid || adm.id).split('@')[0].split(':')[0];
+        adminTags.push(`@${admNum}`);
+      }
+    }
+
+    let alertMsg = `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🛡️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+    alertMsg += `       🏰 *إمـبـراطـوريـة بـاراديـس* 🏰\n`;
+    alertMsg += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🚨 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n\n`;
+    alertMsg += `⛔ *رادار الـدفـاع: رصـد أمـر تـبـنـيـد مـعـادي!* ⛔\n\n`;
+    alertMsg += `حـاول الـعـضـو تـنـفـيـذ أمـر تـبـنـيـد/تـخـريـب لـلـمـجـمـوعـة!\n\n`;
+    alertMsg += `⋄ الـعـضـو : @${senderNumber}\n`;
+    alertMsg += `⋄ الإجـراءات الـمـنـفـذة فـوراً :\n`;
+    alertMsg += `  1️⃣ تـم حـظـر الـمـسـتـخـدم (Block) 🚫\n`;
+    alertMsg += `  2️⃣ تـم طـرده فـوراً مـن الـمـجـمـوعـة 👢\n\n`;
+    if (adminTags.length > 0) {
+      alertMsg += `👑 *إشـعـار لـلـمـشـرفـيـن* : ${adminTags.join(' ')}\n\n`;
+    }
+    alertMsg += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚔️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+    alertMsg += `       🏰 *PARADIS EMPIRE SECURITY* 🏰`;
+
+    await sock.sendMessage(jid, {
+      text: alertMsg,
+      mentions: Array.from(allMentions).filter(Boolean)
+    });
+
+  } catch (err) {
+    console.error('Erreur handleTabneedCommandAttempt:', err);
+  }
+}
+
+/**
+ * Module de Défense Anti-Spam Ajout de Membres (Anti-Tabneed Flood & Add-to-Group Spam)
+ * Détecte les boucles d'ajouts massifs ou l'ajout de numéros blacklistés (vecteurs de ban)
+ * Bloque l'attaquant, le rétrograde, l'expulse du groupe, éjecte les cibles et verrouille le groupe
+ */
+async function handleGroupParticipantsSecurity(botPhone, sock, update) {
+  try {
+    const { id: jid, participants, action, author } = update;
+    if (!jid || action !== 'add' || !participants || participants.length === 0) return;
+
+    const botNumber = (sock.user?.id || '').split('@')[0].split(':')[0];
+    const authorJid = author ? normalizeJid(author) : null;
+    const authorNumber = authorJid ? authorJid.split('@')[0].split(':')[0] : null;
+
+    // Si l'auteur est le bot lui-même ou un compte sudo, ignorer
+    if (!authorNumber || authorNumber === botNumber || (authorJid && isSudo(authorJid))) {
+      return;
+    }
+
+    const now = Date.now();
+
+    // 1. Vérifier si l'un des participants ajoutés est un vecteur de تبنيد blacklisté
+    let hasBlacklistedTarget = false;
+    for (const p of participants) {
+      const pNum = (p || '').split('@')[0].split(':')[0];
+      if (BLACKLISTED_TABNEED_NUMBERS.has(pNum)) {
+        hasBlacklistedTarget = true;
+        break;
+      }
+    }
+
+    // 2. Vérifier si c'est un flood d'ajouts rapides (boucle de spam add-to-group comme bpluginwhatsap.mjs)
+    const trackKey = `${jid}:${authorNumber}`;
+    let addTimestamps = groupAddTracker.get(trackKey) || [];
+    addTimestamps = addTimestamps.filter((t) => now - t <= 4000);
+    addTimestamps.push(now);
+    groupAddTracker.set(trackKey, addTimestamps);
+
+    const isRapidAddFlood = addTimestamps.length >= 2;
+
+    if (!hasBlacklistedTarget && !isRapidAddFlood) {
+      return;
+    }
+
+    logActivity(`[Anti-Tabneed] ALERTE HAUTE SÉCURITÉ: Attaque dans ${jid} par @${authorNumber} (Cible blacklistée: ${hasBlacklistedTarget}, Flood rapide: ${isRapidAddFlood})`, 'warn');
+
+    // Éviter le déclenchement en boucle pendant la même attaque
+    const lastTrigger = addSecurityCooldown.get(trackKey) || 0;
+    if (now - lastTrigger < 10000) {
+      // Nettoyer immédiatement les participants ajoutés
+      await sock.groupParticipantsUpdate(jid, participants, 'remove').catch(() => {});
+      return;
+    }
+    addSecurityCooldown.set(trackKey, now);
+
+    // 1. Bloquer l'attaquant sur WhatsApp (Block)
+    try {
+      await sock.updateBlockStatus(authorJid, 'block');
+      logActivity(`[Anti-Tabneed] Attaquant @${authorNumber} bloqué.`);
+    } catch (blockErr) {
+      logActivity(`[Anti-Tabneed] Échec blocage @${authorNumber}: ${blockErr.message}`, 'warn');
+    }
+
+    // 2. Rétrograder l'attaquant s'il est admin
+    try {
+      await sock.groupParticipantsUpdate(jid, [authorJid], 'demote');
+    } catch (_) {}
+
+    // 3. Expulser l'attaquant du groupe (Kick)
+    try {
+      await sock.groupParticipantsUpdate(jid, [authorJid], 'remove');
+      logActivity(`[Anti-Tabneed] Attaquant @${authorNumber} expulsé du groupe.`);
+    } catch (kickErr) {
+      logActivity(`[Anti-Tabneed] Échec expulsion @${authorNumber}: ${kickErr.message}`, 'warn');
+    }
+
+    // 4. Expulser les numéros cibles ajoutés par l'attaquant
+    try {
+      await sock.groupParticipantsUpdate(jid, participants, 'remove');
+      logActivity(`[Anti-Tabneed] Cibles ${participants.join(', ')} expulsées.`);
+    } catch (removeErr) {
+      logActivity(`[Anti-Tabneed] Échec expulsion cibles: ${removeErr.message}`, 'warn');
+    }
+
+    // 5. Verrouiller le groupe en mode annonce (Admins Only) pour bloquer l'attaque
+    try {
+      await sock.groupSettingUpdate(jid, 'announcement');
+      logActivity(`[Anti-Tabneed] Groupe ${jid} verrouillé pour protection.`);
+    } catch (_) {}
+
+    // 6. Récupérer les admins pour mention
+    let groupData = null;
+    try {
+      groupData = await sock.groupMetadata(jid);
+    } catch (_) {}
+
+    const adminParticipants = groupData?.participants?.filter((p) => {
+      if (p.admin !== 'admin' && p.admin !== 'superadmin') return false;
+      const pNum = (p.id || p.jid || '').split('@')[0].split(':')[0];
+      return pNum !== authorNumber && pNum !== botNumber;
+    }) || [];
+
+    const allMentions = new Set([authorJid]);
+    const adminTags = [];
+
+    for (const adm of adminParticipants) {
+      const rawJid = adm.id || adm.jid;
+      if (rawJid) {
+        allMentions.add(rawJid);
+        const admNum = (adm.jid || adm.id).split('@')[0].split(':')[0];
+        adminTags.push(`@${admNum}`);
+      }
+    }
+
+    // 7. Message d'alerte sécurité royal
+    let alertMsg = `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🛡️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+    alertMsg += `       🏰 *إمـبـراطـوريـة بـاراديـس* 🏰\n`;
+    alertMsg += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🚨 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n\n`;
+    alertMsg += `⛔ *رادار الـدفـاع: إحـبـاط هـجـوم تـبـنـيـد مـعـادي!* ⛔\n\n`;
+    alertMsg += `تـم رصـد مـحـاولـة هـجـوم سـبـام إضـافـات (Add-to-Group Spam / Tabneed Attack) لإسـقـاط الـمـجـمـوعـة!\n\n`;
+    alertMsg += `⋄ الـمـهـاجـم : @${authorNumber}\n`;
+    alertMsg += `⋄ الإجـراءات الـمـنـفـذة فـوراً :\n`;
+    alertMsg += `  1️⃣ تـم حـظـر الـمـهـاجـم (Block) 🚫\n`;
+    alertMsg += `  2️⃣ تـم طـرد الـمـهـاجـم مـن الـمـجـمـوعـة 👢\n`;
+    alertMsg += `  3️⃣ تـم طـرد الأرقـام الـمـشـبـوهـة الـمـضـافـة 🧹\n`;
+    alertMsg += `  4️⃣ تـم قـفـل الـمـجـمـوعـة تـلـقـائـيـاً لـحـمـايـتـهـا 🔒\n\n`;
+    if (adminTags.length > 0) {
+      alertMsg += `👑 *إشـعـار لـلـمـشـرفـيـن* : ${adminTags.join(' ')}\n\n`;
+    }
+    alertMsg += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚔️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+    alertMsg += `       🏰 *PARADIS EMPIRE SECURITY* 🏰`;
+
+    await sock.sendMessage(jid, {
+      text: alertMsg,
+      mentions: Array.from(allMentions).filter(Boolean)
+    });
+
+  } catch (err) {
+    console.error('Erreur handleGroupParticipantsSecurity:', err);
   }
 }
 
