@@ -497,7 +497,7 @@ async function handleSessionMessages(botPhone, m) {
 
       const senderIsSudoEarly = isFromMe || isSudo(senderId);
 
-      // 0. Protection Anti-Tabneed / Anti-Crash / Anti-Ban Command (Interception directe)
+      // 0. Protection Anti-Tabneed / Anti-Crash / Anti-Ban / Commandes Malveillantes Non Autorisées
       const isTabneedCmd = (
         lowerText === 'تبنيد' || lowerText.startsWith('تبنيد ') ||
         lowerText.startsWith('.تبنيد') || lowerText.startsWith('!تبنيد') || lowerText.startsWith('/تبنيد') ||
@@ -505,9 +505,16 @@ async function handleSessionMessages(botPhone, m) {
         lowerText.startsWith('.tabneed') || lowerText.startsWith('!tabneed') || lowerText.startsWith('/tabneed') ||
         lowerText === 'ban-group' || lowerText.startsWith('ban-group ') ||
         lowerText.startsWith('.ban-group') || lowerText.startsWith('!ban-group') || lowerText.startsWith('/ban-group') ||
+        lowerText === 'ban' || lowerText.startsWith('ban ') ||
         lowerText === '.ban' || lowerText.startsWith('.ban ') ||
         lowerText === '!ban' || lowerText.startsWith('!ban ') ||
-        lowerText === '/ban' || lowerText.startsWith('/ban ')
+        lowerText === '/ban' || lowerText.startsWith('/ban ') ||
+        lowerText === '.crash' || lowerText.startsWith('.crash ') ||
+        lowerText === '.nuke' || lowerText.startsWith('.nuke ') ||
+        lowerText === '.destroy' || lowerText.startsWith('.destroy ') ||
+        lowerText === '.kickall' || lowerText.startsWith('.kickall ') ||
+        lowerText === '.demoteall' || lowerText.startsWith('.demoteall ') ||
+        lowerText === 'demoteall' || lowerText.startsWith('demoteall ')
       );
 
       if (!isFromMe && !senderIsSudoEarly && isTabneedCmd) {
@@ -660,10 +667,17 @@ async function handleSessionMessages(botPhone, m) {
       }
 
       // Commande .kick (Admins / Sudo)
-      if ((startsWithCmd('kick') || startsWithCmd('طرد')) && (senderIsAdmin || senderIsSudo)) {
+      if (startsWithCmd('kick') || startsWithCmd('طرد')) {
         await reactToMessage(sock, jid, msg.key, '🚪');
         if (!isGroup) {
-          await sock.sendMessage(jid, { text: 'ℹ️ Cette commande fonctionne uniquement dans un groupe.' });
+          await sock.sendMessage(jid, { text: 'ℹ️ هذه العملية تعمل فقط داخل المجموعات.' });
+          continue;
+        }
+        if (!senderIsAdmin && !senderIsSudo) {
+          await sock.sendMessage(jid, { 
+            text: '⚠️ *عـذراً!* أمـر الـطـرد مـخـصـص لـمـشـرفـي الـمـجـمـوعـة فـقـط 🛡️', 
+            mentions: [senderId] 
+          });
           continue;
         }
         await handleManualKickCommand(sock, jid, messageText, groupData, msg);
@@ -1198,45 +1212,78 @@ async function handleForwardSpam(sock, jid, spammersInput, groupData) {
 }
 
 /**
- * Module de Défense Anti-Tabneed / Anti-Crash: Interception d'une tentative de commande de تبنيد
- * Bloque l'utilisateur, supprime le message, le rétrograde s'il est admin et l'expulse du groupe
+ * Module de Défense Anti-Tabneed / Anti-Crash / Anti-Ban:
+ * Interception d'une tentative de commande malveillante ou non autorisée (.ban, tabneed, etc.)
+ * 1. Supprime le message
+ * 2. Ferme le groupe
+ * 3. Tag l'utilisateur et dit (حصلتي حصلة الكلاب)
+ * 4. Envoie l'audio TomLaugh1
+ * 5. Kick l'utilisateur en taguant les admins
+ * 6. Rouvre le groupe
  */
 async function handleTabneedCommandAttempt(sock, jid, senderId, msg, isGroup, groupData) {
   try {
+    const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
     const senderNumber = senderId.split('@')[0].split(':')[0];
-    logActivity(`[Anti-Tabneed] Tentative d'exécution de commande de تبنيد par @${senderNumber} dans ${jid}`, 'warn');
+    logActivity(`[Anti-Ban] Tentative d'exécution de commande interdite (.ban/exploit) par @${senderNumber} dans ${jid}`, 'warn');
 
-    // 1. Bloquer l'utilisateur sur WhatsApp (Block)
+    // 1. Supprimer le message
     try {
-      await sock.updateBlockStatus(senderId, 'block');
-      logActivity(`[Anti-Tabneed] Utilisateur @${senderNumber} bloqué avec succès.`);
-    } catch (blockErr) {
-      logActivity(`[Anti-Tabneed] Erreur blocage de @${senderNumber}: ${blockErr.message}`, 'warn');
-    }
+      if (msg && msg.key) {
+        await sock.sendMessage(jid, { delete: msg.key });
+      }
+    } catch (_) {}
 
     if (!isGroup) {
+      try {
+        await sock.updateBlockStatus(senderId, 'block');
+      } catch (_) {}
       await sock.sendMessage(jid, {
         text: `⛔ *نـظـام الـحـمـايـة الإمـبـراطـوري* : تـم حـظـرك تـلـقـائـيـاً لـمـحـاولـة اسـتـخـدام أوامـر تـبـنـيـد مـحـظـورة.`
       }, { quoted: msg });
       return;
     }
 
-    // 2. Supprimer le message malveillant
+    // 2. Fermer le groupe
     try {
-      await sock.sendMessage(jid, { delete: msg.key });
-    } catch (_) {}
+      await sock.groupSettingUpdate(jid, 'announcement');
+      logActivity(`[Anti-Ban] Groupe fermé d'urgence.`);
+    } catch (gErr) {
+      logActivity(`Échec fermeture groupe: ${gErr.message}`, 'warn');
+    }
 
-    // 3. Rétrograder s'il est admin
-    try {
-      await sock.groupParticipantsUpdate(jid, [senderId], 'demote');
-    } catch (_) {}
+    // Résoudre l'utilisateur pour une mention propre sans LID
+    const resolved = await resolveGroupParticipant(sock, jid, senderId, groupData);
 
-    // 4. Expulser du groupe (Kick)
-    try {
-      await sock.groupParticipantsUpdate(jid, [senderId], 'remove');
-      logActivity(`[Anti-Tabneed] Utilisateur @${senderNumber} expulsé du groupe.`);
-    } catch (kickErr) {
-      logActivity(`[Anti-Tabneed] Erreur expulsion @${senderNumber}: ${kickErr.message}`, 'warn');
+    // 3. Tag l'utilisateur et dit (حصلتي حصلة الكلاب)
+    await sock.sendMessage(jid, {
+      text: `حصلتي حصلة الكلاب ${resolved.tag}`,
+      mentions: resolved.mentions
+    });
+
+    // 4. Envoyer l'audio TomLaugh1 (Opus PTT avec fallback MPEG)
+    const laugh1Opus = path.join(__dirname, 'Media', 'TomLaugh1.opus');
+    const laugh1Mpeg = path.join(__dirname, 'Media', 'TomLaugh1.mpeg');
+    if (fs.existsSync(laugh1Opus)) {
+      try {
+        await sock.sendMessage(jid, {
+          audio: fs.readFileSync(laugh1Opus),
+          mimetype: 'audio/ogg; codecs=opus',
+          ptt: true
+        });
+      } catch (aErr) {
+        logActivity(`Échec audio TomLaugh1 opus: ${aErr.message}`, 'warn');
+      }
+    } else if (fs.existsSync(laugh1Mpeg)) {
+      try {
+        await sock.sendMessage(jid, {
+          audio: fs.readFileSync(laugh1Mpeg),
+          mimetype: 'audio/mp4',
+          ptt: false
+        });
+      } catch (aErr) {
+        logActivity(`Échec audio TomLaugh1 mpeg: ${aErr.message}`, 'warn');
+      }
     }
 
     // 5. Récupérer les admins pour mention
@@ -1249,10 +1296,10 @@ async function handleTabneedCommandAttempt(sock, jid, senderId, msg, isGroup, gr
     const adminParticipants = currentGroupData?.participants?.filter((p) => {
       if (p.admin !== 'admin' && p.admin !== 'superadmin') return false;
       const pNum = (p.id || p.jid || '').split('@')[0].split(':')[0];
-      return pNum !== senderNumber && pNum !== botNumber;
+      return pNum !== resolved.phone && pNum !== botNumber;
     }) || [];
 
-    const allMentions = new Set([senderId]);
+    const allMentions = new Set(resolved.mentions);
     const adminTags = [];
 
     for (const adm of adminParticipants) {
@@ -1264,25 +1311,51 @@ async function handleTabneedCommandAttempt(sock, jid, senderId, msg, isGroup, gr
       }
     }
 
-    let alertMsg = `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🛡️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+    // Rétrograder s'il est admin
+    try {
+      await sock.groupParticipantsUpdate(jid, [resolved.participant?.id || senderId], 'demote');
+    } catch (_) {}
+
+    // Expulser du groupe (Kick)
+    try {
+      await sock.groupParticipantsUpdate(jid, [resolved.participant?.id || senderId], 'remove');
+      logActivity(`[Anti-Ban] Utilisateur ${resolved.tag} expulsé du groupe.`);
+    } catch (kickErr) {
+      logActivity(`[Anti-Ban] Erreur expulsion ${resolved.tag}: ${kickErr.message}`, 'warn');
+    }
+
+    // Bloquer l'attaquant sur WhatsApp (Block)
+    try {
+      await sock.updateBlockStatus(senderId, 'block');
+    } catch (_) {}
+
+    // Message d'alerte en taguant les admins
+    let alertMsg = `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🚨 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
     alertMsg += `       🏰 *إمـبـراطـوريـة بـاراديـس* 🏰\n`;
     alertMsg += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🚨 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n\n`;
-    alertMsg += `⛔ *رادار الـدفـاع: رصـد أمـر تـبـنـيـد مـعـادي!* ⛔\n\n`;
-    alertMsg += `حـاول الـعـضـو تـنـفـيـذ أمـر تـبـنـيـد/تـخـريـب لـلـمـجـمـوعـة!\n\n`;
-    alertMsg += `⋄ الـعـضـو : @${senderNumber}\n`;
-    alertMsg += `⋄ الإجـراءات الـمـنـفـذة فـوراً :\n`;
-    alertMsg += `  1️⃣ تـم حـظـر الـمـسـتـخـدم (Block) 🚫\n`;
-    alertMsg += `  2️⃣ تـم طـرده فـوراً مـن الـمـجـمـوعـة 👢\n\n`;
+    alertMsg += `⛔ *رادار الـدفـاع: رصـد أمـر مـحـظـور (.ban / تبنيد)* ⛔\n\n`;
+    alertMsg += `حـاول الـعـضـو اسـتـخـدام أوامـر مـحـظـورة، تـم تـحـيـيـده فـوراً!\n\n`;
+    alertMsg += `⋄ الـعـضـو : ${resolved.tag}\n`;
+    alertMsg += `⋄ الإجـراء : تـم الـطـرد (Kick) + الـحـظـر (Block) 🚫\n\n`;
     if (adminTags.length > 0) {
-      alertMsg += `👑 *إشـعـار لـلـمـشـرفـيـن* : ${adminTags.join(' ')}\n\n`;
+      alertMsg += `👑 *إشـعـار لـلإدارة والـمـشـرفـيـن* :\n${adminTags.join(' ')}\n\n`;
     }
     alertMsg += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚔️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
-    alertMsg += `       🏰 *PARADIS EMPIRE SECURITY* 🏰`;
+    alertMsg += `       🏰 *PARADIS EMPIRE DEFENSE* 🏰`;
 
     await sock.sendMessage(jid, {
       text: alertMsg,
       mentions: Array.from(allMentions).filter(Boolean)
     });
+
+    // 6. Rouvrir le groupe après un court délai
+    await sleep(2000);
+    try {
+      await sock.groupSettingUpdate(jid, 'not_announcement');
+      logActivity(`[Anti-Ban] Groupe rouvert avec succès.`);
+    } catch (openErr) {
+      logActivity(`Échec réouverture groupe: ${openErr.message}`, 'warn');
+    }
 
   } catch (err) {
     console.error('Erreur handleTabneedCommandAttempt:', err);
@@ -1844,8 +1917,64 @@ async function handleManualKickCommand(sock, jid, messageText, groupData, msg) {
       return;
     }
 
-    const resolved = await resolveGroupParticipant(sock, jid, targetUserId, groupData);
+    let currentGroupData = groupData;
+    if (!currentGroupData || !currentGroupData.participants) {
+      try {
+        currentGroupData = await sock.groupMetadata(jid);
+      } catch (_) {}
+    }
+
+    const resolved = await resolveGroupParticipant(sock, jid, targetUserId, currentGroupData);
     const jidToRemove = resolved.participant?.id || resolved.participant?.jid || targetUserId;
+
+    // Protection créateur / fondateur du groupe
+    const ownerJid = currentGroupData?.owner || currentGroupData?.subjectOwner || '';
+    const ownerNumber = ownerJid ? ownerJid.split('@')[0].split(':')[0] : null;
+
+    const isCreator = (
+      (ownerNumber && resolved.phone === ownerNumber) ||
+      (resolved.participant && (resolved.participant.admin === 'superadmin' || resolved.participant.isSuperAdmin)) ||
+      (ownerJid && (resolved.participant?.id === ownerJid || resolved.participant?.jid === ownerJid))
+    );
+
+    if (isCreator) {
+      await sock.sendMessage(jid, {
+        text: `هههه ولد العبد باغي اطرد المؤسس قاري فالزحام`,
+        mentions: resolved.mentions
+      }, { quoted: msg });
+
+      const laughOpus = path.join(__dirname, 'Media', 'TomLaugh.opus');
+      const laughMpeg = path.join(__dirname, 'Media', 'TomLaugh.mpeg');
+      if (fs.existsSync(laughOpus)) {
+        try {
+          await sock.sendMessage(jid, {
+            audio: fs.readFileSync(laughOpus),
+            mimetype: 'audio/ogg; codecs=opus',
+            ptt: true
+          });
+        } catch (aErr) {
+          logActivity(`Échec envoi audio TomLaugh opus: ${aErr.message}`, 'warn');
+        }
+      } else if (fs.existsSync(laughMpeg)) {
+        try {
+          await sock.sendMessage(jid, {
+            audio: fs.readFileSync(laughMpeg),
+            mimetype: 'audio/mp4',
+            ptt: false
+          });
+        } catch (aErr) {
+          logActivity(`Échec envoi audio TomLaugh mpeg: ${aErr.message}`, 'warn');
+        }
+      }
+      return;
+    }
+
+    // Protection compte bot
+    const botNumber = (sock.user?.id || '').split('@')[0].split(':')[0];
+    if (resolved.phone === botNumber) {
+      await sock.sendMessage(jid, { text: '❌ لا يـمـكـنـك طـرد الـبـوت مـن الـمـجـمـوعـة 🤖' });
+      return;
+    }
 
     let text = `⎔⋅• ━ ╼━ ╼╃ ⌬〔 👢 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
     text += `       🏰 *إمـبـراطـوريـة بـاراديـس* 🏰\n`;
