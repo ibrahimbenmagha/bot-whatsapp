@@ -34,7 +34,9 @@ import {
   allowBotUser,
   disallowBotUser,
   isBotAllowed,
-  getAllowedBotUsers
+  getAllowedBotUsers,
+  isAntiSpamEnabled,
+  setAntiSpamEnabled
 } from './db.js';
 import { isAdmin, extractMessage, containsUrl, isGroupMessage, formatMention, normalizeJid } from './utils/helpers.js';
 
@@ -507,7 +509,7 @@ async function handleSessionMessages(botPhone, m) {
         }
       }
 
-      const senderIsSudoEarly = isFromMe || isSudo(senderId);
+      const senderIsSudoEarly = isFromMe || isSudo(senderId) || isSelfUser(sock, senderId);
 
       // 0. Protection Anti-Tabneed / Anti-Crash / Anti-Ban / Commandes Malveillantes Non Autorisées
       const isTabneedCmd = (
@@ -554,7 +556,7 @@ async function handleSessionMessages(botPhone, m) {
         }
 
         // 3. Module Anti-Spam (Transfert de messages successifs vers le groupe - 2 fois ou plus)
-        if (!isFromMe && isForwardedMessage(msg)) {
+        if (!isFromMe && !senderIsSudoEarly && isForwardedMessage(msg) && isAntiSpamEnabled(jid)) {
           const now = Date.now();
           const lastGroupTrigger = groupSpamCooldown.get(jid) || 0;
 
@@ -789,6 +791,17 @@ async function handleSessionMessages(botPhone, m) {
           continue;
         }
         await handleAntiBotToggleCommand(sock, jid, messageText, senderIsAdmin, senderIsSudo);
+        continue;
+      }
+
+      // Commande .antispam [on/off] (Group Admins / Sudo)
+      if (startsWithCmd('antispam') || startsWithCmd('مضاد_السبام') || lowerText === 'antispam on' || lowerText === 'antispam off') {
+        await reactToMessage(sock, jid, msg.key, '🚨');
+        if (!isGroup) {
+          await sock.sendMessage(jid, { text: 'ℹ️ هذه العملية تعمل فقط داخل المجموعات.' });
+          continue;
+        }
+        await handleAntiSpamToggleCommand(sock, jid, messageText, senderIsAdmin, senderIsSudo);
         continue;
       }
 
@@ -1048,6 +1061,49 @@ function isBotAdmin(sock, groupData) {
     return pId.includes(botNumber) || pJid.includes(botNumber);
   });
   return botParticipant?.admin === 'admin' || botParticipant?.admin === 'superadmin';
+}
+
+/**
+ * Vérifier si un identifiant ou numéro correspond au compte bot lui-même
+ * (Protection absolue contre l'auto-bannissement / auto-blocage / auto-expulsion)
+ */
+function isSelfUser(sock, targetJid) {
+  if (!sock || !sock.user || !targetJid) return false;
+  const botId = sock.user.id || '';
+  const botLid = sock.user.lid || '';
+  const botPhone = botId.split('@')[0].split(':')[0];
+  const targetClean = String(targetJid).split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
+
+  if (botPhone && targetClean === botPhone) return true;
+  if (botId && (targetJid === botId || targetClean === botId.split('@')[0].split(':')[0])) return true;
+  if (botLid && (targetJid === botLid || targetClean === botLid.split('@')[0].split(':')[0])) return true;
+  return false;
+}
+
+/**
+ * Bloquer un utilisateur en toute sécurité en garantissant que le bot ne se bloque jamais lui-même
+ */
+async function safeBlockUser(sock, targetJid) {
+  try {
+    if (!sock || !targetJid) return;
+    if (isSelfUser(sock, targetJid) || isSudo(targetJid)) {
+      logActivity(`[Anti-Ban] Tentative de blocage ignorée pour compte protégé (bot/sudo): ${targetJid}`, 'warn');
+      return;
+    }
+    await sock.updateBlockStatus(targetJid, 'block');
+  } catch (err) {
+    logActivity(`[Anti-Ban] Échec blocage ${targetJid}: ${err.message}`, 'warn');
+  }
+}
+
+/**
+ * Expulser des participants en toute sécurité en garantissant que le bot ne s'expulse jamais lui-même
+ */
+async function safeGroupParticipantsRemove(sock, jid, participantsList) {
+  if (!sock || !jid || !Array.isArray(participantsList)) return;
+  const safeList = participantsList.filter(p => !isSelfUser(sock, p) && !isSudo(p));
+  if (safeList.length === 0) return;
+  return await sock.groupParticipantsUpdate(jid, safeList, 'remove');
 }
 
 /**
@@ -1334,6 +1390,10 @@ async function handleTabneedCommandAttempt(sock, jid, senderId, msg, isGroup, gr
   try {
     const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
     const senderNumber = senderId.split('@')[0].split(':')[0];
+
+    // Protection compte bot et sudo (ne jamais bloquer ou kicker soi-même)
+    if (isSelfUser(sock, senderId) || isSudo(senderId)) return;
+
     logActivity(`[Anti-Ban] Tentative d'exécution de commande interdite (.ban/exploit) par @${senderNumber} dans ${jid}`, 'warn');
 
     // 1. Supprimer le message
@@ -1344,9 +1404,7 @@ async function handleTabneedCommandAttempt(sock, jid, senderId, msg, isGroup, gr
     } catch (_) {}
 
     if (!isGroup) {
-      try {
-        await sock.updateBlockStatus(senderId, 'block');
-      } catch (_) {}
+      await safeBlockUser(sock, senderId);
       await sock.sendMessage(jid, {
         text: `⛔ *نـظـام الـحـمـايـة الإمـبـراطـوري* : تـم حـظـرك تـلـقـائـيـاً لـمـحـاولـة اسـتـخـدام أوامـر تـبـنـيـد مـحـظـورة.`
       }, { quoted: msg });
@@ -1425,18 +1483,16 @@ async function handleTabneedCommandAttempt(sock, jid, senderId, msg, isGroup, gr
       await sock.groupParticipantsUpdate(jid, [resolved.participant?.id || senderId], 'demote');
     } catch (_) {}
 
-    // Expulser du groupe (Kick)
+    // Expulser du groupe (Kick sécurisé)
     try {
-      await sock.groupParticipantsUpdate(jid, [resolved.participant?.id || senderId], 'remove');
+      await safeGroupParticipantsRemove(sock, jid, [resolved.participant?.id || senderId]);
       logActivity(`[Anti-Ban] Utilisateur ${resolved.tag} expulsé du groupe.`);
     } catch (kickErr) {
       logActivity(`[Anti-Ban] Erreur expulsion ${resolved.tag}: ${kickErr.message}`, 'warn');
     }
 
-    // Bloquer l'attaquant sur WhatsApp (Block)
-    try {
-      await sock.updateBlockStatus(senderId, 'block');
-    } catch (_) {}
+    // Bloquer l'attaquant sur WhatsApp (Block sécurisé)
+    await safeBlockUser(sock, senderId);
 
     // Message d'alerte en taguant les admins
     let alertMsg = `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🚨 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
@@ -1486,7 +1542,7 @@ async function handleGroupParticipantsSecurity(botPhone, sock, update) {
     const authorNumber = authorJid ? authorJid.split('@')[0].split(':')[0] : null;
 
     // Si l'auteur est le bot lui-même ou un compte sudo, ignorer
-    if (!authorNumber || authorNumber === botNumber || (authorJid && isSudo(authorJid))) {
+    if (!authorNumber || authorNumber === botNumber || isSelfUser(sock, authorJid) || (authorJid && isSudo(authorJid))) {
       return;
     }
 
@@ -1521,35 +1577,30 @@ async function handleGroupParticipantsSecurity(botPhone, sock, update) {
     const lastTrigger = addSecurityCooldown.get(trackKey) || 0;
     if (now - lastTrigger < 10000) {
       // Nettoyer immédiatement les participants ajoutés
-      await sock.groupParticipantsUpdate(jid, participants, 'remove').catch(() => {});
+      await safeGroupParticipantsRemove(sock, jid, participants).catch(() => {});
       return;
     }
     addSecurityCooldown.set(trackKey, now);
 
-    // 1. Bloquer l'attaquant sur WhatsApp (Block)
-    try {
-      await sock.updateBlockStatus(authorJid, 'block');
-      logActivity(`[Anti-Tabneed] Attaquant @${authorNumber} bloqué.`);
-    } catch (blockErr) {
-      logActivity(`[Anti-Tabneed] Échec blocage @${authorNumber}: ${blockErr.message}`, 'warn');
-    }
+    // 1. Bloquer l'attaquant sur WhatsApp (Block sécurisé)
+    await safeBlockUser(sock, authorJid);
 
     // 2. Rétrograder l'attaquant s'il est admin
     try {
       await sock.groupParticipantsUpdate(jid, [authorJid], 'demote');
     } catch (_) {}
 
-    // 3. Expulser l'attaquant du groupe (Kick)
+    // 3. Expulser l'attaquant du groupe (Kick sécurisé)
     try {
-      await sock.groupParticipantsUpdate(jid, [authorJid], 'remove');
+      await safeGroupParticipantsRemove(sock, jid, [authorJid]);
       logActivity(`[Anti-Tabneed] Attaquant @${authorNumber} expulsé du groupe.`);
     } catch (kickErr) {
       logActivity(`[Anti-Tabneed] Échec expulsion @${authorNumber}: ${kickErr.message}`, 'warn');
     }
 
-    // 4. Expulser les numéros cibles ajoutés par l'attaquant
+    // 4. Expulser les numéros cibles ajoutés par l'attaquant (Kick sécurisé)
     try {
-      await sock.groupParticipantsUpdate(jid, participants, 'remove');
+      await safeGroupParticipantsRemove(sock, jid, participants);
       logActivity(`[Anti-Tabneed] Cibles ${participants.join(', ')} expulsées.`);
     } catch (removeErr) {
       logActivity(`[Anti-Tabneed] Échec expulsion cibles: ${removeErr.message}`, 'warn');
@@ -1624,12 +1675,13 @@ const antibotCooldown = new Map(); // `${jid}:${phone}` -> timestamp
 
 async function checkUserHasLinkedDevices(sock, userJid) {
   try {
-    const cleanJid = userJid.includes('@') ? userJid : `${userJid}@s.whatsapp.net`;
-    const userPhone = cleanJid.split('@')[0].split(':')[0];
+    const rawClean = String(userJid || '').split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
+    const cleanJid = rawClean ? `${rawClean}@s.whatsapp.net` : userJid;
 
     const now = Date.now();
-    const cached = botDeviceCheckCache.get(cleanJid);
-    if (cached && (now - cached.timestamp < 15000)) {
+    const cached = botDeviceCheckCache.get(rawClean) || botDeviceCheckCache.get(cleanJid);
+    // Cache court (10 secondes) pour détecter immédiatement dès qu'un membre lie son compte
+    if (cached && (now - cached.timestamp < 10000)) {
       return cached;
     }
 
@@ -1637,6 +1689,7 @@ async function checkUserHasLinkedDevices(sock, userJid) {
       return { hasLinked: false, count: 0 };
     }
 
+    // Interroger USync avec le format standard téléphone@s.whatsapp.net
     const devices = await sock.getUSyncDevices([cleanJid], false, false);
     let count = 0;
     let hasLinked = false;
@@ -1657,6 +1710,7 @@ async function checkUserHasLinkedDevices(sock, userJid) {
     }
 
     const result = { hasLinked, count, timestamp: now };
+    if (rawClean) botDeviceCheckCache.set(rawClean, result);
     botDeviceCheckCache.set(cleanJid, result);
     return result;
   } catch (err) {
@@ -1667,20 +1721,19 @@ async function checkUserHasLinkedDevices(sock, userJid) {
 
 /**
  * Procédure Officielle Anti-Bot:
- * 1. Fermer le groupe
- * 2. Tag l'utilisateur et dire (وينو عندو بوت)
- * 3. Envoyer l'audio TomLaugh1.opus (PTT)
- * 4. Kick l'utilisateur
- * 5. Tag les admins pour les informer
- * 6. Rouvrir le groupe
+ * 1. Tag l'utilisateur et dire (وينو عندو بوت)
+ * 2. Envoyer l'audio TomLaugh1.opus (PTT)
+ * 3. Kick l'utilisateur (sans fermer ni rouvrir le groupe)
+ * 4. Tag les admins pour les informer
  */
 async function executeAntiBotProcedure(sock, jid, targetJid, groupData) {
   try {
     const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
-    const targetPhone = targetJid.split('@')[0].split(':')[0];
+    const targetPhone = String(targetJid || '').split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
     const botNumber = (sock.user?.id || '').split('@')[0].split(':')[0];
 
-    if (targetPhone === botNumber || isSudo(targetJid)) return;
+    // Protection compte bot et sudo
+    if (!targetPhone || targetPhone === botNumber || isSelfUser(sock, targetJid) || isSudo(targetJid)) return;
 
     let currentGroupData = groupData;
     try {
@@ -1718,21 +1771,20 @@ async function executeAntiBotProcedure(sock, jid, targetJid, groupData) {
 
     logActivity(`[AntiBot] Exécution procédure d'expulsion pour ${resolved.tag} dans ${jid}`, 'warn');
 
-    // 1. Fermer le groupe d'urgence
-    try {
-      await sock.groupSettingUpdate(jid, 'announcement');
-      logActivity(`[AntiBot] Groupe fermé pour neutralisation.`);
-    } catch (err) {
-      logActivity(`[AntiBot] Échec fermeture groupe: ${err.message}`, 'warn');
-    }
+    // Simulation présence humaine (Anti-Ban)
+    await sock.sendPresenceUpdate('composing', jid).catch(() => {});
+    await sleep(400);
 
-    // 2. Tag l'utilisateur et dire (وينو عندو بوت)
+    // 1. Tag l'utilisateur et dire (وينو عندو بوت)
     await sock.sendMessage(jid, {
       text: `(وينو عندو بوت) ${resolved.tag}`,
       mentions: resolved.mentions
     });
 
-    // 3. Envoyer l'audio TomLaugh1.opus (PTT)
+    // 2. Envoyer l'audio TomLaugh1.opus (PTT)
+    await sock.sendPresenceUpdate('recording', jid).catch(() => {});
+    await sleep(500);
+
     const laugh1Opus = path.join(__dirname, 'Media', 'TomLaugh1.opus');
     const laugh1Mpeg = path.join(__dirname, 'Media', 'TomLaugh1.mpeg');
     if (fs.existsSync(laugh1Opus)) {
@@ -1757,18 +1809,15 @@ async function executeAntiBotProcedure(sock, jid, targetJid, groupData) {
       }
     }
 
-    // 4. Kick l'utilisateur (double tentative avec JID natif et JID téléphone)
-    let kickSuccess = false;
+    // 3. Kick l'utilisateur (double tentative sécurisée avec JID natif et JID téléphone)
     const jidToRemove = resolved.participant?.id || resolved.participant?.jid || targetJid;
     try {
-      await sock.groupParticipantsUpdate(jid, [jidToRemove], 'remove');
-      kickSuccess = true;
+      await safeGroupParticipantsRemove(sock, jid, [jidToRemove]);
       logActivity(`[AntiBot] Utilisateur ${resolved.tag} expulsé.`);
     } catch (kickErr1) {
       logActivity(`[AntiBot] Tentative 1 échouée (${kickErr1.message}), tentative avec JID téléphone...`);
       try {
-        await sock.groupParticipantsUpdate(jid, [`${resolved.phone}@s.whatsapp.net`], 'remove');
-        kickSuccess = true;
+        await safeGroupParticipantsRemove(sock, jid, [`${resolved.phone}@s.whatsapp.net`]);
         logActivity(`[AntiBot] Utilisateur ${resolved.tag} expulsé via JID téléphone.`);
       } catch (kickErr2) {
         logActivity(`[AntiBot] Échec définitif expulsion: ${kickErr2.message}`, 'warn');
@@ -1782,7 +1831,7 @@ async function executeAntiBotProcedure(sock, jid, targetJid, groupData) {
       }
     }
 
-    // 5. Récupérer et taguer les admins pour les informer
+    // 4. Récupérer et taguer les admins pour les informer
     const adminParticipants = currentGroupData?.participants?.filter((adm) => {
       if (adm.admin !== 'admin' && adm.admin !== 'superadmin') return false;
       const admNum = (adm.id || adm.jid || '').split('@')[0].split(':')[0];
@@ -1817,20 +1866,8 @@ async function executeAntiBotProcedure(sock, jid, targetJid, groupData) {
       text: alertText,
       mentions: [...adminMentions, ...resolved.mentions]
     });
-
-    // 6. Rouvrir le groupe après 2 secondes
-    await sleep(2000);
-    try {
-      await sock.groupSettingUpdate(jid, 'not_announcement');
-      logActivity(`[AntiBot] Groupe rouvert.`);
-    } catch (openErr) {
-      logActivity(`Échec réouverture groupe: ${openErr.message}`, 'warn');
-    }
   } catch (err) {
     console.error('Erreur executeAntiBotProcedure:', err);
-    try {
-      await sock.groupSettingUpdate(jid, 'not_announcement');
-    } catch (_) {}
   }
 }
 
@@ -2142,6 +2179,7 @@ async function handleHelpCommand(sock, jid, isAdminUser, senderId = null, sessio
       helpText += `│ ⋄ *.scan* ⇠ فـحـص كـافـة الأعـضـاء لـكـشـف الأجـهـزة والـبـوتـات 🔍\n` +
 `│ ⋄ *.requests* ⇠ فـحـص طـلـبـات الانـضـمـام وكـشـف الـبـوتـات 📥\n` +
 `│ ⋄ *.antibot [on/off]* ⇠ تـفـعـيـل أو تـعـطـيـل طـرد الـبـوتـات تـلـقـائـيـاً 🤖\n` +
+`│ ⋄ *.antispam [on/off]* ⇠ تـفـعـيـل أو تـعـطـيـل مـضـاد تـحـويـل الـسـبـام 🚨\n` +
 `│ ⋄ *.allowbot @عضو* ⇠ الـسـمـاح لـعـضـو بـاسـتـخـدام بـوت/ويـب 🛡️\n` +
 `│ ⋄ *.disallowbot @عضو* ⇠ إلـغـاء سـمـاح الـبـوت/ويـب 🚫\n` +
 `│ ⋄ *.allowedbots* ⇠ قـائـمـة الـمـصـرح لـهـم بـالـبـوت والـويـب 📋\n` +
@@ -2425,7 +2463,7 @@ async function handleManualKickCommand(sock, jid, messageText, groupData, msg) {
 
     // Protection compte bot
     const botNumber = (sock.user?.id || '').split('@')[0].split(':')[0];
-    if (resolved.phone === botNumber) {
+    if (resolved.phone === botNumber || isSelfUser(sock, targetUserId) || isSelfUser(sock, resolved.phone)) {
       await sock.sendMessage(jid, { text: '❌ لا يـمـكـنـك طـرد الـبـوت مـن الـمـجـمـوعـة 🤖' });
       return;
     }
@@ -2439,7 +2477,7 @@ async function handleManualKickCommand(sock, jid, messageText, groupData, msg) {
     text += `       🏰 *PARADIS EMPIRE* 🏰`;
 
     await sock.sendMessage(jid, { text, mentions: resolved.mentions });
-    await sock.groupParticipantsUpdate(jid, [jidToRemove], 'remove');
+    await safeGroupParticipantsRemove(sock, jid, [jidToRemove]);
     resetWarnings(jid, resolved.phone, resolved.mentions);
   } catch (err) {
     console.error('Erreur !kick:', err);
@@ -2955,8 +2993,67 @@ async function handleAntiBotToggleCommand(sock, jid, messageText, senderIsAdmin,
 }
 
 /**
+ * Commande .antispam on / .antispam off (Group Admins / Sudo)
+ */
+async function handleAntiSpamToggleCommand(sock, jid, messageText, senderIsAdmin, senderIsSudo) {
+  try {
+    if (!senderIsAdmin && !senderIsSudo) {
+      await sock.sendMessage(jid, { text: '⚠️ *عـذراً!* هذا الأمر مخصص لمشرفي المجموعة أو مطوري البوت فقط.' });
+      return;
+    }
+
+    const words = messageText.trim().split(/\s+/);
+    const arg = (words[1] || '').toLowerCase();
+
+    if (arg === 'on' || arg === 'تشغيل' || arg === 'تفعيل') {
+      setAntiSpamEnabled(jid, true);
+      let text = `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🚨 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+      text += `       🏰 *إمـبـراطـوريـة بـاراديـس* 🏰\n`;
+      text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🚨 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n\n`;
+      text += `🚨 *تـم تـفـعـيـل مـضـاد الـسـبـام (Anti-Spam ON)*\n\n`;
+      text += `⋄ سـيـتـم مـراقـبـة تـحـويـل الـرسـائـل الـمـتـتـابـعـة فـي الـمـجـمـوعـة.\n`;
+      text += `⋄ عـنـد رصـد تـحـويـل سـريـع ومـتـكـرر، سـيـتـم قـفـل الـمـجـمـوعـة وتـجـريـد الـمـخـالـف مـن الإشـراف 🔒.\n\n`;
+      text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚔️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+      text += `       🏰 *PARADIS EMPIRE* 🏰`;
+      await sock.sendMessage(jid, { text });
+      logActivity(`[AntiSpam] Activé dans ${jid}`);
+      return;
+    }
+
+    if (arg === 'off' || arg === 'تعطيل' || arg === 'ايقاف') {
+      setAntiSpamEnabled(jid, false);
+      let text = `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚠️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+      text += `       🏰 *إمـبـراطـوريـة بـاراديـس* 🏰\n`;
+      text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚠️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n\n`;
+      text += `⚠️ *تـم إيـقـاف مـضـاد الـسـبـام (Anti-Spam OFF)*\n\n`;
+      text += `⋄ تـم الـسـمـاح بـتـحـويـل الـرسـائـل دون قـفـل الـمـجـمـوعـة أو عـقـوبـات.\n\n`;
+      text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚔️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+      text += `       🏰 *PARADIS EMPIRE* 🏰`;
+      await sock.sendMessage(jid, { text });
+      logActivity(`[AntiSpam] Désactivé dans ${jid}`);
+      return;
+    }
+
+    // Afficher statut actuel
+    const currentStatus = isAntiSpamEnabled(jid);
+    let text = `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🚨 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+    text += `       🏰 *إمـبـراطـوريـة بـاراديـس* 🏰\n`;
+    text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🚨 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n\n`;
+    text += `🚨 *حـالـة مـضـاد الـسـبـام* : ${currentStatus ? '🟢 مـفـعـل (ON)' : '🔴 مـعـطـل (OFF)'}\n\n`;
+    text += `⋄ لـلـتـفـعـيـل : *.antispam on*\n`;
+    text += `⋄ لـلـتـعـطـيـل : *.antispam off*\n\n`;
+    text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚔️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+    text += `       🏰 *PARADIS EMPIRE* 🏰`;
+    await sock.sendMessage(jid, { text });
+  } catch (err) {
+    console.error('Erreur handleAntiSpamToggleCommand:', err);
+  }
+}
+
+/**
  * Commande .scan (Group Admins / Sudo)
  * Scanne tous les membres du groupe pour détecter ceux qui ont lié leur WhatsApp à un appareil/bot
+ * Affiche UNIQUEMENT les personnes détectées avec leur numéro réel (aucun ID/LID, aucun membre safe)
  */
 async function handleScanCommand(sock, jid, groupData, senderIsAdmin, senderIsSudo) {
   try {
@@ -2987,12 +3084,37 @@ async function handleScanCommand(sock, jid, groupData, senderIsAdmin, senderIsSu
     const botNumber = (sock.user?.id || '').split('@')[0].split(':')[0];
     const detected = [];
 
-    // Diviser les participants en lots de 25
-    const jidList = participants.map((p) => p.id || p.jid).filter(Boolean);
-    const chunkSize = 25;
+    // Map pour retrouver rapidement chaque participant par son vrai numéro de téléphone
+    const phoneToParticipant = new Map();
+    const phoneJids = [];
 
-    for (let i = 0; i < jidList.length; i += chunkSize) {
-      const batch = jidList.slice(i, i + chunkSize);
+    for (const p of participants) {
+      let cleanPhone = null;
+      if (p.jid && p.jid.endsWith('@s.whatsapp.net')) {
+        cleanPhone = p.jid.split('@')[0].split(':')[0];
+      } else if (p.id && p.id.endsWith('@s.whatsapp.net')) {
+        cleanPhone = p.id.split('@')[0].split(':')[0];
+      } else if (p.phoneNumber) {
+        cleanPhone = String(p.phoneNumber).replace(/[^0-9]/g, '');
+      } else {
+        cleanPhone = (p.id || p.jid || '').split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
+      }
+
+      if (cleanPhone && cleanPhone !== botNumber && !isSelfUser(sock, cleanPhone)) {
+        const standardPhoneJid = `${cleanPhone}@s.whatsapp.net`;
+        phoneToParticipant.set(cleanPhone, {
+          phone: cleanPhone,
+          rawJid: p.id || p.jid || standardPhoneJid,
+          isAdmin: p.admin === 'admin' || p.admin === 'superadmin'
+        });
+        phoneJids.push(standardPhoneJid);
+      }
+    }
+
+    // Diviser les requêtes USync en lots de 25
+    const chunkSize = 25;
+    for (let i = 0; i < phoneJids.length; i += chunkSize) {
+      const batch = phoneJids.slice(i, i + chunkSize);
       try {
         if (typeof sock.getUSyncDevices === 'function') {
           const devices = await sock.getUSyncDevices(batch, false, false);
@@ -3000,21 +3122,20 @@ async function handleScanCommand(sock, jid, groupData, senderIsAdmin, senderIsSu
             for (const dev of devices) {
               const devId = Number(dev.device);
               if (!isNaN(devId) && devId > 0) {
-                const userPhone = dev.user;
-                if (userPhone === botNumber) continue;
+                const userPhone = String(dev.user || '').replace(/[^0-9]/g, '');
+                if (!userPhone || userPhone === botNumber || isSelfUser(sock, userPhone)) continue;
 
                 let entry = detected.find((d) => d.phone === userPhone);
                 if (!entry) {
-                  const pObj = participants.find((p) => (p.id || p.jid || '').includes(userPhone));
-                  const targetRawJid = pObj?.id || pObj?.jid || `${userPhone}@s.whatsapp.net`;
-                  const resolved = await resolveGroupParticipant(sock, jid, userPhone, currentGroupData);
+                  const pInfo = phoneToParticipant.get(userPhone);
+                  const rawJid = pInfo?.rawJid || `${userPhone}@s.whatsapp.net`;
                   entry = {
                     phone: userPhone,
-                    rawJid: targetRawJid,
-                    tag: resolved.tag,
-                    mentions: resolved.mentions,
+                    rawJid: rawJid,
+                    tag: `@${userPhone}`,
+                    mentions: [`${userPhone}@s.whatsapp.net`, rawJid],
                     deviceCount: 0,
-                    isAdmin: pObj && (pObj.admin === 'admin' || pObj.admin === 'superadmin')
+                    isAdmin: pInfo ? pInfo.isAdmin : false
                   };
                   detected.push(entry);
                 }
@@ -3041,10 +3162,9 @@ async function handleScanCommand(sock, jid, groupData, senderIsAdmin, senderIsSu
     const membersToKick = [];
 
     if (detected.length === 0) {
-      text += `✅ *الـمـجـمـوعـة نـظـيـفـة تـمـامـاً* 🛡️\n`;
-      text += `لا يـوجـد أي حـسـاب مـرتـبـط بـجـهـاز خـارجـي (Web/Desktop/Bot).\n\n`;
+      text += `✅ *الـمـجـمـوعـة نـظـيـفـة تـمـامـاً، لا يـوجـد أي حـسـاب مـرتـبـط بـجـهـاز خـارجـي* 🛡️\n\n`;
     } else {
-      text += `⚠️ *قـائـمـة الـحـسـابـات الـمـرتـبـطـة* :\n`;
+      text += `⚠️ *قـائـمـة الـحـسـابـات الـمـرتـبـطـة الـمـكـتـشـفـة فـقـط* :\n\n`;
       detected.forEach((item, idx) => {
         const isWhitelisted = isBotAllowed(jid, item.phone) || isBotAllowed(jid, item.rawJid);
         let statusBadge = '';
@@ -3059,10 +3179,10 @@ async function handleScanCommand(sock, jid, groupData, senderIsAdmin, senderIsSu
           statusBadge = '👤 عضو';
         }
 
-        text += `${idx + 1}️⃣ ${item.tag} (${statusBadge}) ↬ *${item.deviceCount} جهاز مرتبط* 🤖\n`;
+        text += `${idx + 1}️⃣ @${item.phone} (${statusBadge}) ↬ *${item.deviceCount} جهاز مرتبط* 🤖\n`;
         allMentions.push(...item.mentions);
       });
-      text += `\n💡 *مـلاحـظـة* : تـشـمـل هـذه الـقـائـمـة الـبـوتـات وأيـضـاً مـسـتـخـدمـي واتـسـاب ويـب / كـمـبـيـوتـر.\n\n`;
+      text += `\n💡 *مـلاحـظـة* : تـم إظـهـار الـحـسـابـات الـمـرتـبـطـة فـقـط وإخـفـاء الـحـسـابـات الـسـلـيـمـة تـلـقـائـيـاً.\n\n`;
     }
 
     text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚔️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
@@ -3073,7 +3193,7 @@ async function handleScanCommand(sock, jid, groupData, senderIsAdmin, senderIsSu
       mentions: Array.from(new Set(allMentions))
     });
 
-    // Exécuter la procédure d'expulsion pour tous les membres détectés si Anti-Bot est activé
+    // Exécuter la procédure d'expulsion pour tous les membres détectés non autorisés si Anti-Bot est activé
     if (membersToKick.length > 0) {
       for (const target of membersToKick) {
         await executeAntiBotProcedure(sock, jid, target.rawJid, currentGroupData);
@@ -3813,6 +3933,70 @@ app.get('/api/events', (req, res) => {
 });
 
 /**
+ * Scanner d'arrière-plan automatique pour détecter les membres déjà dans le groupe
+ * qui lient leur WhatsApp à un bot ou un PC ultérieurement.
+ * Tourne toutes les 45 secondes de façon fluide et sécurisée (anti-ban).
+ */
+let periodicScanInterval = null;
+function startPeriodicAntiBotScanner() {
+  if (periodicScanInterval) return;
+  logActivity('🛡️ Scanner périodique Anti-Bot en arrière-plan activé.');
+
+  periodicScanInterval = setInterval(async () => {
+    try {
+      for (const [phone, sess] of sessions.entries()) {
+        if (sess.status !== 'connected' || !sess.sock) continue;
+        const sock = sess.sock;
+        const botNumber = (sock.user?.id || '').split('@')[0].split(':')[0];
+
+        let groups = [];
+        try {
+          if (typeof sock.groupFetchAllParticipating === 'function') {
+            const participating = await sock.groupFetchAllParticipating();
+            groups = Object.values(participating);
+          }
+        } catch (_) {}
+
+        for (const group of groups) {
+          const jid = group.id;
+          if (!jid || !isAntiBotEnabled(jid)) continue;
+
+          const participants = group.participants || [];
+          for (const p of participants) {
+            let cleanPhone = null;
+            if (p.jid && p.jid.endsWith('@s.whatsapp.net')) {
+              cleanPhone = p.jid.split('@')[0].split(':')[0];
+            } else if (p.id && p.id.endsWith('@s.whatsapp.net')) {
+              cleanPhone = p.id.split('@')[0].split(':')[0];
+            } else if (p.phoneNumber) {
+              cleanPhone = String(p.phoneNumber).replace(/[^0-9]/g, '');
+            } else {
+              cleanPhone = (p.id || p.jid || '').split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
+            }
+
+            if (!cleanPhone || cleanPhone === botNumber || isSelfUser(sock, cleanPhone)) continue;
+            if (isSudo(cleanPhone) || isSudo(p.id || p.jid)) continue;
+            if (isBotAllowed(jid, cleanPhone) || isBotAllowed(jid, p.id || p.jid)) continue;
+            if (p.admin === 'admin' || p.admin === 'superadmin') continue;
+
+            // Vérifier les appareils liés
+            const check = await checkUserHasLinkedDevices(sock, cleanPhone);
+            if (check.hasLinked) {
+              logActivity(`[AutoBot-Scanner] Membre existant @${cleanPhone} détecté avec bot/web dans ${jid} -> Expulsion automatique!`, 'warn');
+              await executeAntiBotProcedure(sock, jid, p.id || p.jid || cleanPhone, group);
+              // Pause anti-ban entre expulsions
+              await new Promise((r) => setTimeout(r, 1200));
+            }
+          }
+        }
+      }
+    } catch (err) {
+      // Ignorer erreurs silencieuses du scanner
+    }
+  }, 45000);
+}
+
+/**
  * Démarrage du serveur et reconnexion automatique de toutes les sessions enregistrées
  */
 async function startServer() {
@@ -3822,6 +4006,9 @@ async function startServer() {
 
     // 2. Migrer l'ancienne session si elle existe
     migrateLegacySession();
+
+    // 2.5 Lancer le scanner automatique d'arrière-plan
+    startPeriodicAntiBotScanner();
 
     // 3. Lancer le serveur HTTP
     app.listen(CONFIG.port, () => {

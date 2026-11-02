@@ -381,6 +381,24 @@ export function setAntiBotEnabled(groupId, enabled) {
 }
 
 // ----------------------------------------------------
+// Paramètres Anti-Spam (Transfert de messages successifs)
+// ----------------------------------------------------
+
+export function isAntiSpamEnabled(groupId) {
+  try {
+    if (!groupId) return true;
+    const val = getSetting(`antispam_${groupId}`, 'on');
+    return val !== 'off';
+  } catch (error) {
+    return true;
+  }
+}
+
+export function setAntiSpamEnabled(groupId, enabled) {
+  return setSetting(`antispam_${groupId}`, enabled ? 'on' : 'off');
+}
+
+// ----------------------------------------------------
 // Whitelist Anti-Bot (Personnes autorisées à utiliser WhatsApp lié / bot)
 // ----------------------------------------------------
 
