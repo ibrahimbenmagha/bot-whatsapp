@@ -633,7 +633,7 @@ async function handleSessionMessages(botPhone, m) {
           await sock.sendMessage(jid, { text: 'ℹ️ Cette commande fonctionne uniquement dans un groupe.' });
           continue;
         }
-        await handleCheckWarningsCommand(sock, jid, messageText, senderId, msg);
+        await handleCheckWarningsCommand(sock, jid, messageText, senderId, msg, groupData);
         continue;
       }
 
@@ -655,7 +655,7 @@ async function handleSessionMessages(botPhone, m) {
           await sock.sendMessage(jid, { text: 'ℹ️ Cette commande fonctionne uniquement dans un groupe.' });
           continue;
         }
-        await handleResetWarnCommand(sock, jid, messageText, msg);
+        await handleResetWarnCommand(sock, jid, messageText, groupData, msg);
         continue;
       }
 
@@ -1435,35 +1435,41 @@ async function handleWarnCommand(sock, jid, messageText, groupData, msg) {
   try {
     const targetUserId = extractTargetUser(messageText, msg);
     if (!targetUserId) {
-      await sock.sendMessage(jid, { text: '❌ Syntaxe incorrecte. Exemple: .warn @numéro ou répondez au message avec .warn' });
+      await sock.sendMessage(jid, { text: '❌ *صيغة غير صحيحة*. مثال: .warn @عضو أو رد على رسالته بـ .warn' });
       return;
     }
 
-    const targetNumber = targetUserId.split('@')[0].split(':')[0];
-    const targetParticipant = groupData?.participants?.find((p) => {
-      const pId = p.id || '';
-      const pJid = p.jid || '';
-      return pId.includes(targetNumber) || pJid.includes(targetNumber);
-    });
-
-    if (!targetParticipant) {
-      await sock.sendMessage(jid, { text: '❌ Utilisateur introuvable dans ce groupe.' });
+    const resolved = await resolveGroupParticipant(sock, jid, targetUserId, groupData);
+    if (!resolved.participant) {
+      await sock.sendMessage(jid, { text: '❌ هذا العضو غير موجود في المجموعة.' });
       return;
     }
 
-    const newWarningCount = addWarning(jid, targetUserId);
-    const targetMention = formatMention(targetUserId);
-    let responseText = `⚠️ Avertissement ajouté pour ${targetMention}. Total: ${newWarningCount}/${CONFIG.maxWarnings}`;
+    const newWarningCount = addWarning(jid, resolved.phone, resolved.mentions);
+
+    let responseText = `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚠️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+    responseText += `       🏰 *إمـبـراطـوريـة بـاراديـس* 🏰\n`;
+    responseText += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚠️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n\n`;
+    responseText += `⚠️ *تـم إضـافـة إنـذار إداري* :\n`;
+    responseText += `⋄ الـعـضـو : ${resolved.tag}\n`;
+    responseText += `⋄ رصـيـد الإنـذارات : *${newWarningCount} / ${CONFIG.maxWarnings}*\n\n`;
 
     if (newWarningCount >= CONFIG.maxWarnings) {
-      const jidToRemove = targetParticipant.id || targetParticipant.jid || targetUserId;
-      await sock.groupParticipantsUpdate(jid, [jidToRemove], 'remove');
-      resetWarnings(jid, targetUserId);
-      responseText += `\n\n❌ ${targetMention} a été exclu (${CONFIG.maxWarnings} avertissements atteints).`;
+      const jidToRemove = resolved.participant.id || resolved.participant.jid || targetUserId;
+      try {
+        await sock.groupParticipantsUpdate(jid, [jidToRemove], 'remove');
+      } catch (rmErr) {
+        logActivity(`Échec expulsion warn: ${rmErr.message}`, 'warn');
+      }
+      resetWarnings(jid, resolved.phone, resolved.mentions);
+      responseText += `❌ *تـم طـرد ${resolved.tag} مـن الـمـجـمـوعـة لـتـجـاوز الـحـد الأقـصـى لـلإنـذارات.* 👢\n\n`;
     }
 
-    await sock.sendMessage(jid, { text: responseText, mentions: [targetUserId] });
-    logActivity(`!warn appliqué pour ${targetUserId} (${newWarningCount}/${CONFIG.maxWarnings})`);
+    responseText += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚔️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+    responseText += `       🏰 *PARADIS EMPIRE* 🏰`;
+
+    await sock.sendMessage(jid, { text: responseText, mentions: resolved.mentions });
+    logActivity(`!warn appliqué pour ${resolved.phone} (${newWarningCount}/${CONFIG.maxWarnings})`);
   } catch (err) {
     console.error('Erreur !warn:', err);
   }
@@ -1714,40 +1720,116 @@ async function handleRulesCommand(sock, jid) {
   }
 }
 
-async function handleCheckWarningsCommand(sock, jid, messageText, senderId, msg) {
+/**
+ * Résoudre un participant dans le groupe pour obtenir son vrai numéro de téléphone et ses mentions valides
+ * (Convertit les identifiants LID obscurs en numéros de téléphone réels pour un tag cliquable)
+ */
+async function resolveGroupParticipant(sock, jid, targetId, groupData = null) {
+  let gData = groupData;
+  if (!gData || !gData.participants || gData.participants.length === 0) {
+    try {
+      gData = await sock.groupMetadata(jid);
+    } catch (_) {}
+  }
+
+  const cleanTarget = String(targetId || '').split('@')[0].split(':')[0];
+  const allMentions = new Set();
+  if (targetId) allMentions.add(targetId);
+
+  let phone = cleanTarget;
+  let matchedParticipant = null;
+
+  if (gData?.participants) {
+    matchedParticipant = gData.participants.find((p) => {
+      const pId = (p.id || '').split('@')[0].split(':')[0];
+      const pJid = (p.jid || '').split('@')[0].split(':')[0];
+      const pLid = (p.lid || '').split('@')[0].split(':')[0];
+      return pId === cleanTarget || pJid === cleanTarget || pLid === cleanTarget;
+    });
+
+    if (matchedParticipant) {
+      if (matchedParticipant.id) allMentions.add(matchedParticipant.id);
+      if (matchedParticipant.jid) allMentions.add(matchedParticipant.jid);
+      if (matchedParticipant.lid) allMentions.add(matchedParticipant.lid);
+
+      // Prioriser le vrai numéro de téléphone (@s.whatsapp.net)
+      if (matchedParticipant.jid && matchedParticipant.jid.endsWith('@s.whatsapp.net')) {
+        phone = matchedParticipant.jid.split('@')[0].split(':')[0];
+        allMentions.add(`${phone}@s.whatsapp.net`);
+      } else if (matchedParticipant.id && matchedParticipant.id.endsWith('@s.whatsapp.net')) {
+        phone = matchedParticipant.id.split('@')[0].split(':')[0];
+        allMentions.add(`${phone}@s.whatsapp.net`);
+      } else if (matchedParticipant.phoneNumber) {
+        phone = String(matchedParticipant.phoneNumber).split('@')[0].split(':')[0];
+        allMentions.add(`${phone}@s.whatsapp.net`);
+      }
+    }
+  }
+
+  if (phone) {
+    allMentions.add(`${phone}@s.whatsapp.net`);
+  }
+
+  return {
+    phone,
+    tag: `@${phone}`,
+    mentions: Array.from(allMentions).filter(Boolean),
+    participant: matchedParticipant
+  };
+}
+
+async function handleCheckWarningsCommand(sock, jid, messageText, senderId, msg, groupData = null) {
   try {
     let targetUserId = extractTargetUser(messageText, msg) || senderId;
 
-    const count = getWarningCount(jid, targetUserId);
-    const targetMention = formatMention(targetUserId);
+    const resolved = await resolveGroupParticipant(sock, jid, targetUserId, groupData);
+    const count = getWarningCount(jid, resolved.phone, resolved.mentions);
 
-    let text = `📊 ${targetMention} possède actuellement *${count}/${CONFIG.maxWarnings}* avertissement(s).`;
+    let text = `⎔⋅• ━ ╼━ ╼╃ ⌬〔 📋 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+    text += `       🏰 *إمـبـراطـوريـة بـاراديـس* 🏰\n`;
+    text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 📋 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n\n`;
+    text += `📋 *سـجـل الإنـذارات الـرسـمـي* :\n`;
+    text += `⋄ الـعـضـو : ${resolved.tag}\n`;
+    text += `⋄ رصـيـد الإنـذارات : *${count} / ${CONFIG.maxWarnings}*\n\n`;
+
     if (count === 0) {
-      text += ` ✅ Dossier parfait, aucune infraction !`;
+      text += `✨ *سـجـل نـظـيـف، لا تـوجـد أي مـخـالـفـات!* ✨\n`;
     } else {
-      text += ` ⚠️ Attention : à ${CONFIG.maxWarnings} avertissements, l'expulsion est automatique.`;
+      text += `⚠️ *تـحـذيـر: عـنـد الـوصـول إلـى ${CONFIG.maxWarnings} إنـذارات، يـتـم الـطـرد تـلـقـائـيـاً.* ⚠️\n`;
     }
 
-    await sock.sendMessage(jid, { text: text, mentions: [targetUserId] });
+    text += `\n⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚔️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+    text += `       🏰 *PARADIS EMPIRE* 🏰`;
+
+    await sock.sendMessage(jid, { text: text, mentions: resolved.mentions });
   } catch (err) {
     console.error('Erreur !warnings:', err);
   }
 }
 
-async function handleResetWarnCommand(sock, jid, messageText, msg) {
+async function handleResetWarnCommand(sock, jid, messageText, groupData = null, msg = null) {
   try {
     const targetUserId = extractTargetUser(messageText, msg);
     if (!targetUserId) {
-      await sock.sendMessage(jid, { text: '❌ Syntaxe incorrecte. Exemple : *.resetwarn @numéro* ou répondez au message avec *.resetwarn*' });
+      await sock.sendMessage(jid, { text: '❌ *صيغة غير صحيحة*. مثال: *.resetwarn @عضو* أو رد على رسالته بـ *.resetwarn*' });
       return;
     }
 
-    resetWarnings(jid, targetUserId);
+    const resolved = await resolveGroupParticipant(sock, jid, targetUserId, groupData);
+    resetWarnings(jid, resolved.phone, resolved.mentions);
 
-    const targetMention = formatMention(targetUserId);
+    let text = `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🔄 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+    text += `       🏰 *إمـبـراطـوريـة بـاراديـس* 🏰\n`;
+    text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🔄 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n\n`;
+    text += `✅ *تـم تـصـفـيـر الإنـذارات بـنـجـاح* :\n`;
+    text += `⋄ الـعـضـو : ${resolved.tag}\n`;
+    text += `⋄ رصـيـد الإنـذارات الـحـالـي : *0 / ${CONFIG.maxWarnings}*\n\n`;
+    text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚔️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+    text += `       🏰 *PARADIS EMPIRE* 🏰`;
+
     await sock.sendMessage(jid, { 
-      text: `✅ Les avertissements de ${targetMention} ont été réinitialisés à 0/${CONFIG.maxWarnings}.`,
-      mentions: [targetUserId]
+      text: text,
+      mentions: resolved.mentions
     });
   } catch (err) {
     console.error('Erreur !resetwarn:', err);
@@ -1758,22 +1840,24 @@ async function handleManualKickCommand(sock, jid, messageText, groupData, msg) {
   try {
     const targetUserId = extractTargetUser(messageText, msg);
     if (!targetUserId) {
-      await sock.sendMessage(jid, { text: '❌ Syntaxe incorrecte. Exemple : *.kick @numéro* ou répondez au message avec *.kick*' });
+      await sock.sendMessage(jid, { text: '❌ *صيغة غير صحيحة*. مثال: *.kick @عضو* أو رد على رسالته بـ *.kick*' });
       return;
     }
 
-    const targetNumber = targetUserId.split('@')[0].split(':')[0];
-    const targetParticipant = groupData?.participants?.find((p) => {
-      const pId = p.id || '';
-      const pJid = p.jid || '';
-      return pId.includes(targetNumber) || pJid.includes(targetNumber);
-    });
+    const resolved = await resolveGroupParticipant(sock, jid, targetUserId, groupData);
+    const jidToRemove = resolved.participant?.id || resolved.participant?.jid || targetUserId;
 
-    const targetMention = formatMention(targetUserId);
-    await sock.sendMessage(jid, { text: `👋 Expulsion de ${targetMention} par un administrateur...`, mentions: [targetUserId] });
-    const jidToRemove = targetParticipant?.id || targetParticipant?.jid || targetUserId;
+    let text = `⎔⋅• ━ ╼━ ╼╃ ⌬〔 👢 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+    text += `       🏰 *إمـبـراطـوريـة بـاراديـس* 🏰\n`;
+    text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 👢 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n\n`;
+    text += `👢 *تـم طـرد الـعـضـو* : ${resolved.tag}\n`;
+    text += `بـواسـطـة الإدارة.\n\n`;
+    text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚔️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+    text += `       🏰 *PARADIS EMPIRE* 🏰`;
+
+    await sock.sendMessage(jid, { text, mentions: resolved.mentions });
     await sock.groupParticipantsUpdate(jid, [jidToRemove], 'remove');
-    resetWarnings(jid, targetUserId);
+    resetWarnings(jid, resolved.phone, resolved.mentions);
   } catch (err) {
     console.error('Erreur !kick:', err);
   }

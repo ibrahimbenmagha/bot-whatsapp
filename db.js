@@ -87,29 +87,22 @@ function saveDatabase() {
 /**
  * Ajouter un warning à un utilisateur (ou augmenter le compte +1)
  */
-export function addWarning(groupId, userId) {
+export function addWarning(groupId, userId, alternativeIds = []) {
   try {
-    const result = db.exec(
-      'SELECT count FROM warnings WHERE groupId = ? AND userId = ?',
-      [groupId, userId]
-    );
+    const primaryId = String(userId || '').split('@')[0].split(':')[0];
+    const currentCount = getWarningCount(groupId, userId, alternativeIds);
+    const newCount = currentCount + 1;
 
-    if (result.length > 0 && result[0].values.length > 0) {
-      const count = result[0].values[0][0];
-      db.run(
-        'UPDATE warnings SET count = count + 1, updatedAt = CURRENT_TIMESTAMP WHERE groupId = ? AND userId = ?',
-        [groupId, userId]
-      );
-      saveDatabase();
-      return count + 1;
-    } else {
-      db.run(
-        'INSERT INTO warnings (groupId, userId, count) VALUES (?, ?, 1)',
-        [groupId, userId]
-      );
-      saveDatabase();
-      return 1;
-    }
+    // Nettoyer les anciens enregistrements sous d'autres formes (LID, @s.whatsapp.net)
+    resetWarnings(groupId, userId, alternativeIds);
+
+    // Insérer le nouveau compte sous l'ID primaire normalisé
+    db.run(
+      'INSERT INTO warnings (groupId, userId, count) VALUES (?, ?, ?)',
+      [groupId, primaryId, newCount]
+    );
+    saveDatabase();
+    return newCount;
   } catch (error) {
     console.error('❌ Erreur lors de l\'ajout d\'un warning:', error);
     return 0;
@@ -117,16 +110,23 @@ export function addWarning(groupId, userId) {
 }
 
 /**
- * Récupérer le nombre de warnings d'un utilisateur
+ * Récupérer le nombre de warnings d'un utilisateur (supporte JID, LID et numéro de téléphone)
  */
-export function getWarningCount(groupId, userId) {
+export function getWarningCount(groupId, userId, alternativeIds = []) {
   try {
+    const rawIds = [userId, ...(Array.isArray(alternativeIds) ? alternativeIds : [])].filter(Boolean);
+    const ids = Array.from(new Set(rawIds.flatMap(id => {
+      const clean = String(id).split('@')[0].split(':')[0];
+      return [id, clean, `${clean}@s.whatsapp.net`];
+    })));
+
+    const placeholders = ids.map(() => '?').join(', ');
     const result = db.exec(
-      'SELECT count FROM warnings WHERE groupId = ? AND userId = ?',
-      [groupId, userId]
+      `SELECT MAX(count) FROM warnings WHERE groupId = ? AND userId IN (${placeholders})`,
+      [groupId, ...ids]
     );
 
-    if (result.length > 0 && result[0].values.length > 0) {
+    if (result.length > 0 && result[0].values.length > 0 && result[0].values[0][0] !== null) {
       return result[0].values[0][0];
     }
     return 0;
@@ -139,11 +139,18 @@ export function getWarningCount(groupId, userId) {
 /**
  * Réinitialiser les warnings d'un utilisateur
  */
-export function resetWarnings(groupId, userId) {
+export function resetWarnings(groupId, userId, alternativeIds = []) {
   try {
+    const rawIds = [userId, ...(Array.isArray(alternativeIds) ? alternativeIds : [])].filter(Boolean);
+    const ids = Array.from(new Set(rawIds.flatMap(id => {
+      const clean = String(id).split('@')[0].split(':')[0];
+      return [id, clean, `${clean}@s.whatsapp.net`];
+    })));
+
+    const placeholders = ids.map(() => '?').join(', ');
     db.run(
-      'DELETE FROM warnings WHERE groupId = ? AND userId = ?',
-      [groupId, userId]
+      `DELETE FROM warnings WHERE groupId = ? AND userId IN (${placeholders})`,
+      [groupId, ...ids]
     );
     saveDatabase();
     console.log(`✅ Warnings réinitialisés pour l'utilisateur ${userId}`);
