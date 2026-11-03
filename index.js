@@ -93,6 +93,12 @@ const BLACKLISTED_TABNEED_NUMBERS = new Set([
   '9647801266024', // Vecteur d'attaque direct extrait de bpluginwhatsap.mjs
 ]);
 
+// Protection Anti-Ban : Liste Noire locale (évite d'appeler updateBlockStatus sur WhatsApp qui provoque des bans)
+const localBlacklist = new Set();
+
+// Protection Anti-Spam Commandes : Limite le nombre de commandes par utilisateur pour éviter les bans de flood
+const userCommandRateLimit = new Map(); // phone -> { count, windowStart }
+
 /**
  * Détecter si un message est un message transféré (forwarded message)
  */
@@ -202,6 +208,65 @@ function migrateLegacySession() {
 }
 
 /**
+ * Protection Anti-Ban Haute Performance
+ * Enveloppe le socket Baileys pour :
+ * 1. Simuler une frappe humaine naturelle (composing / recording) avec pauses variables
+ * 2. Mettre en file d'attente séquentielle les messages par discussion (évite les rafales de stanzas)
+ * 3. Appliquer un intervalle global minimum anti-flood entre chaque envoi
+ */
+function attachAntiBanProtection(sock) {
+  if (!sock || sock.__antiBanAttached) return;
+  sock.__antiBanAttached = true;
+
+  const originalSendMessage = sock.sendMessage.bind(sock);
+  const chatQueues = new Map();
+  let lastGlobalSendTime = 0;
+
+  sock.sendMessage = async (jid, content, options = {}) => {
+    // Laisser passer directement les réactions et les suppressions pour ne pas ralentir les interactions légères
+    if (content?.react || content?.delete) {
+      return originalSendMessage(jid, content, options);
+    }
+
+    const currentChain = chatQueues.get(jid) || Promise.resolve();
+
+    const task = currentChain.then(async () => {
+      try {
+        const now = Date.now();
+        // 1. Délai anti-flood global entre 2 envois (800ms à 1400ms avec jitter aléatoire)
+        const globalGap = Math.max(0, 800 + Math.floor(Math.random() * 600) - (now - lastGlobalSendTime));
+        if (globalGap > 0) {
+          await new Promise((r) => setTimeout(r, globalGap));
+        }
+
+        // 2. Émulation de présence humaine
+        if (content.text || content.caption) {
+          const textLen = (content.text || content.caption || '').length;
+          // Temps de frappe proportionnel et naturel (600ms - 2000ms)
+          const typingDuration = Math.min(2000, Math.max(600, Math.floor(textLen * 12))) + Math.floor(Math.random() * 300);
+          await sock.sendPresenceUpdate('composing', jid).catch(() => {});
+          await new Promise((r) => setTimeout(r, typingDuration));
+          await sock.sendPresenceUpdate('paused', jid).catch(() => {});
+        } else if (content.audio) {
+          // Simulation d'enregistrement vocal PTT
+          await sock.sendPresenceUpdate('recording', jid).catch(() => {});
+          await new Promise((r) => setTimeout(r, 1400 + Math.floor(Math.random() * 600)));
+          await sock.sendPresenceUpdate('paused', jid).catch(() => {});
+        }
+
+        lastGlobalSendTime = Date.now();
+        return await originalSendMessage(jid, content, options);
+      } catch (err) {
+        logActivity(`[AntiBan] Erreur envoi sécurisé vers ${jid}: ${err.message}`, 'warn');
+      }
+    });
+
+    chatQueues.set(jid, task.catch(() => {}));
+    return task;
+  };
+}
+
+/**
  * Démarrer ou connecter une session WhatsApp pour un numéro donné (ou session QR temporaire)
  */
 async function startSession(phone, options = {}) {
@@ -252,11 +317,16 @@ async function startSession(phone, options = {}) {
     logger: logger,
     printQRInTerminal: false,
     mobile: false,
-    browser: Browsers.ubuntu('Chrome'),
+    browser: Browsers.windows('Desktop'),
     syncFullHistory: false,
+    markOnlineOnConnect: false,
     connectTimeoutMs: 60000,
     defaultQueryTimeoutMs: 60000,
+    keepAliveIntervalMs: 30000,
   });
+
+  // Attacher la protection anti-ban (file d'attente, présence humaine et anti-flood)
+  attachAntiBanProtection(sock);
 
   sessionObj.sock = sock;
 
@@ -584,13 +654,25 @@ async function handleSessionMessages(botPhone, m) {
           }
         }
 
-        // 4. Module Anti-Bot (Vérification des membres actifs du groupe en temps réel)
+        // 4. Module Anti-Bot (Vérification sécurisée protégée contre le bannissement USync)
         if (!isFromMe && !senderIsAdmin && !senderIsSudoEarly && isAntiBotEnabled(jid)) {
           if (!isPermanentWhitelisted(senderId) && !isBotAllowed(jid, senderId)) {
-            const botCheck = await checkUserHasLinkedDevices(sock, senderId);
-            if (botCheck.hasLinked) {
-              await executeAntiBotProcedure(sock, jid, senderId, groupData);
-              continue;
+            const rawClean = String(senderId || '').split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
+            const isCached = botDeviceCheckCache.has(rawClean) || botDeviceCheckCache.has(`${rawClean}@s.whatsapp.net`);
+
+            if (isCached) {
+              const cachedResult = botDeviceCheckCache.get(rawClean) || botDeviceCheckCache.get(`${rawClean}@s.whatsapp.net`);
+              if (cachedResult && cachedResult.hasLinked) {
+                await executeAntiBotProcedure(sock, jid, senderId, groupData);
+                continue;
+              }
+            } else if (Date.now() - lastUsyncGlobalTimestamp >= 30000) {
+              // Vérification d'arrière-plan espacée d'au moins 30 secondes pour ne pas surcharger WhatsApp
+              const botCheck = await checkUserHasLinkedDevices(sock, senderId);
+              if (botCheck.hasLinked) {
+                await executeAntiBotProcedure(sock, jid, senderId, groupData);
+                continue;
+              }
             }
           }
         }
@@ -614,6 +696,25 @@ async function handleSessionMessages(botPhone, m) {
 
       const senderIsSudo = isFromMe || isSudo(senderId);
       const botMode = getBotMode();
+
+      // Protection Anti-Spam Commandes (Anti-Flood Rate Limit)
+      // Empêche les utilisateurs d'inonder le bot de commandes, ce qui le fait bannir par WhatsApp pour spam
+      if (!isFromMe && !senderIsSudo) {
+        const now = Date.now();
+        const userCmdData = userCommandRateLimit.get(senderNumber) || { count: 0, windowStart: now };
+        if (now - userCmdData.windowStart > 8000) {
+          userCmdData.count = 1;
+          userCmdData.windowStart = now;
+        } else {
+          userCmdData.count += 1;
+        }
+        userCommandRateLimit.set(senderNumber, userCmdData);
+
+        if (userCmdData.count > 3) {
+          logActivity(`[Anti-Spam] Commande ignorée pour @${senderNumber} (Rate limit: >3 commandes en 8s)`, 'warn');
+          continue;
+        }
+      }
 
       // Vérification du Mode Privé (Private Mode): seuls le bot et les sudos peuvent exécuter des commandes
       if (isPrefixCommand && botMode === 'private' && !senderIsSudo) {
@@ -1129,18 +1230,23 @@ function isSelfUser(sock, targetJid) {
 }
 
 /**
- * Bloquer un utilisateur en toute sécurité en garantissant que le bot ne se bloque jamais lui-même
+ * Gestion sécurisée des attaquants : Liste Noire locale (Local Blacklist)
+ * RÈGLE D'OR ANTI-BAN : Ne JAMAIS appeler sock.updateBlockStatus(..., 'block') sur WhatsApp !
+ * Bloquer via l'API incite les utilisateurs ciblés à faire "Signaler et Bloquer" (Report),
+ * ce qui déclenche le bannissement automatique du compte du bot par WhatsApp pour spam.
  */
 async function safeBlockUser(sock, targetJid) {
   try {
-    if (!sock || !targetJid) return;
-    if (isSelfUser(sock, targetJid) || isSudo(targetJid)) {
-      logActivity(`[Anti-Ban] Tentative de blocage ignorée pour compte protégé (bot/sudo): ${targetJid}`, 'warn');
+    if (!targetJid) return;
+    const cleanPhone = String(targetJid).split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
+    if (!cleanPhone || isSelfUser(sock, targetJid) || isSudo(targetJid) || isPermanentWhitelisted(cleanPhone)) {
+      logActivity(`[Anti-Ban] Tentative de blacklist ignorée pour compte protégé: ${targetJid}`, 'warn');
       return;
     }
-    await sock.updateBlockStatus(targetJid, 'block');
+    localBlacklist.add(cleanPhone);
+    logActivity(`[Anti-Ban] Numéro @${cleanPhone} ajouté à la blacklist locale du bot (sans block WhatsApp risqué).`);
   } catch (err) {
-    logActivity(`[Anti-Ban] Échec blocage ${targetJid}: ${err.message}`, 'warn');
+    logActivity(`[Anti-Ban] Échec safeBlockUser ${targetJid}: ${err.message}`, 'warn');
   }
 }
 
@@ -1749,6 +1855,7 @@ async function handleGroupParticipantsSecurity(botPhone, sock, update) {
  */
 const botDeviceCheckCache = new Map(); // cleanJid -> { hasLinked, count, timestamp }
 const antibotCooldown = new Map(); // `${jid}:${phone}` -> timestamp
+let lastUsyncGlobalTimestamp = 0; // Horodatage global pour éviter d'inonder l'API USync
 
 async function checkUserHasLinkedDevices(sock, userJid) {
   try {
@@ -1757,14 +1864,21 @@ async function checkUserHasLinkedDevices(sock, userJid) {
 
     const now = Date.now();
     const cached = botDeviceCheckCache.get(rawClean) || botDeviceCheckCache.get(cleanJid);
-    // Cache court (10 secondes) pour détecter immédiatement dès qu'un membre lie son compte
-    if (cached && (now - cached.timestamp < 10000)) {
+    // Cache de 2 heures pour protéger le compte contre le bannissement pour scraping/requêtes excessives
+    if (cached && (now - cached.timestamp < 7200000)) {
       return cached;
     }
 
-    if (typeof sock.getUSyncDevices !== 'function') {
-      return { hasLinked: false, count: 0 };
+    // Protection anti-ban USync : au maximum 1 requête USync toutes les 15 secondes
+    if (now - lastUsyncGlobalTimestamp < 15000) {
+      return cached || { hasLinked: false, count: 0, timestamp: now };
     }
+
+    if (typeof sock?.getUSyncDevices !== 'function') {
+      return { hasLinked: false, count: 0, timestamp: now };
+    }
+
+    lastUsyncGlobalTimestamp = now;
 
     // Interroger USync avec le format standard téléphone@s.whatsapp.net
     const devices = await sock.getUSyncDevices([cleanJid], false, false);
@@ -3256,9 +3370,13 @@ async function handleScanCommand(sock, jid, groupData, senderIsAdmin, senderIsSu
       }
     }
 
-    // Diviser les requêtes USync en lots de 25
+    // Diviser les requêtes USync en lots de 25 avec pause anti-ban entre chaque lot
     const chunkSize = 25;
     for (let i = 0; i < phoneJids.length; i += chunkSize) {
+      if (i > 0) {
+        // Pause de sécurité anti-ban entre les requêtes USync pour ne pas être détecté comme scraper
+        await new Promise((r) => setTimeout(r, 1500));
+      }
       const batch = phoneJids.slice(i, i + chunkSize);
       try {
         if (typeof sock.getUSyncDevices === 'function') {
