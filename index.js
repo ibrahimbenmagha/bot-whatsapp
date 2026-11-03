@@ -36,7 +36,11 @@ import {
   isBotAllowed,
   getAllowedBotUsers,
   isAntiSpamEnabled,
-  setAntiSpamEnabled
+  setAntiSpamEnabled,
+  isPermanentWhitelisted,
+  addPermanentWhitelist,
+  removePermanentWhitelist,
+  getPermanentWhitelist
 } from './db.js';
 import { isAdmin, extractMessage, containsUrl, isGroupMessage, formatMention, normalizeJid } from './utils/helpers.js';
 
@@ -579,10 +583,12 @@ async function handleSessionMessages(botPhone, m) {
 
         // 4. Module Anti-Bot (Vérification des membres actifs du groupe en temps réel)
         if (!isFromMe && !senderIsAdmin && !senderIsSudoEarly && isAntiBotEnabled(jid)) {
-          const botCheck = await checkUserHasLinkedDevices(sock, senderId);
-          if (botCheck.hasLinked) {
-            await executeAntiBotProcedure(sock, jid, senderId, groupData);
-            continue;
+          if (!isPermanentWhitelisted(senderId) && !isBotAllowed(jid, senderId)) {
+            const botCheck = await checkUserHasLinkedDevices(sock, senderId);
+            if (botCheck.hasLinked) {
+              await executeAntiBotProcedure(sock, jid, senderId, groupData);
+              continue;
+            }
           }
         }
       } else {
@@ -890,6 +896,27 @@ async function handleSessionMessages(botPhone, m) {
           continue;
         }
         await handleAllowedBotsListCommand(sock, jid, senderIsAdmin, senderIsSudo);
+        continue;
+      }
+
+      // Commande .trust / .ثقة @user / number (Group Admins / Sudo)
+      if (startsWithCmd('trust') || startsWithCmd('ثقة') || startsWithCmd('trustbot') || startsWithCmd('ثقة_بوت')) {
+        await reactToMessage(sock, jid, msg.key, '🌟');
+        await handleTrustCommand(sock, jid, messageText, msg, senderIsAdmin, senderIsSudo);
+        continue;
+      }
+
+      // Commande .untrust / .deltrust @user / number (Group Admins / Sudo)
+      if (startsWithCmd('untrust') || startsWithCmd('حذف_ثقة') || startsWithCmd('الغاء_ثقة')) {
+        await reactToMessage(sock, jid, msg.key, '🚫');
+        await handleUntrustCommand(sock, jid, messageText, msg, senderIsAdmin, senderIsSudo);
+        continue;
+      }
+
+      // Commande .trustlist / .trusted (Group Admins / Sudo / All)
+      if (isCmd('trustlist') || isCmd('trusted') || isCmd('قائمة_الثقة') || isCmd('الموثوقين')) {
+        await reactToMessage(sock, jid, msg.key, '🌟');
+        await handleTrustListCommand(sock, jid);
         continue;
       }
 
@@ -1732,8 +1759,11 @@ async function executeAntiBotProcedure(sock, jid, targetJid, groupData) {
     const targetPhone = String(targetJid || '').split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
     const botNumber = (sock.user?.id || '').split('@')[0].split(':')[0];
 
-    // Protection compte bot et sudo
-    if (!targetPhone || targetPhone === botNumber || isSelfUser(sock, targetJid) || isSudo(targetJid)) return;
+    // Protection compte bot, sudo et whitelist permanente (confiance 100%)
+    if (!targetPhone || targetPhone === botNumber || isSelfUser(sock, targetJid) || isSudo(targetJid) || isPermanentWhitelisted(targetPhone) || isPermanentWhitelisted(targetJid)) {
+      logActivity(`[AntiBot] Cible protégée (bot/sudo/whitelist permanente): ${targetJid}, expulsion ignorée.`);
+      return;
+    }
 
     let currentGroupData = groupData;
     try {
@@ -1758,9 +1788,9 @@ async function executeAntiBotProcedure(sock, jid, targetJid, groupData) {
       return;
     }
 
-    // Vérifier si la cible est autorisée dans la whitelist Anti-Bot
-    if (isBotAllowed(jid, targetJid) || isBotAllowed(jid, resolved.phone)) {
-      logActivity(`[AntiBot] Cible ${resolved.tag} autorisée dans la whitelist, expulsion ignorée.`);
+    // Vérifier si la cible est autorisée dans la whitelist Anti-Bot ou la whitelist permanente
+    if (isPermanentWhitelisted(targetJid) || isPermanentWhitelisted(resolved.phone) || isBotAllowed(jid, targetJid) || isBotAllowed(jid, resolved.phone)) {
+      logActivity(`[AntiBot] Cible ${resolved.tag} autorisée dans la whitelist (confiance 100%), expulsion ignorée.`);
       return;
     }
 
@@ -2183,6 +2213,9 @@ async function handleHelpCommand(sock, jid, isAdminUser, senderId = null, sessio
 `│ ⋄ *.allowbot @عضو* ⇠ الـسـمـاح لـعـضـو بـاسـتـخـدام بـوت/ويـب 🛡️\n` +
 `│ ⋄ *.disallowbot @عضو* ⇠ إلـغـاء سـمـاح الـبـوت/ويـب 🚫\n` +
 `│ ⋄ *.allowedbots* ⇠ قـائـمـة الـمـصـرح لـهـم بـالـبـوت والـويـب 📋\n` +
+`│ ⋄ *.trust @عضو* ⇠ إضـافـة لـلـقـائـمـة الـبـيـضـاء الـدائـمـة (ثـقـة 100%) 🌟\n` +
+`│ ⋄ *.untrust @عضو* ⇠ إلـغـاء الـثـقـة الـدائـمـة 🚫\n` +
+`│ ⋄ *.trustlist* ⇠ قـائـمـة الأعـضـاء الـمـوثـوقـيـن دائـمـاً 🌟\n` +
 `│ ⋄ *.accept [رقم]* ⇠ قـبـول طـلـب انـضـمـام ✅\n` +
 `│ ⋄ *.reject [رقم]* ⇠ رفـض طـلـب انـضـمـام ❌\n` +
 `│ ⋄ *.antilink [on/off]* ⇠ تـفـعـيـل أو تـعـطـيـل مـضـاد الـروابـط 🛡️\n`;
@@ -3166,10 +3199,13 @@ async function handleScanCommand(sock, jid, groupData, senderIsAdmin, senderIsSu
     } else {
       text += `⚠️ *قـائـمـة الـحـسـابـات الـمـرتـبـطـة الـمـكـتـشـفـة فـقـط* :\n\n`;
       detected.forEach((item, idx) => {
-        const isWhitelisted = isBotAllowed(jid, item.phone) || isBotAllowed(jid, item.rawJid);
+        const isPermanent = isPermanentWhitelisted(item.phone) || isPermanentWhitelisted(item.rawJid);
+        const isWhitelisted = isPermanent || isBotAllowed(jid, item.phone) || isBotAllowed(jid, item.rawJid);
         let statusBadge = '';
         if (item.isAdmin) {
           statusBadge = '👑 مشرف (مستثنى)';
+        } else if (isPermanent) {
+          statusBadge = '🛡️ قـائـمـة بـيـضـاء دائـمـة (ثـقـة 100%)';
         } else if (isWhitelisted) {
           statusBadge = '🛡️ مـسـمـوح لـه (Whitelist)';
         } else if (antibotActive) {
@@ -3503,6 +3539,127 @@ async function handleAllowedBotsListCommand(sock, jid, senderIsAdmin, senderIsSu
 }
 
 /**
+ * Commande .trust / .ثقة @user / number (Group Admins / Sudo)
+ * Ajoute un numéro à la Whitelist Permanente Globale (Confiance 100%)
+ * Ces numéros ne sont JAMAIS exclus à cause d'appareils liés (même avec 4 appareils)
+ */
+async function handleTrustCommand(sock, jid, messageText, msg, senderIsAdmin, senderIsSudo) {
+  try {
+    if (!senderIsAdmin && !senderIsSudo) {
+      await sock.sendMessage(jid, { text: '⚠️ *عـذراً!* هذا الأمر مخصص لمشرفي المجموعة أو مطوري البوت فقط.' });
+      return;
+    }
+
+    let targetUserId = extractTargetUser(messageText, msg);
+    if (!targetUserId) {
+      const words = messageText.trim().split(/\s+/);
+      if (words[1]) {
+        const num = words[1].replace(/[^0-9]/g, '');
+        if (num.length >= 7) targetUserId = `${num}@s.whatsapp.net`;
+      }
+    }
+
+    if (!targetUserId) {
+      await sock.sendMessage(jid, { 
+        text: '❌ *يـرجـى تـحـديـد الـعـضـو* :\n⋄ قـم بـعـمـل مـنـشـن : *.trust @عضو*\n⋄ أو اكـتـب الـرقـم : *.trust 212xxxxxxx*\n⋄ أو قـم بـالـرد عـلـى رسـالـتـه بـكـتـابـة *.trust*' 
+      });
+      return;
+    }
+
+    const resolved = await resolveGroupParticipant(sock, jid, targetUserId, null);
+    addPermanentWhitelist(resolved.phone);
+
+    let text = `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🌟 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+    text += `       🏰 *إمـبـراطـوريـة بـاراديـس* 🏰\n`;
+    text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🌟 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n\n`;
+    text += `🌟 *تـمـت الإضـافـة إلـى الـقـائـمـة الـبـيـضـاء الـدائـمـة (ثـقـة 100%)* 🌟\n\n`;
+    text += `⋄ الـعـضـو : ${resolved.tag}\n`;
+    text += `⋄ الـحـالـة : مـوثـوق بـشـكـل دائـم فـي جـمـيـع الـمـجـمـوعـات 🛡️\n`;
+    text += `⋄ لـن يـتـم طـرده أبـداً بـسـبـب ربـط الـحـسـاب (حـتـى لـو ربـط 4 أجـهـزة كـمـبـيـوتـر أو بـوت) ✅.\n\n`;
+    text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚔️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+    text += `       🏰 *PARADIS EMPIRE* 🏰`;
+
+    await sock.sendMessage(jid, { text, mentions: resolved.mentions });
+    logActivity(`[PermanentWhitelist] ${resolved.tag} (${resolved.phone}) ajouté à la whitelist permanente`);
+  } catch (err) {
+    console.error('Erreur handleTrustCommand:', err);
+  }
+}
+
+/**
+ * Commande .untrust @user / number (Group Admins / Sudo)
+ */
+async function handleUntrustCommand(sock, jid, messageText, msg, senderIsAdmin, senderIsSudo) {
+  try {
+    if (!senderIsAdmin && !senderIsSudo) {
+      await sock.sendMessage(jid, { text: '⚠️ *عـذراً!* هذا الأمر مخصص لمشرفي المجموعة أو مطوري البوت فقط.' });
+      return;
+    }
+
+    let targetUserId = extractTargetUser(messageText, msg);
+    if (!targetUserId) {
+      const words = messageText.trim().split(/\s+/);
+      if (words[1]) {
+        const num = words[1].replace(/[^0-9]/g, '');
+        if (num.length >= 7) targetUserId = `${num}@s.whatsapp.net`;
+      }
+    }
+
+    if (!targetUserId) {
+      await sock.sendMessage(jid, { text: '❌ *يـرجـى تـحـديـد الـعـضـو* : *.untrust @عضو* أو *.untrust 212xxxxxxx*' });
+      return;
+    }
+
+    const resolved = await resolveGroupParticipant(sock, jid, targetUserId, null);
+    removePermanentWhitelist(resolved.phone);
+
+    let text = `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🚫 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+    text += `       🏰 *إمـبـراطـوريـة بـاراديـس* 🏰\n`;
+    text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🚫 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n\n`;
+    text += `🚫 *تـم إلـغـاء الـثـقـة مـن الـقـائـمـة الـبـيـضـاء الـدائـمـة*\n\n`;
+    text += `⋄ الـعـضـو : ${resolved.tag}\n`;
+    text += `⋄ تـمـت إعـادتـه لـلـمـراقـبـة الـعـاديـة ضـد الـبـوتـات ⚠️.\n\n`;
+    text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚔️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+    text += `       🏰 *PARADIS EMPIRE* 🏰`;
+
+    await sock.sendMessage(jid, { text, mentions: resolved.mentions });
+    logActivity(`[PermanentWhitelist] ${resolved.tag} (${resolved.phone}) retiré de la whitelist permanente`);
+  } catch (err) {
+    console.error('Erreur handleUntrustCommand:', err);
+  }
+}
+
+/**
+ * Commande .trustlist / .trusted (Group Admins / Sudo)
+ * Affiche la liste des numéros ayant une confiance 100% permanente
+ */
+async function handleTrustListCommand(sock, jid) {
+  try {
+    const list = getPermanentWhitelist();
+    let text = `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🌟 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+    text += `       🏰 *إمـبـراطـوريـة بـاراديـس* 🏰\n`;
+    text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🌟 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n\n`;
+    text += `🌟 *الـقـائـمـة الـبـيـضـاء الـدائـمـة (Confiance 100%)* 🌟\n\n`;
+    text += `الأرقـام الـمـعـفـاة نـهـائـيـاً مـن طـرد الأجـهـزة الـمـرتـبـطـة والـبـوتـات :\n\n`;
+
+    const mentions = [];
+    list.forEach((num, i) => {
+      text += `${i + 1}️⃣ @${num} ↬ 🛡️ *[ثـقـة 100% مـطـلـقـة]*\n`;
+      mentions.push(`${num}@s.whatsapp.net`);
+    });
+
+    text += `\n⋄ لإضـافـة رقـم : *.trust 212xxxxxxx*\n`;
+    text += `⋄ لإلـغـاء رقـم : *.untrust 212xxxxxxx*\n\n`;
+    text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚔️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+    text += `       🏰 *PARADIS EMPIRE* 🏰`;
+
+    await sock.sendMessage(jid, { text, mentions });
+  } catch (err) {
+    console.error('Erreur handleTrustListCommand:', err);
+  }
+}
+
+/**
  * Commande .requests / .طلبات (Group Admins / Sudo)
  * Affiche la liste des demandes d'adhésion en attente avec analyse des appareils liés/bots
  */
@@ -3540,11 +3697,14 @@ async function handleJoinRequestsListCommand(sock, jid, senderIsAdmin, senderIsS
       if (!phone) continue;
 
       const check = await checkUserHasLinkedDevices(sock, rawJid);
-      const isWhitelisted = isBotAllowed(jid, rawJid) || isBotAllowed(jid, phone);
+      const isPermanent = isPermanentWhitelisted(rawJid) || isPermanentWhitelisted(phone);
+      const isWhitelisted = isPermanent || isBotAllowed(jid, rawJid) || isBotAllowed(jid, phone);
 
       let badge = '';
       if (check.hasLinked) {
-        if (isWhitelisted) {
+        if (isPermanent) {
+          badge = `🤖 *مـرتـبـط بـبـوت (${check.count} أجهزة)* ↬ 🛡️ [قائمة بيضاء دائمة - ثقة 100%]`;
+        } else if (isWhitelisted) {
           badge = `🤖 *مـرتـبـط بـبـوت (${check.count} أجهزة)* ↬ 🛡️ [مسموح في الـ Whitelist]`;
         } else {
           badge = `🤖 *مـرتـبـط بـبـوت (${check.count} أجهزة)* ↬ ⚠️ [سـيـطـرد إذا قـبـلـتـه]`;

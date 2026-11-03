@@ -74,8 +74,19 @@ export async function initializeDatabase() {
       )
     `);
 
+    // 6. Table de la Whitelist Permanente Globale (Confiance 100% Anti-Bot)
+    db.run(`
+      CREATE TABLE IF NOT EXISTS permanent_whitelist (
+        phone TEXT PRIMARY KEY,
+        addedAt DATETIME DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    // Insérer le numéro initial 212781848716 par défaut
+    db.run(`INSERT OR IGNORE INTO permanent_whitelist (phone) VALUES ('212781848716')`);
+
     saveDatabase();
-    console.log('✅ Base de données initialisée avec succès (tables warnings, settings, sudos, allowed_links, allowed_bots)');
+    console.log('✅ Base de données initialisée avec succès (tables warnings, settings, sudos, allowed_links, allowed_bots, permanent_whitelist)');
     return db;
   } catch (error) {
     console.error('❌ Erreur lors de l\'initialisation de la base de données:', error);
@@ -428,9 +439,95 @@ export function disallowBotUser(groupId, userId) {
   }
 }
 
+// Numéros garantis par défaut à 100% de confiance dans le code
+const HARDCODED_PERMANENT_WHITELIST = new Set([
+  '212781848716',
+]);
+
+// ----------------------------------------------------
+// Whitelist Permanente Globale (Confiance 100% Anti-Bot)
+// Ces numéros ne sont JAMAIS exclus à cause d'appareils liés (1, 2, 3 ou 4 appareils)
+// ----------------------------------------------------
+
+export function isPermanentWhitelisted(userId) {
+  try {
+    if (!userId) return false;
+    const cleanPhone = String(userId).split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
+    if (!cleanPhone) return false;
+
+    if (HARDCODED_PERMANENT_WHITELIST.has(cleanPhone)) return true;
+
+    if (db) {
+      const result = db.exec('SELECT phone FROM permanent_whitelist WHERE phone = ?', [cleanPhone]);
+      if (result.length > 0 && result[0].values.length > 0) return true;
+    }
+    return false;
+  } catch (error) {
+    console.error('❌ Erreur isPermanentWhitelisted:', error);
+    return false;
+  }
+}
+
+export function addPermanentWhitelist(userId) {
+  try {
+    if (!userId) return false;
+    const cleanPhone = String(userId).split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
+    if (!cleanPhone) return false;
+
+    HARDCODED_PERMANENT_WHITELIST.add(cleanPhone);
+    if (db) {
+      db.run('INSERT OR IGNORE INTO permanent_whitelist (phone) VALUES (?)', [cleanPhone]);
+      saveDatabase();
+    }
+    return true;
+  } catch (error) {
+    console.error('❌ Erreur addPermanentWhitelist:', error);
+    return false;
+  }
+}
+
+export function removePermanentWhitelist(userId) {
+  try {
+    if (!userId) return false;
+    const cleanPhone = String(userId).split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
+    if (!cleanPhone) return false;
+
+    HARDCODED_PERMANENT_WHITELIST.delete(cleanPhone);
+    if (db) {
+      db.run('DELETE FROM permanent_whitelist WHERE phone = ?', [cleanPhone]);
+      saveDatabase();
+    }
+    return true;
+  } catch (error) {
+    console.error('❌ Erreur removePermanentWhitelist:', error);
+    return false;
+  }
+}
+
+export function getPermanentWhitelist() {
+  try {
+    const list = new Set(HARDCODED_PERMANENT_WHITELIST);
+    if (db) {
+      const result = db.exec('SELECT phone FROM permanent_whitelist ORDER BY addedAt ASC');
+      if (result.length > 0 && result[0].values.length > 0) {
+        for (const v of result[0].values) {
+          list.add(v[0]);
+        }
+      }
+    }
+    return Array.from(list);
+  } catch (error) {
+    console.error('❌ Erreur getPermanentWhitelist:', error);
+    return Array.from(HARDCODED_PERMANENT_WHITELIST);
+  }
+}
+
 export function isBotAllowed(groupId, userId) {
   try {
-    if (!groupId || !userId) return false;
+    if (!userId) return false;
+    if (isPermanentWhitelisted(userId)) return true;
+    if (!groupId) return false;
+
     const cleanUser = userId.split('@')[0].split(':')[0] + '@s.whatsapp.net';
     const result = db.exec('SELECT userId FROM allowed_bots WHERE groupId = ? AND userId = ?', [groupId, cleanUser]);
     return result.length > 0 && result[0].values.length > 0;
