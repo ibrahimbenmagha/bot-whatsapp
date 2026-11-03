@@ -1747,23 +1747,17 @@ async function checkUserHasLinkedDevices(sock, userJid) {
 }
 
 /**
- * Procédure Officielle Anti-Bot:
- * 1. Tag l'utilisateur et dire (وينو عندو بوت)
- * 2. Envoyer l'audio TomLaugh1.opus (PTT)
- * 3. Kick l'utilisateur (sans fermer ni rouvrir le groupe)
- * 4. Tag les admins pour les informer
+ * Procédure Officielle Anti-Bot (Support d'un ou plusieurs membres en simultané):
+ * Si plusieurs membres sont détectés:
+ * 1. Tag tous les membres ensemble dans UN SEUL message: (وينو عندو بوت) @user1 @user2 @user3
+ * 2. Envoyer l'audio TomLaugh1.opus (PTT) UNE SEULE FOIS 🎙️
+ * 3. Kick tous les membres
+ * 4. Tag les admins dans un seul message récapitulatif
  */
-async function executeAntiBotProcedure(sock, jid, targetJid, groupData) {
+async function executeAntiBotBatchProcedure(sock, jid, targetsList, groupData) {
   try {
     const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
-    const targetPhone = String(targetJid || '').split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
     const botNumber = (sock.user?.id || '').split('@')[0].split(':')[0];
-
-    // Protection compte bot, sudo et whitelist permanente (confiance 100%)
-    if (!targetPhone || targetPhone === botNumber || isSelfUser(sock, targetJid) || isSudo(targetJid) || isPermanentWhitelisted(targetPhone) || isPermanentWhitelisted(targetJid)) {
-      logActivity(`[AntiBot] Cible protégée (bot/sudo/whitelist permanente): ${targetJid}, expulsion ignorée.`);
-      return;
-    }
 
     let currentGroupData = groupData;
     try {
@@ -1773,45 +1767,55 @@ async function executeAntiBotProcedure(sock, jid, targetJid, groupData) {
       }
     } catch (_) {}
 
-    // Résoudre le participant
-    const resolved = await resolveGroupParticipant(sock, jid, targetJid, currentGroupData);
-
-    // Ne jamais kicker les admins ou le créateur du groupe
     const ownerJid = currentGroupData?.owner || currentGroupData?.subjectOwner || '';
     const ownerNumber = ownerJid ? ownerJid.split('@')[0].split(':')[0] : null;
-    const isOwnerOrAdmin = (
-      (ownerNumber && resolved.phone === ownerNumber) ||
-      (resolved.participant && (resolved.participant.admin === 'admin' || resolved.participant.admin === 'superadmin'))
-    );
-    if (isOwnerOrAdmin) {
-      logActivity(`[AntiBot] Cible ${resolved.tag} est admin/propriétaire, expulsion ignorée.`);
-      return;
+
+    // Filtrer et résoudre les membres valides à kicker
+    const validTargets = [];
+    const targetsToProcess = Array.isArray(targetsList) ? targetsList : [targetsList];
+
+    for (const target of targetsToProcess) {
+      const rawTarget = typeof target === 'string' ? target : (target.rawJid || target.phone);
+      const cleanPhone = String(rawTarget || '').split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
+
+      if (!cleanPhone || cleanPhone === botNumber || isSelfUser(sock, rawTarget)) continue;
+      if (isSudo(cleanPhone) || isSudo(rawTarget)) continue;
+      if (isPermanentWhitelisted(cleanPhone) || isPermanentWhitelisted(rawTarget)) continue;
+      if (isBotAllowed(jid, cleanPhone) || isBotAllowed(jid, rawTarget)) continue;
+
+      const resolved = await resolveGroupParticipant(sock, jid, rawTarget, currentGroupData);
+
+      const isOwnerOrAdmin = (
+        (ownerNumber && resolved.phone === ownerNumber) ||
+        (resolved.participant && (resolved.participant.admin === 'admin' || resolved.participant.admin === 'superadmin'))
+      );
+      if (isOwnerOrAdmin) continue;
+
+      const coolKey = `${jid}:${resolved.phone}`;
+      const lastTrigger = antibotCooldown.get(coolKey) || 0;
+      if (Date.now() - lastTrigger < 8000) continue;
+      antibotCooldown.set(coolKey, Date.now());
+
+      validTargets.push(resolved);
     }
 
-    // Vérifier si la cible est autorisée dans la whitelist Anti-Bot ou la whitelist permanente
-    if (isPermanentWhitelisted(targetJid) || isPermanentWhitelisted(resolved.phone) || isBotAllowed(jid, targetJid) || isBotAllowed(jid, resolved.phone)) {
-      logActivity(`[AntiBot] Cible ${resolved.tag} autorisée dans la whitelist (confiance 100%), expulsion ignorée.`);
-      return;
-    }
+    if (validTargets.length === 0) return;
 
-    const coolKey = `${jid}:${resolved.phone}`;
-    const lastTrigger = antibotCooldown.get(coolKey) || 0;
-    if (Date.now() - lastTrigger < 10000) return;
-    antibotCooldown.set(coolKey, Date.now());
+    logActivity(`[AntiBotBatch] Exécution de l'expulsion groupée pour ${validTargets.length} membre(s) dans ${jid}`, 'warn');
 
-    logActivity(`[AntiBot] Exécution procédure d'expulsion pour ${resolved.tag} dans ${jid}`, 'warn');
+    // 1. Tag tous les membres ensemble dans un seul message
+    const tagsText = validTargets.map(t => t.tag).join(' ');
+    const allUserMentions = Array.from(new Set(validTargets.flatMap(t => t.mentions)));
 
-    // Simulation présence humaine (Anti-Ban)
     await sock.sendPresenceUpdate('composing', jid).catch(() => {});
     await sleep(400);
 
-    // 1. Tag l'utilisateur et dire (وينو عندو بوت)
     await sock.sendMessage(jid, {
-      text: `(وينو عندو بوت) ${resolved.tag}`,
-      mentions: resolved.mentions
+      text: `(وينو عندو بوت) ${tagsText}`,
+      mentions: allUserMentions
     });
 
-    // 2. Envoyer l'audio TomLaugh1.opus (PTT)
+    // 2. Envoyer l'audio TomLaugh1.opus (PTT) UNE SEULE FOIS
     await sock.sendPresenceUpdate('recording', jid).catch(() => {});
     await sleep(500);
 
@@ -1839,33 +1843,25 @@ async function executeAntiBotProcedure(sock, jid, targetJid, groupData) {
       }
     }
 
-    // 3. Kick l'utilisateur (double tentative sécurisée avec JID natif et JID téléphone)
-    const jidToRemove = resolved.participant?.id || resolved.participant?.jid || targetJid;
+    // 3. Kick tous les membres ciblés
+    const jidsToRemove = validTargets.map(t => t.participant?.id || t.participant?.jid || `${t.phone}@s.whatsapp.net`);
     try {
-      await safeGroupParticipantsRemove(sock, jid, [jidToRemove]);
-      logActivity(`[AntiBot] Utilisateur ${resolved.tag} expulsé.`);
-    } catch (kickErr1) {
-      logActivity(`[AntiBot] Tentative 1 échouée (${kickErr1.message}), tentative avec JID téléphone...`);
-      try {
-        await safeGroupParticipantsRemove(sock, jid, [`${resolved.phone}@s.whatsapp.net`]);
-        logActivity(`[AntiBot] Utilisateur ${resolved.tag} expulsé via JID téléphone.`);
-      } catch (kickErr2) {
-        logActivity(`[AntiBot] Échec définitif expulsion: ${kickErr2.message}`, 'warn');
-        if (kickErr2.message?.includes('403') || kickErr2.message?.includes('admin')) {
-          await sock.sendMessage(jid, {
-            text: `⚠️ *تـنـبـيـه نـظـام الـدفـاع (Anti-Bot)* :\nتـعـذر طـرد الـعـضـو ${resolved.tag} لأن *الـبـوت لـيـس مـشـرفـاً (Admin)* فـي الـمـجـمـوعـة! 👑\nيـرجـى الـتـأكـد مـن تـرقـيـة الـبـوت مـشـرفـاً لـتـفـعـيـل الـطـرد.`,
-            mentions: resolved.mentions
-          });
-          return;
-        }
+      await safeGroupParticipantsRemove(sock, jid, jidsToRemove);
+      logActivity(`[AntiBotBatch] ${validTargets.length} membre(s) expulsé(s).`);
+    } catch (kErr) {
+      logActivity(`[AntiBotBatch] Échec expulsion groupée: ${kErr.message}, tentative individuelle...`, 'warn');
+      for (const t of validTargets) {
+        const jidRem = t.participant?.id || t.participant?.jid || `${t.phone}@s.whatsapp.net`;
+        await safeGroupParticipantsRemove(sock, jid, [jidRem]).catch(() => {});
       }
     }
 
-    // 4. Récupérer et taguer les admins pour les informer
+    // 4. Taguer les admins pour les informer en un seul message
+    const kickedPhones = validTargets.map(t => t.phone);
     const adminParticipants = currentGroupData?.participants?.filter((adm) => {
       if (adm.admin !== 'admin' && adm.admin !== 'superadmin') return false;
       const admNum = (adm.id || adm.jid || '').split('@')[0].split(':')[0];
-      return admNum !== resolved.phone && admNum !== botNumber;
+      return !kickedPhones.includes(admNum) && admNum !== botNumber;
     }) || [];
 
     const adminMentions = [];
@@ -1882,9 +1878,10 @@ async function executeAntiBotProcedure(sock, jid, targetJid, groupData) {
     let alertText = `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🤖 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
     alertText += `       🏰 *إمـبـراطـوريـة بـاراديـس* 🏰\n`;
     alertText += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🚨 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n\n`;
-    alertText += `🤖 *رادار الـدفـاع: طـرد حـسـاب مـرتـبـط بـبـوت / ويـب!* 🤖\n\n`;
-    alertText += `تـم رصـد حـسـاب مـرتـبـط بـأجـهـزة خـارجـيـة / واتـسـاب ويـب / بـوت!\n\n`;
-    alertText += `⋄ الـعـضـو : ${resolved.tag}\n`;
+    alertText += `🤖 *رادار الـدفـاع: طـرد ${validTargets.length > 1 ? 'جـمـاعـي لـحـسـابـات مـرتـبـطـة' : 'حـسـاب مـرتـبـط'} بـبـوت / ويـب!* 🤖\n\n`;
+    alertText += `تـم رصـد حـسـابـات مـرتـبـطـة بـأجـهـزة خـارجـيـة / واتـسـاب ويـب / بـوت!\n\n`;
+    alertText += `⋄ الـعـدد : *${validTargets.length} حـسـاب*\n`;
+    alertText += `⋄ الـحـسـابـات : ${tagsText}\n`;
     alertText += `⋄ الإجـراء : تـم الـطـرد الـفـوري مـن الـمـجـمـوعـة 👢\n\n`;
     if (adminTags.length > 0) {
       alertText += `👑 *إشـعـار لـلإدارة والـمـشـرفـيـن* :\n${adminTags.join(' ')}\n\n`;
@@ -1894,11 +1891,16 @@ async function executeAntiBotProcedure(sock, jid, targetJid, groupData) {
 
     await sock.sendMessage(jid, {
       text: alertText,
-      mentions: [...adminMentions, ...resolved.mentions]
+      mentions: [...adminMentions, ...allUserMentions]
     });
+
   } catch (err) {
-    console.error('Erreur executeAntiBotProcedure:', err);
+    console.error('Erreur executeAntiBotBatchProcedure:', err);
   }
+}
+
+async function executeAntiBotProcedure(sock, jid, targetJid, groupData) {
+  return await executeAntiBotBatchProcedure(sock, jid, [targetJid], groupData);
 }
 
 /**
@@ -3189,7 +3191,7 @@ async function handleScanCommand(sock, jid, groupData, senderIsAdmin, senderIsSu
     text += `📊 *تـقـريـر فـحـص الأجـهـزة الـمـرتـبـطـة والـبـوتـات (Scan)* 📊\n\n`;
     text += `⋄ إجـمـالـي الأعـضـاء الـمـفـحـوصـيـن : *${participants.length}*\n`;
     text += `⋄ الـحـسـابـات الـمـرتـبـطـة بـأجـهـزة / بـوت : *${detected.length}*\n`;
-    text += `⋄ حـالـة مـضـاد الـبـوتـات : *${antibotActive ? '🟢 مـفـعـل (طـرد تـلـقـائـي)' : '🔴 مـعـطـل'}*\n\n`;
+    text += `⋄ حـالـة مـضـاد الـبـوتـات : *${antibotActive ? '🟢 مـفـعـل (طـرد تـلـقـائـي)' : '🔴 مـعـطـل (عـرض اسـتـطـلاعـي - بـدون طـرد)'}*\n\n`;
 
     const allMentions = [];
     const membersToKick = [];
@@ -3212,13 +3214,17 @@ async function handleScanCommand(sock, jid, groupData, senderIsAdmin, senderIsSu
           statusBadge = '👤 عضو ↬ 👢 *جـاري الـطـرد*';
           membersToKick.push(item);
         } else {
-          statusBadge = '👤 عضو';
+          statusBadge = '👤 عضو (مـرتـبـط - بـدون طـرد)';
         }
 
         text += `${idx + 1}️⃣ @${item.phone} (${statusBadge}) ↬ *${item.deviceCount} جهاز مرتبط* 🤖\n`;
         allMentions.push(...item.mentions);
       });
-      text += `\n💡 *مـلاحـظـة* : تـم إظـهـار الـحـسـابـات الـمـرتـبـطـة فـقـط وإخـفـاء الـحـسـابـات الـسـلـيـمـة تـلـقـائـيـاً.\n\n`;
+      text += `\n💡 *مـلاحـظـة* : تـم إظـهـار الـحـسـابـات الـمـرتـبـطـة فـقـط وإخـفـاء الـحـسـابـات الـسـلـيـمـة تـلـقـائـيـاً.\n`;
+      if (!antibotActive) {
+        text += `ℹ️ *مـضـاد الـبـوتـات مـعـطـل* : هـذا الـفـحـص اسـتـطـلاعـي فـقـط، لـن يـتـم طـرد أي عـضـو حـتـى تـفـعـل الـنـظـام بـأمـر *.antibot on*.\n`;
+      }
+      text += `\n`;
     }
 
     text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚔️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
@@ -3229,11 +3235,9 @@ async function handleScanCommand(sock, jid, groupData, senderIsAdmin, senderIsSu
       mentions: Array.from(new Set(allMentions))
     });
 
-    // Exécuter la procédure d'expulsion pour tous les membres détectés non autorisés si Anti-Bot est activé
-    if (membersToKick.length > 0) {
-      for (const target of membersToKick) {
-        await executeAntiBotProcedure(sock, jid, target.rawJid, currentGroupData);
-      }
+    // Exécuter l'expulsion groupée (un seul message avec tous les tags, et une seule note vocale) si Anti-Bot est activé
+    if (antibotActive && membersToKick.length > 0) {
+      await executeAntiBotBatchProcedure(sock, jid, membersToKick, currentGroupData);
     }
 
   } catch (err) {
@@ -4122,6 +4126,8 @@ function startPeriodicAntiBotScanner() {
           if (!jid || !isAntiBotEnabled(jid)) continue;
 
           const participants = group.participants || [];
+          const detectedInGroup = [];
+
           for (const p of participants) {
             let cleanPhone = null;
             if (p.jid && p.jid.endsWith('@s.whatsapp.net')) {
@@ -4136,17 +4142,20 @@ function startPeriodicAntiBotScanner() {
 
             if (!cleanPhone || cleanPhone === botNumber || isSelfUser(sock, cleanPhone)) continue;
             if (isSudo(cleanPhone) || isSudo(p.id || p.jid)) continue;
+            if (isPermanentWhitelisted(cleanPhone) || isPermanentWhitelisted(p.id || p.jid)) continue;
             if (isBotAllowed(jid, cleanPhone) || isBotAllowed(jid, p.id || p.jid)) continue;
             if (p.admin === 'admin' || p.admin === 'superadmin') continue;
 
             // Vérifier les appareils liés
             const check = await checkUserHasLinkedDevices(sock, cleanPhone);
             if (check.hasLinked) {
-              logActivity(`[AutoBot-Scanner] Membre existant @${cleanPhone} détecté avec bot/web dans ${jid} -> Expulsion automatique!`, 'warn');
-              await executeAntiBotProcedure(sock, jid, p.id || p.jid || cleanPhone, group);
-              // Pause anti-ban entre expulsions
-              await new Promise((r) => setTimeout(r, 1200));
+              logActivity(`[AutoBot-Scanner] Membre existant @${cleanPhone} détecté avec bot/web dans ${jid}`, 'warn');
+              detectedInGroup.push(p.id || p.jid || cleanPhone);
             }
+          }
+
+          if (detectedInGroup.length > 0) {
+            await executeAntiBotBatchProcedure(sock, jid, detectedInGroup, group);
           }
         }
       }
