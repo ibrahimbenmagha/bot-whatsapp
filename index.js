@@ -9,7 +9,7 @@ import path from 'path';
 import fs from 'fs';
 import crypto from 'crypto';
 import { fileURLToPath } from 'url';
-import makeWASocket, { useMultiFileAuthState, DisconnectReason, Browsers } from '@whiskeysockets/baileys';
+import makeWASocket, { useMultiFileAuthState, DisconnectReason, Browsers, USyncQuery, USyncUser } from '@whiskeysockets/baileys';
 import { Boom } from '@hapi/boom';
 import pino from 'pino';
 import QRCode from 'qrcode';
@@ -294,6 +294,18 @@ async function startSession(phone, options = {}) {
     await handleGroupJoinRequestSecurity(phone, sock, update);
   });
 
+  // Écouteur pour la résolution automatique des LIDs en numéros de téléphone réels
+  sock.ev.on('chats.phoneNumberShare', ({ lid, jid }) => {
+    if (lid && jid) {
+      const l = String(lid).split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
+      const p = String(jid).split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
+      if (l && p) {
+        lidToPhoneCache.set(l, p);
+        phoneToLidCache.set(p, l);
+      }
+    }
+  });
+
   return sessionObj;
 }
 
@@ -515,6 +527,39 @@ function resolveRealPhoneNumber(jidOrLid) {
     return lidToPhoneCache.get(clean);
   }
   return clean;
+}
+
+/**
+ * Résoudre un LID vers son numéro de téléphone réel via WhatsApp USync Query
+ */
+async function resolveLidToPhoneViaUSync(sock, lidJid) {
+  try {
+    if (!sock?.executeUSyncQuery || !USyncQuery || !USyncUser) return null;
+    const cleanLidUser = String(lidJid || '').split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
+    if (!cleanLidUser) return null;
+
+    if (lidToPhoneCache.has(cleanLidUser)) {
+      return lidToPhoneCache.get(cleanLidUser);
+    }
+
+    const usync = new USyncQuery().withContactProtocol().withLIDProtocol();
+    usync.withUser(new USyncUser().withLid(`${cleanLidUser}@lid`));
+    const result = await sock.executeUSyncQuery(usync);
+
+    if (result && Array.isArray(result.list)) {
+      for (const item of result.list) {
+        if (item.id && item.id.endsWith('@s.whatsapp.net')) {
+          const phone = item.id.split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
+          if (phone) {
+            lidToPhoneCache.set(cleanLidUser, phone);
+            phoneToLidCache.set(phone, cleanLidUser);
+            return phone;
+          }
+        }
+      }
+    }
+  } catch (_) {}
+  return null;
 }
 
 /**
@@ -1050,6 +1095,17 @@ async function handleSessionMessages(botPhone, m) {
           continue;
         }
         await handleJoinRequestActionCommand(sock, jid, messageText, 'reject', senderIsAdmin, senderIsSudo);
+        continue;
+      }
+
+      // Commande .reset / .revoke / .تجديد_الرابط (Group Admins / Sudo)
+      if (isCmd('reset') || isCmd('revoke') || isCmd('تجديد') || isCmd('تجديد_الرابط') || isCmd('اعادة_تعيين') || startsWithCmd('reset') || startsWithCmd('revoke')) {
+        reactToMessage(sock, jid, msg.key, '🔄');
+        if (!isGroup) {
+          await sock.sendMessage(jid, { text: 'ℹ️ هذه العملية تعمل فقط داخل المجموعات.' });
+          continue;
+        }
+        await handleResetInviteLinkCommand(sock, jid, senderIsAdmin, senderIsSudo);
         continue;
       }
 
@@ -2348,8 +2404,9 @@ async function handleHelpCommand(sock, jid, isAdminUser, senderId = null, sessio
 `│ ⋄ *.trust @عضو* ⇠ إضـافـة لـلـقـائـمـة الـبـيـضـاء الـدائـمـة (ثـقـة 100%) 🌟\n` +
 `│ ⋄ *.untrust @عضو* ⇠ إلـغـاء الـثـقـة الـدائـمـة 🚫\n` +
 `│ ⋄ *.trustlist* ⇠ قـائـمـة الأعـضـاء الـمـوثـوقـيـن دائـمـاً 🌟\n` +
-`│ ⋄ *.accept [رقم]* ⇠ قـبـول طـلـب انـضـمـام ✅\n` +
-`│ ⋄ *.reject [رقم]* ⇠ رفـض طـلـب انـضـمـام ❌\n` +
+`│ ⋄ *.accept [1 / 1 2 / 1,5 / all]* ⇠ قـبـول طـلـبـات الانـضـمـام ✅\n` +
+`│ ⋄ *.reject [1 / 1 2 / 1,5 / all]* ⇠ رفـض طـلـبـات الانـضـمـام ❌\n` +
+`│ ⋄ *.reset* ⇠ إعـادة تـعـيـيـن وتـجـديـد رابـط الـمـجـمـوعـة 🔄\n` +
 `│ ⋄ *.antilink [on/off]* ⇠ تـفـعـيـل أو تـعـطـيـل مـضـاد الـروابـط 🛡️\n`;
       helpText += `│ ⋄ *.allowlink @عضو* ⇠ الـسـمـاح لـعـضـو بـإرسـال الـروابـط 🔗\n`;
       helpText += `│ ⋄ *.disallowlink @عضو* ⇠ إلـغـاء الـسـمـاح بـالـروابـط 🚫\n`;
@@ -3860,8 +3917,59 @@ async function handleTrustListCommand(sock, jid) {
 }
 
 /**
+ * Parser d'indices pour les commandes .accept et .reject
+ * Supporte: 1, 1 2, 1 2 5 8, 1,5 (plage 1 à 5), 1-5, all, الكل
+ */
+function parseRequestIndices(argsString, totalRequests) {
+  const raw = argsString.trim().toLowerCase();
+  if (raw === 'all' || raw === 'الكل' || raw === 'tout') {
+    return Array.from({ length: totalRequests }, (_, i) => i);
+  }
+
+  const selectedIndices = new Set();
+  const tokens = raw.split(/[\s]+/);
+
+  for (const token of tokens) {
+    // Plage comme "1,5" ou "1-5" ou "1..5"
+    const rangeMatch = token.match(/^(\d+)[,\-.]+(\d+)$/);
+    if (rangeMatch) {
+      const start = parseInt(rangeMatch[1], 10);
+      const end = parseInt(rangeMatch[2], 10);
+      const min = Math.min(start, end);
+      const max = Math.max(start, end);
+      for (let i = min; i <= max; i++) {
+        if (i >= 1 && i <= totalRequests) {
+          selectedIndices.add(i - 1);
+        }
+      }
+      continue;
+    }
+
+    // Liste séparée par virgule "1,2,5"
+    if (token.includes(',')) {
+      const parts = token.split(',');
+      for (const p of parts) {
+        const num = parseInt(p.trim(), 10);
+        if (!isNaN(num) && num >= 1 && num <= totalRequests) {
+          selectedIndices.add(num - 1);
+        }
+      }
+      continue;
+    }
+
+    // Nombre unique
+    const num = parseInt(token, 10);
+    if (!isNaN(num) && num >= 1 && num <= totalRequests) {
+      selectedIndices.add(num - 1);
+    }
+  }
+
+  return Array.from(selectedIndices).sort((a, b) => a - b);
+}
+
+/**
  * Commande .requests / .طلبات (Group Admins / Sudo)
- * Affiche la liste des demandes d'adhésion en attente avec analyse des appareils liés/bots
+ * Affiche la liste des demandes d'adhésion en attente avec résolution complète des LIDs en vrais numéros
  */
 async function handleJoinRequestsListCommand(sock, jid, senderIsAdmin, senderIsSudo) {
   try {
@@ -3877,8 +3985,8 @@ async function handleJoinRequestsListCommand(sock, jid, senderIsAdmin, senderIsS
 
     await sock.sendMessage(jid, { text: '🔍 *جـاري فـحـص طـلـبـات الانـضـمـام الـمـعـلـقـة وتـحـلـيـل الـبـوتـات...*' });
 
-    const requests = await sock.groupRequestParticipantsList(jid).catch(() => []);
-    if (!requests || requests.length === 0) {
+    const rawRequests = await sock.groupRequestParticipantsList(jid).catch(() => []);
+    if (!rawRequests || rawRequests.length === 0) {
       await sock.sendMessage(jid, { text: 'ℹ️ لا تـوجـد أي طـلـبـات انـضـمـام مـعـلـقـة حـالـيـاً فـي هـذه الـمـجـمـوعـة.' });
       return;
     }
@@ -3886,15 +3994,35 @@ async function handleJoinRequestsListCommand(sock, jid, senderIsAdmin, senderIsS
     let text = `⎔⋅• ━ ╼━ ╼╃ ⌬〔 📋 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
     text += `       🏰 *إمـبـراطـوريـة بـاراديـس* 🏰\n`;
     text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 📋 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n\n`;
-    text += `📥 *قـائـمـة طـلـبـات الانـضـمـام الـمـعـلـقـة (${requests.length})* 📥\n\n`;
+    text += `📥 *قـائـمـة طـلـبـات الانـضـمـام الـمـعـلـقـة (${rawRequests.length})* 📥\n\n`;
 
     const allMentions = [];
 
-    for (let i = 0; i < requests.length; i++) {
-      const req = requests[i];
-      const rawJid = req.jid || req.id;
-      const phone = (rawJid || '').split('@')[0].split(':')[0];
-      if (!phone) continue;
+    for (let i = 0; i < rawRequests.length; i++) {
+      const req = rawRequests[i];
+      const rawJid = req.jid || req.id || '';
+
+      // Résolution du vrai numéro de téléphone réel
+      let phone = req.phone_number || req.phoneNumber || req.phone || req.user || req.sender_pn;
+      if (phone) {
+        phone = String(phone).split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
+      }
+
+      if (!phone) {
+        phone = resolveRealPhoneNumber(rawJid);
+      }
+
+      // Si le numéro est encore un LID masqué, tenter de le résoudre via USync
+      if (!phone || phone.length > 15 || rawJid.endsWith('@lid')) {
+        const usyncPhone = await resolveLidToPhoneViaUSync(sock, rawJid);
+        if (usyncPhone) {
+          phone = usyncPhone;
+        }
+      }
+
+      if (!phone) {
+        phone = (rawJid || '').split('@')[0].split(':')[0];
+      }
 
       const check = await checkUserHasLinkedDevices(sock, rawJid);
       const isPermanent = isPermanentWhitelisted(rawJid) || isPermanentWhitelisted(phone);
@@ -3915,18 +4043,25 @@ async function handleJoinRequestsListCommand(sock, jid, senderIsAdmin, senderIsS
 
       text += `${i + 1}️⃣ @${phone}\n`;
       text += `   ⋄ الـحـالـة : ${badge}\n`;
-      text += `   ⋄ لـلـسـمـاح : *.allowbot ${phone}*\n`;
-      text += `   ⋄ لـلـقـبـول : *.accept ${phone}* | لـلـرفـض : *.reject ${phone}*\n\n`;
+      text += `   ⋄ لـلـقـبـول : *.accept ${i + 1}* | لـلـرفـض : *.reject ${i + 1}*\n\n`;
 
       allMentions.push(`${phone}@s.whatsapp.net`);
+      if (rawJid && rawJid !== `${phone}@s.whatsapp.net`) {
+        allMentions.push(rawJid);
+      }
     }
 
+    text += `💡 *خـيـارات الـقـبـول والـرفـض الـذكـيـة* :\n`;
+    text += `⋄ طـلـب واحـد : *.accept 1* أو *.reject 1*\n`;
+    text += `⋄ عـدة طـلـبـات : *.accept 1 2 5 8* أو *.reject 1 2 5 8*\n`;
+    text += `⋄ مـجـال كـامـل : *.accept 1,5* (يـقـبـل مـن 1 إلـى 5)\n`;
+    text += `⋄ كـافـة الـطـلـبـات : *.accept all* أو *.reject all*\n\n`;
     text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚔️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
     text += `       🏰 *PARADIS EMPIRE SECURITY* 🏰`;
 
     await sock.sendMessage(jid, {
       text,
-      mentions: allMentions
+      mentions: Array.from(new Set(allMentions))
     });
 
   } catch (err) {
@@ -3936,7 +4071,7 @@ async function handleJoinRequestsListCommand(sock, jid, senderIsAdmin, senderIsS
 }
 
 /**
- * Commande .accept [number] / .reject [number] (Group Admins / Sudo)
+ * Commande .accept / .reject avec support des indices (1, 1 2, 1,5, all, 212xxxx)
  */
 async function handleJoinRequestActionCommand(sock, jid, messageText, action, senderIsAdmin, senderIsSudo) {
   try {
@@ -3946,25 +4081,149 @@ async function handleJoinRequestActionCommand(sock, jid, messageText, action, se
     }
 
     const words = messageText.trim().split(/\s+/);
-    const target = words[1];
-    if (!target) {
-      await sock.sendMessage(jid, { text: `❌ يـرجـى تـحـديـد الـرقـم: *.${action} 212xxxxxxx*` });
+    const rawArgs = words.slice(1).join(' ').trim();
+
+    if (!rawArgs) {
+      await sock.sendMessage(jid, { 
+        text: `❌ *يـرجـى تـحـديـد الـطـلـب الـمـراد مـعـالـجـتـه* :\n` +
+              `⋄ طـلـب مـحـدد : *.${action} 1*\n` +
+              `⋄ أرقـام مـتـعـددة : *.${action} 1 2 5 8*\n` +
+              `⋄ مـجـال أرقـام : *.${action} 1,5* (يـعـالـج مـن 1 إلـى 5)\n` +
+              `⋄ جـمـيـع الـطـلـبـات : *.${action} all*\n` +
+              `⋄ أو بـالـرقـم الـمـبـاشـر : *.${action} 212xxxxxxx*` 
+      });
       return;
     }
 
-    const cleanTarget = target.replace(/[^0-9]/g, '');
-    const targetJid = `${cleanTarget}@s.whatsapp.net`;
+    const requests = await sock.groupRequestParticipantsList(jid).catch(() => []);
+    if (!requests || requests.length === 0) {
+      await sock.sendMessage(jid, { text: 'ℹ️ لا تـوجـد أي طـلـبـات انـضـمـام مـعـلـقـة حـالـيـاً فـي هـذه الـمـجـمـوعـة.' });
+      return;
+    }
 
-    const actType = (action === 'accept' || action === 'قبول') ? 'approve' : 'reject';
-    await sock.groupRequestParticipantsUpdate(jid, [targetJid], actType);
-
+    const actType = (action === 'accept' || action === 'قبول' || action === 'وافق') ? 'approve' : 'reject';
     const actName = actType === 'approve' ? 'قـبـول' : 'رفـض';
+
+    const jidsToProcess = [];
+    const targetTags = [];
+    const mentions = [];
+
+    // 1. Vérifier si l'utilisateur a passé un numéro de téléphone complet direct (ex: 2126xxxxxxxx)
+    const directNumber = rawArgs.replace(/[^0-9]/g, '');
+    if (directNumber.length >= 7 && !rawArgs.includes(' ') && !rawArgs.includes(',')) {
+      // Trouver la demande correspondante
+      const found = requests.find((r) => {
+        const raw = r.jid || r.id || '';
+        const p = resolveRealPhoneNumber(raw);
+        return p === directNumber || raw.includes(directNumber);
+      });
+
+      const targetJid = found ? (found.jid || found.id) : `${directNumber}@s.whatsapp.net`;
+      jidsToProcess.push(targetJid);
+      targetTags.push(`@${directNumber}`);
+      mentions.push(targetJid, `${directNumber}@s.whatsapp.net`);
+    } else {
+      // 2. Traitement par indices (1, 1 2, 1,5, all, etc.)
+      const selectedIndices = parseRequestIndices(rawArgs, requests.length);
+
+      if (selectedIndices.length === 0) {
+        await sock.sendMessage(jid, { 
+          text: `❌ *لـم يـتـم الـعـثـور عـلـى أي طـلـب بـالـرقـم الـمـحـدد.* (الـطـلـبـات الـمـتـوفـرة مـن 1 إلـى ${requests.length})\n` +
+                `⋄ اكـتـب *.requests* لـعـرض قـائـمـة الـطـلـبـات والـتـرتـيـب.` 
+        });
+        return;
+      }
+
+      for (const idx of selectedIndices) {
+        const req = requests[idx];
+        if (!req) continue;
+
+        const targetJid = req.jid || req.id;
+        let phone = req.phone_number || req.phoneNumber || req.phone || req.user || req.sender_pn;
+        if (phone) {
+          phone = String(phone).split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
+        }
+        if (!phone) {
+          phone = resolveRealPhoneNumber(targetJid);
+        }
+        if (!phone) {
+          phone = targetJid.split('@')[0].split(':')[0];
+        }
+
+        jidsToProcess.push(targetJid);
+        targetTags.push(`@${phone}`);
+        mentions.push(targetJid, `${phone}@s.whatsapp.net`);
+      }
+    }
+
+    if (jidsToProcess.length === 0) {
+      await sock.sendMessage(jid, { text: '❌ تـعـذر تـحـديـد أي طـلـب صـالـح لـلـمـعـالـجـة.' });
+      return;
+    }
+
+    // Exécuter l'action sur WhatsApp
+    await sock.groupRequestParticipantsUpdate(jid, jidsToProcess, actType);
+
+    let text = `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ${actType === 'approve' ? '✅' : '❌'} 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+    text += `       🏰 *إمـبـراطـوريـة بـاراديـس* 🏰\n`;
+    text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ${actType === 'approve' ? '✅' : '❌'} 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n\n`;
+    text += `✅ *تـم ${actName} ${jidsToProcess.length} طـلـب(ات) انـضـمـام بـنـجـاح!*\n\n`;
+    text += `⋄ الـعـدد الإجـمـالـي : *${jidsToProcess.length}*\n`;
+    text += `⋄ الـحـسـابـات الـمـعـالـجـة : ${targetTags.join(' ')}\n\n`;
+    text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚔️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+    text += `       🏰 *PARADIS EMPIRE* 🏰`;
+
     await sock.sendMessage(jid, {
-      text: `✅ تـم *${actName}* طـلـب انـضـمـام الـعـضـو @${cleanTarget} بـنـجـاح.`,
-      mentions: [targetJid]
+      text,
+      mentions: Array.from(new Set(mentions))
     });
+
+    logActivity(`[JoinRequests] ${actName} de ${jidsToProcess.length} demande(s) dans ${jid}`);
   } catch (err) {
+    console.error('Erreur handleJoinRequestActionCommand:', err);
     await sock.sendMessage(jid, { text: `❌ تـعـذر تـنـفـيـذ الإجـراء: ${err.message}` });
+  }
+}
+
+/**
+ * Commande .reset / .revoke (Group Admins / Sudo)
+ * Réinitialise et génère un nouveau lien d'invitation officiel pour le groupe
+ */
+async function handleResetInviteLinkCommand(sock, jid, senderIsAdmin, senderIsSudo) {
+  try {
+    if (!senderIsAdmin && !senderIsSudo) {
+      await sock.sendMessage(jid, { text: '⚠️ *عـذراً!* هذا الأمر مخصص لمشرفي المجموعة أو مطوري البوت فقط.' });
+      return;
+    }
+
+    if (typeof sock.groupRevokeInvite !== 'function') {
+      await sock.sendMessage(jid, { text: '❌ مـيـزة إعـادة تـعـيـيـن الـرابـط غـيـر مـدعـومـة.' });
+      return;
+    }
+
+    const newCode = await sock.groupRevokeInvite(jid);
+    if (!newCode) {
+      await sock.sendMessage(jid, { text: '❌ تـعـذر تـجـديـد رابـط الـمـجـمـوعـة، تـأكـد مـن أن الـبـوت مـشـرف فـي الـمـجـمـوعـة.' });
+      return;
+    }
+
+    const newInviteLink = `https://chat.whatsapp.com/${newCode}`;
+
+    let text = `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🔗 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+    text += `       🏰 *إمـبـراطـوريـة بـاراديـس* 🏰\n`;
+    text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🔄 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n\n`;
+    text += `🔄 *تـم إعـادة تـعـيـيـن رابـط الـمـجـمـوعـة (Reset Link)* 🔄\n\n`;
+    text += `⋄ تـم إلـغـاء وتـعـطـيـل الـرابـط الـقـديـم نـهـائـيـاً لـمـنـع الـدخـول غـيـر الـمـرغـوب 🚫.\n`;
+    text += `⋄ الـرابـط الـرسـمـي الـجـديـد لـلـمـجـمـوعـة :\n`;
+    text += `  📎 ${newInviteLink}\n\n`;
+    text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚔️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+    text += `       🏰 *PARADIS EMPIRE* 🏰`;
+
+    await sock.sendMessage(jid, { text });
+    logActivity(`[ResetInvite] Lien du groupe ${jid} réinitialisé: ${newInviteLink}`);
+  } catch (err) {
+    console.error('Erreur handleResetInviteLinkCommand:', err);
+    await sock.sendMessage(jid, { text: `❌ تـعـذر إعـادة تـعـيـيـن الـرابـط: ${err.message}` });
   }
 }
 
