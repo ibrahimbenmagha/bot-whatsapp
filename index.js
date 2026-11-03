@@ -3504,7 +3504,6 @@ async function handleScanCommand(sock, jid, groupData, senderIsAdmin, senderIsSu
     text += `       🏰 *إمـبـراطـوريـة بـاراديـس* 🏰\n`;
     text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🔍 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n\n`;
     text += `📊 *تـقـريـر فـحـص الأجـهـزة الـمـرتـبـطـة والـبـوتـات (Scan)* 📊\n\n`;
-    text += `⋄ إجـمـالـي الأعـضـاء الـمـفـحـوصـيـن : *${participants.length}*\n`;
     text += `⋄ الـحـسـابـات الـمـرتـبـطـة بـأجـهـزة / بـوت : *${detected.length}*\n`;
     text += `⋄ حـالـة مـضـاد الـبـوتـات : *${antibotActive ? '🟢 مـفـعـل (طـرد تـلـقـائـي)' : '🔴 مـعـطـل (عـرض اسـتـطـلاعـي - بـدون طـرد)'}*\n\n`;
 
@@ -3512,9 +3511,9 @@ async function handleScanCommand(sock, jid, groupData, senderIsAdmin, senderIsSu
     const membersToKick = [];
 
     if (detected.length === 0) {
-      text += `✅ *الـمـجـمـوعـة نـظـيـفـة تـمـامـاً، لا يـوجـد أي حـسـاب مـرتـبـط بـجـهـاز خـارجـي* 🛡️\n\n`;
+      text += `✅ *لا يـوجـد أي حـسـاب مـرتـبـط بـأجـهـزة/بـوت فـي هـذه الـمـجـمـوعـة.* 🛡️\n\n`;
     } else {
-      text += `⚠️ *قـائـمـة الـحـسـابـات الـمـرتـبـطـة الـمـكـتـشـفـة فـقـط* :\n\n`;
+      text += `⚠️ *قـائـمـة الـحـسـابـات الـمـرتـبـطـة الـمـكـتـشـفـة* :\n\n`;
       detected.forEach((item, idx) => {
         const isPermanent = isPermanentWhitelisted(item.phone) || isPermanentWhitelisted(item.rawJid);
         const isWhitelisted = isPermanent || isBotAllowed(jid, item.phone) || isBotAllowed(jid, item.rawJid);
@@ -3535,9 +3534,8 @@ async function handleScanCommand(sock, jid, groupData, senderIsAdmin, senderIsSu
         text += `${idx + 1}️⃣ @${item.phone} (${statusBadge}) ↬ *${item.deviceCount} جهاز مرتبط* 🤖\n`;
         allMentions.push(...item.mentions);
       });
-      text += `\n💡 *مـلاحـظـة* : تـم إظـهـار الـحـسـابـات الـمـرتـبـطـة فـقـط وإخـفـاء الـحـسـابـات الـسـلـيـمـة تـلـقـائـيـاً.\n`;
       if (!antibotActive) {
-        text += `ℹ️ *مـضـاد الـبـوتـات مـعـطـل* : هـذا الـفـحـص اسـتـطـلاعـي فـقـط، لـن يـتـم طـرد أي عـضـو حـتـى تـفـعـل الـنـظـام بـأمـر *.antibot on*.\n`;
+        text += `\nℹ️ *مـضـاد الـبـوتـات مـعـطـل* : هـذا الـفـحـص اسـتـطـلاعـي فـقـط، لـن يـتـم طـرد أي عـضـو حـتـى تـفـعـل الـنـظـام بـأمـر *.antibot on*.\n`;
       }
       text += `\n`;
     }
@@ -4023,9 +4021,11 @@ function parseRequestIndices(argsString, totalRequests) {
   return Array.from(selectedIndices).sort((a, b) => a - b);
 }
 
+const lastDisplayedRequests = new Map();
+
 /**
  * Commande .requests / .طلبات (Group Admins / Sudo)
- * Affiche la liste des demandes d'adhésion en attente avec résolution complète des LIDs en vrais numéros
+ * Affiche UNIQUEMENT les demandes d'adhésion liées à des appareils/bots avec résolution des numéros
  */
 async function handleJoinRequestsListCommand(sock, jid, senderIsAdmin, senderIsSudo) {
   try {
@@ -4038,19 +4038,16 @@ async function handleJoinRequestsListCommand(sock, jid, senderIsAdmin, senderIsS
       return;
     }
 
-    await sock.sendMessage(jid, { text: '🔍 *جـاري فـحـص طـلـبـات الانـضـمـام الـمـعـلـقـة وتـحـلـيـل الـبـوتـات...*' });
+    await sock.sendMessage(jid, { text: '🔍 *جـاري فـحـص طـلـبـات الانـضـمـام لـكـشـف الـحـسـابـات الـمـرتـبـطـة بـأجـهـزة/بـوت...*' });
 
     const rawRequests = await sock.groupRequestParticipantsList(jid).catch(() => []);
     if (!rawRequests || rawRequests.length === 0) {
+      lastDisplayedRequests.set(jid, []);
       await sock.sendMessage(jid, { text: 'ℹ️ لا تـوجـد أي طـلـبـات انـضـمـام مـعـلـقـة حـالـيـاً فـي هـذه الـمـجـمـوعـة.' });
       return;
     }
 
-    let text = `⎔⋅• ━ ╼━ ╼╃ ⌬〔 📋 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
-    text += `       🏰 *إمـبـراطـوريـة بـاراديـس* 🏰\n`;
-    text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 📋 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n\n`;
-    text += `📥 *قـائـمـة طـلـبـات الانـضـمـام الـمـعـلـقـة (${rawRequests.length})* 📥\n\n`;
-
+    const linkedRequests = [];
     const allMentions = [];
 
     for (let i = 0; i < rawRequests.length; i++) {
@@ -4079,38 +4076,67 @@ async function handleJoinRequestsListCommand(sock, jid, senderIsAdmin, senderIsS
         phone = (rawJid || '').split('@')[0].split(':')[0];
       }
 
-      const check = await checkUserHasLinkedDevices(sock, rawJid);
+      const targetPhoneJid = phone ? `${phone}@s.whatsapp.net` : rawJid;
+      const check = await checkUserHasLinkedDevices(sock, targetPhoneJid);
+
+      // Filtrer : garder UNIQUEMENT les comptes qui ont des appareils liés / bot (ignorer les comptes safe)
+      if (!check.hasLinked) {
+        continue;
+      }
+
       const isPermanent = isPermanentWhitelisted(rawJid) || isPermanentWhitelisted(phone);
       const isWhitelisted = isPermanent || isBotAllowed(jid, rawJid) || isBotAllowed(jid, phone);
 
       let badge = '';
-      if (check.hasLinked) {
-        if (isPermanent) {
-          badge = `🤖 *مـرتـبـط بـبـوت (${check.count} أجهزة)* ↬ 🛡️ [قائمة بيضاء دائمة - ثقة 100%]`;
-        } else if (isWhitelisted) {
-          badge = `🤖 *مـرتـبـط بـبـوت (${check.count} أجهزة)* ↬ 🛡️ [مسموح في الـ Whitelist]`;
-        } else {
-          badge = `🤖 *مـرتـبـط بـبـوت (${check.count} أجهزة)* ↬ ⚠️ [سـيـطـرد إذا قـبـلـتـه]`;
-        }
+      if (isPermanent) {
+        badge = `🤖 *مـرتـبـط بـبـوت (${check.count} أجهزة)* ↬ 🛡️ [قائمة بيضاء دائمة - ثقة 100%]`;
+      } else if (isWhitelisted) {
+        badge = `🤖 *مـرتـبـط بـبـوت (${check.count} أجهزة)* ↬ 🛡️ [مسموح في الـ Whitelist]`;
       } else {
-        badge = `👤 *حـسـاب عـادي نـظـيـف (0 أجهزة)* ✅`;
+        badge = `🤖 *مـرتـبـط بـبـوت (${check.count} أجهزة)* ↬ ⚠️ [سـيـطـرد إذا قـبـلـتـه]`;
       }
 
-      text += `${i + 1}️⃣ @${phone}\n`;
-      text += `   ⋄ الـحـالـة : ${badge}\n`;
-      text += `   ⋄ لـلـقـبـول : *.accept ${i + 1}* | لـلـرفـض : *.reject ${i + 1}*\n\n`;
+      const displayIdx = linkedRequests.length + 1;
+      linkedRequests.push({
+        displayIndex: displayIdx,
+        rawReq: req,
+        targetJid: rawJid,
+        phone: phone,
+        deviceCount: check.count,
+        badge: badge
+      });
+    }
 
-      allMentions.push(`${phone}@s.whatsapp.net`);
-      if (rawJid && rawJid !== `${phone}@s.whatsapp.net`) {
-        allMentions.push(rawJid);
+    lastDisplayedRequests.set(jid, linkedRequests);
+
+    if (linkedRequests.length === 0) {
+      await sock.sendMessage(jid, { 
+        text: `✅ *لا تـوجـد أي حـسـابـات مـرتـبـطـة بـأجـهـزة/بـوتـات فـي طـلـبـات الانـضـمـام الـمـعـلـقـة.* 🛡️` 
+      });
+      return;
+    }
+
+    let text = `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🤖 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+    text += `       🏰 *إمـبـراطـوريـة بـاراديـس* 🏰\n`;
+    text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🤖 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n\n`;
+    text += `📥 *طـلـبـات الانـضـمـام الـمـرتـبـطـة بـأجـهـزة / بـوتـات (${linkedRequests.length})* 📥\n\n`;
+
+    for (const item of linkedRequests) {
+      text += `${item.displayIndex}️⃣ @${item.phone}\n`;
+      text += `   ⋄ الـحـالـة : ${item.badge}\n`;
+      text += `   ⋄ لـلـقـبـول : *.accept ${item.displayIndex}* | لـلـرفـض : *.reject ${item.displayIndex}*\n\n`;
+
+      allMentions.push(`${item.phone}@s.whatsapp.net`);
+      if (item.targetJid && item.targetJid !== `${item.phone}@s.whatsapp.net`) {
+        allMentions.push(item.targetJid);
       }
     }
 
-    text += `💡 *خـيـارات الـقـبـول والـرفـض الـذكـيـة* :\n`;
+    text += `💡 *خـيـارات الـمـعـالـجـة الـسـريـعـة* :\n`;
     text += `⋄ طـلـب واحـد : *.accept 1* أو *.reject 1*\n`;
-    text += `⋄ عـدة طـلـبـات : *.accept 1 2 5 8* أو *.reject 1 2 5 8*\n`;
-    text += `⋄ مـجـال كـامـل : *.accept 1,5* (يـقـبـل مـن 1 إلـى 5)\n`;
-    text += `⋄ كـافـة الـطـلـبـات : *.accept all* أو *.reject all*\n\n`;
+    text += `⋄ عـدة طـلـبـات : *.accept 1 2 5* أو *.reject 1 2 5*\n`;
+    text += `⋄ مـجـال كـامـل : *.accept 1,5* (يـعـالـج مـن 1 إلـى 5)\n`;
+    text += `⋄ كـافـة الـحـسـابـات الـمـرتـبـطـة : *.accept all* أو *.reject all*\n\n`;
     text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚔️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
     text += `       🏰 *PARADIS EMPIRE SECURITY* 🏰`;
 
@@ -4151,6 +4177,7 @@ async function handleJoinRequestActionCommand(sock, jid, messageText, action, se
 
     const requests = await sock.groupRequestParticipantsList(jid).catch(() => []);
     if (!requests || requests.length === 0) {
+      lastDisplayedRequests.set(jid, []);
       await sock.sendMessage(jid, { text: 'ℹ️ لا تـوجـد أي طـلـبـات انـضـمـام مـعـلـقـة حـالـيـاً فـي هـذه الـمـجـمـوعـة.' });
       return;
     }
@@ -4162,51 +4189,65 @@ async function handleJoinRequestActionCommand(sock, jid, messageText, action, se
     const targetTags = [];
     const mentions = [];
 
+    const displayed = lastDisplayedRequests.get(jid) || [];
+
     // 1. Vérifier si l'utilisateur a passé un numéro de téléphone complet direct (ex: 2126xxxxxxxx)
     const directNumber = rawArgs.replace(/[^0-9]/g, '');
     if (directNumber.length >= 7 && !rawArgs.includes(' ') && !rawArgs.includes(',')) {
-      // Trouver la demande correspondante
-      const found = requests.find((r) => {
-        const raw = r.jid || r.id || '';
-        const p = resolveRealPhoneNumber(raw);
-        return p === directNumber || raw.includes(directNumber);
-      });
-
-      const targetJid = found ? (found.jid || found.id) : `${directNumber}@s.whatsapp.net`;
+      // Trouver la demande correspondante dans displayed ou requests
+      const foundInDisplayed = displayed.find((d) => d.phone === directNumber || (d.targetJid && d.targetJid.includes(directNumber)));
+      let targetJid = null;
+      if (foundInDisplayed) {
+        targetJid = foundInDisplayed.targetJid;
+      } else {
+        const found = requests.find((r) => {
+          const raw = r.jid || r.id || '';
+          const p = resolveRealPhoneNumber(raw);
+          return p === directNumber || raw.includes(directNumber);
+        });
+        targetJid = found ? (found.jid || found.id) : `${directNumber}@s.whatsapp.net`;
+      }
       jidsToProcess.push(targetJid);
       targetTags.push(`@${directNumber}`);
       mentions.push(targetJid, `${directNumber}@s.whatsapp.net`);
     } else {
       // 2. Traitement par indices (1, 1 2, 1,5, all, etc.)
-      const selectedIndices = parseRequestIndices(rawArgs, requests.length);
+      const sourceList = (displayed.length > 0) ? displayed : requests;
+      const selectedIndices = parseRequestIndices(rawArgs, sourceList.length);
 
       if (selectedIndices.length === 0) {
         await sock.sendMessage(jid, { 
-          text: `❌ *لـم يـتـم الـعـثـور عـلـى أي طـلـب بـالـرقـم الـمـحـدد.* (الـطـلـبـات الـمـتـوفـرة مـن 1 إلـى ${requests.length})\n` +
+          text: `❌ *لـم يـتـم الـعـثـور عـلـى أي طـلـب بـالـرقـم الـمـحـدد.* (الـطـلـبـات الـمـتـوفـرة مـن 1 إلـى ${sourceList.length})\n` +
                 `⋄ اكـتـب *.requests* لـعـرض قـائـمـة الـطـلـبـات والـتـرتـيـب.` 
         });
         return;
       }
 
       for (const idx of selectedIndices) {
-        const req = requests[idx];
-        if (!req) continue;
+        const item = sourceList[idx];
+        if (!item) continue;
 
-        const targetJid = req.jid || req.id;
-        let phone = req.phone_number || req.phoneNumber || req.phone || req.user || req.sender_pn;
-        if (phone) {
-          phone = String(phone).split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
-        }
-        if (!phone) {
-          phone = resolveRealPhoneNumber(targetJid);
-        }
-        if (!phone) {
-          phone = targetJid.split('@')[0].split(':')[0];
-        }
+        if (displayed.length > 0) {
+          jidsToProcess.push(item.targetJid);
+          targetTags.push(`@${item.phone}`);
+          mentions.push(item.targetJid, `${item.phone}@s.whatsapp.net`);
+        } else {
+          const targetJid = item.jid || item.id;
+          let phone = item.phone_number || item.phoneNumber || item.phone || item.user || item.sender_pn;
+          if (phone) {
+            phone = String(phone).split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
+          }
+          if (!phone) {
+            phone = resolveRealPhoneNumber(targetJid);
+          }
+          if (!phone) {
+            phone = targetJid.split('@')[0].split(':')[0];
+          }
 
-        jidsToProcess.push(targetJid);
-        targetTags.push(`@${phone}`);
-        mentions.push(targetJid, `${phone}@s.whatsapp.net`);
+          jidsToProcess.push(targetJid);
+          targetTags.push(`@${phone}`);
+          mentions.push(targetJid, `${phone}@s.whatsapp.net`);
+        }
       }
     }
 
@@ -4217,6 +4258,13 @@ async function handleJoinRequestActionCommand(sock, jid, messageText, action, se
 
     // Exécuter l'action sur WhatsApp
     await sock.groupRequestParticipantsUpdate(jid, jidsToProcess, actType);
+
+    // Mettre à jour lastDisplayedRequests pour retirer les JIDs traités
+    if (displayed.length > 0) {
+      const remaining = displayed.filter((d) => !jidsToProcess.includes(d.targetJid));
+      remaining.forEach((item, i) => { item.displayIndex = i + 1; });
+      lastDisplayedRequests.set(jid, remaining);
+    }
 
     let text = `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ${actType === 'approve' ? '✅' : '❌'} 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
     text += `       🏰 *إمـبـراطـوريـة بـاراديـس* 🏰\n`;
