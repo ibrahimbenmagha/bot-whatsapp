@@ -37,6 +37,9 @@ import {
   getAllowedBotUsers,
   isAntiSpamEnabled,
   setAntiSpamEnabled,
+  isAntiSpamAddEnabled,
+  setAntiSpamAddEnabled,
+  cleanGroupId,
   isPermanentWhitelisted,
   addPermanentWhitelist,
   removePermanentWhitelist,
@@ -597,9 +600,16 @@ async function handleSessionMessages(botPhone, m) {
 
       if (!trimmedText) continue;
 
-      // 3. Commandes
-      const isCmd = (name) => lowerText === `!${name}` || lowerText === `.${name}` || lowerText === `/${name}`;
-      const startsWithCmd = (name) => lowerText.startsWith(`!${name}`) || lowerText.startsWith(`.${name}`) || lowerText.startsWith(`/${name}`);
+      // 3. Commandes (supporte les préfixes . ! / ainsi que les commandes sans préfixe)
+      const cleanCmdText = lowerText.replace(/^[.!/#]/, '').trim();
+      const isCmd = (name) => {
+        const cleanName = name.replace(/^[.!/#]/, '').trim();
+        return cleanCmdText === cleanName;
+      };
+      const startsWithCmd = (name) => {
+        const cleanName = name.replace(/^[.!/#]/, '').trim();
+        return cleanCmdText === cleanName || cleanCmdText.startsWith(`${cleanName} `);
+      };
       const isPrefixCommand = lowerText.startsWith('.') || lowerText.startsWith('!') || lowerText.startsWith('/');
 
       const senderIsSudo = isFromMe || isSudo(senderId);
@@ -607,7 +617,7 @@ async function handleSessionMessages(botPhone, m) {
 
       // Vérification du Mode Privé (Private Mode): seuls le bot et les sudos peuvent exécuter des commandes
       if (isPrefixCommand && botMode === 'private' && !senderIsSudo) {
-        await reactToMessage(sock, jid, msg.key, '🔒');
+        reactToMessage(sock, jid, msg.key, '🔒');
         await sock.sendMessage(jid, {
           text: `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🔒 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n` +
                 `       🏰 *إمـبـراطـوريـة بـاراديـس* 🏰\n` +
@@ -624,7 +634,7 @@ async function handleSessionMessages(botPhone, m) {
 
       // Commande .status
       if (isCmd('status') || isCmd('info') || isCmd('bot') || isCmd('حالة')) {
-        await reactToMessage(sock, jid, msg.key, '⚡');
+        reactToMessage(sock, jid, msg.key, '⚡');
         await handleStatusCommand(sock, jid, groupData, session);
         continue;
       }
@@ -632,7 +642,7 @@ async function handleSessionMessages(botPhone, m) {
       // Commande .mention / .منشن / .tagall
       if (isCmd('mention') || isCmd('منشن') || isCmd('tagall') || isCmd('الكل') ||
           startsWithCmd('mention') || startsWithCmd('منشن') || startsWithCmd('tagall') || startsWithCmd('الكل')) {
-        await reactToMessage(sock, jid, msg.key, '📢');
+        reactToMessage(sock, jid, msg.key, '📢');
         if (!isGroup) {
           await sock.sendMessage(jid, { text: 'ℹ️ هذه العملية تعمل فقط داخل المجموعات.' });
           continue;
@@ -650,21 +660,21 @@ async function handleSessionMessages(botPhone, m) {
 
       // Commande .menu
       if (isCmd('help') || isCmd('aide') || isCmd('menu') || isCmd('اوامر') || isCmd('الاوامر')) {
-        await reactToMessage(sock, jid, msg.key, '🤖');
+        reactToMessage(sock, jid, msg.key, '🤖');
         await handleHelpCommand(sock, jid, senderIsAdmin, senderId, session, senderIsSudo, msg);
         continue;
       }
 
       // Commande .rulls / .rules
       if (isCmd('rulls') || isCmd('rules') || isCmd('regles') || isCmd('قوانين') || isCmd('القوانين')) {
-        await reactToMessage(sock, jid, msg.key, '📜');
+        reactToMessage(sock, jid, msg.key, '📜');
         await handleRulesCommand(sock, jid);
         continue;
       }
 
       // Commande .warnings
       if (startsWithCmd('warnings') || startsWithCmd('warns') || startsWithCmd('انذارات') || startsWithCmd('انذاراتي')) {
-        await reactToMessage(sock, jid, msg.key, '📋');
+        reactToMessage(sock, jid, msg.key, '📋');
         if (!isGroup) {
           await sock.sendMessage(jid, { text: 'ℹ️ Cette commande fonctionne uniquement dans un groupe.' });
           continue;
@@ -675,7 +685,7 @@ async function handleSessionMessages(botPhone, m) {
 
       // Commande .warn (Admins / Sudo)
       if ((startsWithCmd('warn ') || startsWithCmd('انذار ')) && (senderIsAdmin || senderIsSudo)) {
-        await reactToMessage(sock, jid, msg.key, '⚠️');
+        reactToMessage(sock, jid, msg.key, '⚠️');
         if (!isGroup) {
           await sock.sendMessage(jid, { text: 'ℹ️ Cette commande fonctionne uniquement dans un groupe.' });
           continue;
@@ -686,7 +696,7 @@ async function handleSessionMessages(botPhone, m) {
 
       // Commande .resetwarn (Admins / Sudo)
       if ((startsWithCmd('resetwarn') || startsWithCmd('تصفير')) && (senderIsAdmin || senderIsSudo)) {
-        await reactToMessage(sock, jid, msg.key, '🔄');
+        reactToMessage(sock, jid, msg.key, '🔄');
         if (!isGroup) {
           await sock.sendMessage(jid, { text: 'ℹ️ Cette commande fonctionne uniquement dans un groupe.' });
           continue;
@@ -697,7 +707,7 @@ async function handleSessionMessages(botPhone, m) {
 
       // Commande .kick (Admins / Sudo)
       if (startsWithCmd('kick') || startsWithCmd('طرد')) {
-        await reactToMessage(sock, jid, msg.key, '🚪');
+        reactToMessage(sock, jid, msg.key, '🚪');
         if (!isGroup) {
           await sock.sendMessage(jid, { text: 'ℹ️ هذه العملية تعمل فقط داخل المجموعات.' });
           continue;
@@ -715,35 +725,35 @@ async function handleSessionMessages(botPhone, m) {
 
       // Commande .mode [public/private] (Sudo / Owner)
       if (startsWithCmd('mode') || startsWithCmd('الوضع')) {
-        await reactToMessage(sock, jid, msg.key, '⚙️');
+        reactToMessage(sock, jid, msg.key, '⚙️');
         await handleModeCommand(sock, jid, messageText, senderIsSudo);
         continue;
       }
 
       // Commande .sudo / .addsudo @user (Sudo / Owner)
       if (startsWithCmd('sudo') || startsWithCmd('addsudo') || startsWithCmd('ترقية_بوت')) {
-        await reactToMessage(sock, jid, msg.key, '🛡️');
+        reactToMessage(sock, jid, msg.key, '🛡️');
         await handleAddSudoCommand(sock, jid, messageText, msg, senderIsSudo);
         continue;
       }
 
       // Commande .delsudo @user (Sudo / Owner)
       if (startsWithCmd('delsudo') || startsWithCmd('removesudo') || startsWithCmd('حذف_مطور')) {
-        await reactToMessage(sock, jid, msg.key, '🗑️');
+        reactToMessage(sock, jid, msg.key, '🗑️');
         await handleRemoveSudoCommand(sock, jid, messageText, msg, senderIsSudo);
         continue;
       }
 
       // Commande .sudolist (Sudo / Owner / All)
       if (isCmd('sudolist') || isCmd('sudos') || isCmd('المطورين') || isCmd('قائمة_المطورين')) {
-        await reactToMessage(sock, jid, msg.key, '👑');
+        reactToMessage(sock, jid, msg.key, '👑');
         await handleSudoListCommand(sock, jid);
         continue;
       }
 
       // Commande .promote @user (Group Admins / Sudo)
       if (startsWithCmd('promote') || startsWithCmd('ترقية')) {
-        await reactToMessage(sock, jid, msg.key, '🎖️');
+        reactToMessage(sock, jid, msg.key, '🎖️');
         if (!isGroup) {
           await sock.sendMessage(jid, { text: 'ℹ️ هذه العملية تعمل فقط داخل المجموعات.' });
           continue;
@@ -758,7 +768,7 @@ async function handleSessionMessages(botPhone, m) {
 
       // Commande .demoteall (Strictement réservé au compte bot lui-même)
       if (isCmd('demoteall') || startsWithCmd('demoteall') || isCmd('تنزيل_الكل') || startsWithCmd('تنزيل_الكل')) {
-        await reactToMessage(sock, jid, msg.key, '🧹');
+        reactToMessage(sock, jid, msg.key, '🧹');
         if (!isGroup) {
           await sock.sendMessage(jid, { text: 'ℹ️ هذه العملية تعمل فقط داخل المجموعات.' });
           continue;
@@ -776,7 +786,7 @@ async function handleSessionMessages(botPhone, m) {
 
       // Commande .demote @user (Group Admins / Sudo)
       if ((startsWithCmd('demote') && !startsWithCmd('demoteall')) || (startsWithCmd('تنزيل') && !startsWithCmd('تنزيل_الكل'))) {
-        await reactToMessage(sock, jid, msg.key, '⬇️');
+        reactToMessage(sock, jid, msg.key, '⬇️');
         if (!isGroup) {
           await sock.sendMessage(jid, { text: 'ℹ️ هذه العملية تعمل فقط داخل المجموعات.' });
           continue;
@@ -789,9 +799,20 @@ async function handleSessionMessages(botPhone, m) {
         continue;
       }
 
+      // Commande .antispamadd [on/off] (Group Admins / Sudo)
+      if (startsWithCmd('antispamadd') || startsWithCmd('مضاد_الإضافات')) {
+        reactToMessage(sock, jid, msg.key, '🛡️');
+        if (!isGroup) {
+          await sock.sendMessage(jid, { text: 'ℹ️ هذه العملية تعمل فقط داخل المجموعات.' });
+          continue;
+        }
+        await handleAntiSpamAddToggleCommand(sock, jid, messageText, senderIsAdmin, senderIsSudo);
+        continue;
+      }
+
       // Commande .antibot [on/off] (Group Admins / Sudo)
-      if (startsWithCmd('antibot') || startsWithCmd('مضاد_البوتات') || lowerText === 'antibot on' || lowerText === 'antibot off') {
-        await reactToMessage(sock, jid, msg.key, '🤖');
+      if (startsWithCmd('antibot') || startsWithCmd('مضاد_البوتات')) {
+        reactToMessage(sock, jid, msg.key, '🤖');
         if (!isGroup) {
           await sock.sendMessage(jid, { text: 'ℹ️ هذه العملية تعمل فقط داخل المجموعات.' });
           continue;
@@ -801,8 +822,8 @@ async function handleSessionMessages(botPhone, m) {
       }
 
       // Commande .antispam [on/off] (Group Admins / Sudo)
-      if (startsWithCmd('antispam') || startsWithCmd('مضاد_السبام') || lowerText === 'antispam on' || lowerText === 'antispam off') {
-        await reactToMessage(sock, jid, msg.key, '🚨');
+      if (startsWithCmd('antispam') || startsWithCmd('مضاد_السبام')) {
+        reactToMessage(sock, jid, msg.key, '🚨');
         if (!isGroup) {
           await sock.sendMessage(jid, { text: 'ℹ️ هذه العملية تعمل فقط داخل المجموعات.' });
           continue;
@@ -813,7 +834,7 @@ async function handleSessionMessages(botPhone, m) {
 
       // Commande .scan (Group Admins / Sudo)
       if (isCmd('scan') || startsWithCmd('scan') || isCmd('فحص') || startsWithCmd('فحص') || isCmd('سكان') || startsWithCmd('سكان')) {
-        await reactToMessage(sock, jid, msg.key, '🔍');
+        reactToMessage(sock, jid, msg.key, '🔍');
         if (!isGroup) {
           await sock.sendMessage(jid, { text: 'ℹ️ هذه العملية تعمل فقط داخل المجموعات.' });
           continue;
@@ -824,7 +845,7 @@ async function handleSessionMessages(botPhone, m) {
 
       // Commande .antilink [on/off] (Group Admins / Sudo)
       if (startsWithCmd('antilink') || startsWithCmd('مضاد_الروابط')) {
-        await reactToMessage(sock, jid, msg.key, '🛡️');
+        reactToMessage(sock, jid, msg.key, '🛡️');
         if (!isGroup) {
           await sock.sendMessage(jid, { text: 'ℹ️ هذه العملية تعمل فقط داخل المجموعات.' });
           continue;
@@ -835,7 +856,7 @@ async function handleSessionMessages(botPhone, m) {
 
       // Commande .allowlink / .allowlinks @user (Group Admins / Sudo)
       if (startsWithCmd('allowlink') || startsWithCmd('allowlinks') || startsWithCmd('سماح_روابط')) {
-        await reactToMessage(sock, jid, msg.key, '🔗');
+        reactToMessage(sock, jid, msg.key, '🔗');
         if (!isGroup) {
           await sock.sendMessage(jid, { text: 'ℹ️ هذه العملية تعمل فقط داخل المجموعات.' });
           continue;
@@ -846,7 +867,7 @@ async function handleSessionMessages(botPhone, m) {
 
       // Commande .disallowlink / .dellink @user (Group Admins / Sudo)
       if (startsWithCmd('disallowlink') || startsWithCmd('dellink') || startsWithCmd('منع_روابط')) {
-        await reactToMessage(sock, jid, msg.key, '🚫');
+        reactToMessage(sock, jid, msg.key, '🚫');
         if (!isGroup) {
           await sock.sendMessage(jid, { text: 'ℹ️ هذه العملية تعمل فقط داخل المجموعات.' });
           continue;
@@ -857,7 +878,7 @@ async function handleSessionMessages(botPhone, m) {
 
       // Commande .allowedlinks / .allowlinklist (Group Admins / Sudo / All)
       if (isCmd('allowedlinks') || isCmd('allowlinklist') || isCmd('قائمة_الروابط')) {
-        await reactToMessage(sock, jid, msg.key, '📋');
+        reactToMessage(sock, jid, msg.key, '📋');
         if (!isGroup) {
           await sock.sendMessage(jid, { text: 'ℹ️ هذه العملية تعمل فقط داخل المجموعات.' });
           continue;
@@ -868,7 +889,7 @@ async function handleSessionMessages(botPhone, m) {
 
       // Commande .allowbot / .allowbots @user / number (Group Admins / Sudo)
       if (startsWithCmd('allowbot') || startsWithCmd('allowbots') || startsWithCmd('سماح_بوت') || startsWithCmd('سماح_البوت')) {
-        await reactToMessage(sock, jid, msg.key, '🛡️');
+        reactToMessage(sock, jid, msg.key, '🛡️');
         if (!isGroup) {
           await sock.sendMessage(jid, { text: 'ℹ️ هذه العملية تعمل فقط داخل المجموعات.' });
           continue;
@@ -879,7 +900,7 @@ async function handleSessionMessages(botPhone, m) {
 
       // Commande .disallowbot / .delbot @user / number (Group Admins / Sudo)
       if (startsWithCmd('disallowbot') || startsWithCmd('delbot') || startsWithCmd('منع_بوت') || startsWithCmd('حذف_بوت')) {
-        await reactToMessage(sock, jid, msg.key, '🚫');
+        reactToMessage(sock, jid, msg.key, '🚫');
         if (!isGroup) {
           await sock.sendMessage(jid, { text: 'ℹ️ هذه العملية تعمل فقط داخل المجموعات.' });
           continue;
@@ -890,7 +911,7 @@ async function handleSessionMessages(botPhone, m) {
 
       // Commande .allowedbots / .botwhitelist (Group Admins / Sudo / All)
       if (isCmd('allowedbots') || isCmd('botwhitelist') || isCmd('قائمة_البوتات') || isCmd('المسموح_لهم_بوت')) {
-        await reactToMessage(sock, jid, msg.key, '📋');
+        reactToMessage(sock, jid, msg.key, '📋');
         if (!isGroup) {
           await sock.sendMessage(jid, { text: 'ℹ️ هذه العملية تعمل فقط داخل المجموعات.' });
           continue;
@@ -901,28 +922,28 @@ async function handleSessionMessages(botPhone, m) {
 
       // Commande .trust / .ثقة @user / number (Group Admins / Sudo)
       if (startsWithCmd('trust') || startsWithCmd('ثقة') || startsWithCmd('trustbot') || startsWithCmd('ثقة_بوت')) {
-        await reactToMessage(sock, jid, msg.key, '🌟');
+        reactToMessage(sock, jid, msg.key, '🌟');
         await handleTrustCommand(sock, jid, messageText, msg, senderIsAdmin, senderIsSudo);
         continue;
       }
 
       // Commande .untrust / .deltrust @user / number (Group Admins / Sudo)
       if (startsWithCmd('untrust') || startsWithCmd('حذف_ثقة') || startsWithCmd('الغاء_ثقة')) {
-        await reactToMessage(sock, jid, msg.key, '🚫');
+        reactToMessage(sock, jid, msg.key, '🚫');
         await handleUntrustCommand(sock, jid, messageText, msg, senderIsAdmin, senderIsSudo);
         continue;
       }
 
       // Commande .trustlist / .trusted (Group Admins / Sudo / All)
       if (isCmd('trustlist') || isCmd('trusted') || isCmd('قائمة_الثقة') || isCmd('الموثوقين')) {
-        await reactToMessage(sock, jid, msg.key, '🌟');
+        reactToMessage(sock, jid, msg.key, '🌟');
         await handleTrustListCommand(sock, jid);
         continue;
       }
 
       // Commande .requests / .طلبات (Group Admins / Sudo)
       if (isCmd('requests') || isCmd('طلبات') || startsWithCmd('requests') || startsWithCmd('طلبات')) {
-        await reactToMessage(sock, jid, msg.key, '📥');
+        reactToMessage(sock, jid, msg.key, '📥');
         if (!isGroup) {
           await sock.sendMessage(jid, { text: 'ℹ️ هذه العملية تعمل فقط داخل المجموعات.' });
           continue;
@@ -933,7 +954,7 @@ async function handleSessionMessages(botPhone, m) {
 
       // Commande .accept [number] / .قبول (Group Admins / Sudo)
       if (startsWithCmd('accept') || startsWithCmd('قبول') || startsWithCmd('وافق')) {
-        await reactToMessage(sock, jid, msg.key, '✅');
+        reactToMessage(sock, jid, msg.key, '✅');
         if (!isGroup) {
           await sock.sendMessage(jid, { text: 'ℹ️ هذه العملية تعمل فقط داخل المجموعات.' });
           continue;
@@ -944,7 +965,7 @@ async function handleSessionMessages(botPhone, m) {
 
       // Commande .reject [number] / .رفض (Group Admins / Sudo)
       if (startsWithCmd('reject') || startsWithCmd('رفض')) {
-        await reactToMessage(sock, jid, msg.key, '❌');
+        reactToMessage(sock, jid, msg.key, '❌');
         if (!isGroup) {
           await sock.sendMessage(jid, { text: 'ℹ️ هذه العملية تعمل فقط داخل المجموعات.' });
           continue;
@@ -955,7 +976,7 @@ async function handleSessionMessages(botPhone, m) {
 
       // Commande .close / .lock / .قفل (Group Admins / Sudo)
       if (isCmd('close') || isCmd('lock') || isCmd('قفل') || isCmd('غلق')) {
-        await reactToMessage(sock, jid, msg.key, '🔒');
+        reactToMessage(sock, jid, msg.key, '🔒');
         if (!isGroup) {
           await sock.sendMessage(jid, { text: 'ℹ️ هذه العملية تعمل فقط داخل المجموعات.' });
           continue;
@@ -975,7 +996,7 @@ async function handleSessionMessages(botPhone, m) {
 
       // Commande .open / .unlock / .فتح (Group Admins / Sudo)
       if (isCmd('open') || isCmd('unlock') || isCmd('فتح')) {
-        await reactToMessage(sock, jid, msg.key, '🔓');
+        reactToMessage(sock, jid, msg.key, '🔓');
         if (!isGroup) {
           await sock.sendMessage(jid, { text: 'ℹ️ هذه العملية تعمل فقط داخل المجموعات.' });
           continue;
@@ -996,7 +1017,7 @@ async function handleSessionMessages(botPhone, m) {
       // 4. Commande inconnue / inexistante (ex: .xyz)
       // "si quelqu un utilise . avec commnde qui n existe pas ile repond avec (هدشي واللهم كين) avec le audio Shubady"
       if (isPrefixCommand && trimmedText.length > 1 && !trimmedText.startsWith('..') && !trimmedText.startsWith('...')) {
-        await reactToMessage(sock, jid, msg.key, '❓');
+        reactToMessage(sock, jid, msg.key, '❓');
         await sock.sendMessage(jid, { 
           text: 'هدشي واللهم كين' 
         }, { quoted: msg });
@@ -1564,12 +1585,42 @@ async function handleGroupParticipantsSecurity(botPhone, sock, update) {
     const { id: jid, participants, action, author } = update;
     if (!jid || action !== 'add' || !participants || participants.length === 0) return;
 
+    // 0. Le module Anti-Spam Add (Tabneed / Flood d'ajouts) est désactivé par défaut
+    // et ne s'exécute que s'il est explicitement activé (.antispamadd on)
+    if (!isAntiSpamAddEnabled(jid)) {
+      return;
+    }
+
     const botNumber = (sock.user?.id || '').split('@')[0].split(':')[0];
     const authorJid = author ? normalizeJid(author) : null;
     const authorNumber = authorJid ? authorJid.split('@')[0].split(':')[0] : null;
 
-    // Si l'auteur est le bot lui-même ou un compte sudo, ignorer
-    if (!authorNumber || authorNumber === botNumber || isSelfUser(sock, authorJid) || (authorJid && isSudo(authorJid))) {
+    // Si l'auteur est le bot lui-même ou un compte sudo ou whitelisté, ignorer totalement
+    if (!authorNumber || authorNumber === botNumber || isSelfUser(sock, authorJid)) {
+      return;
+    }
+
+    if (isSudo(authorJid) || isPermanentWhitelisted(authorNumber) || isPermanentWhitelisted(authorJid)) {
+      return;
+    }
+
+    // Récupérer les métadonnées du groupe pour vérifier si l'auteur est admin ou propriétaire
+    let groupData = null;
+    try {
+      groupData = await getGroupDataSafely(sock, jid);
+    } catch (_) {}
+
+    const authorParticipant = groupData?.participants?.find((p) => {
+      const pNum = (p.id || p.jid || '').split('@')[0].split(':')[0];
+      return pNum === authorNumber;
+    });
+
+    const isAuthorAdmin = authorParticipant?.admin === 'admin' || authorParticipant?.admin === 'superadmin';
+    const isAuthorOwner = groupData?.owner && groupData.owner.split('@')[0].split(':')[0] === authorNumber;
+
+    // RÈGLE ABSOLUE : Les administrateurs et le créateur du groupe ne doivent JAMAIS être expulsés ou bloqués
+    // lorsqu'ils acceptent des demandes d'adhésion (join requests) ou ajoutent des membres !
+    if (isAuthorAdmin || isAuthorOwner) {
       return;
     }
 
@@ -1640,9 +1691,8 @@ async function handleGroupParticipantsSecurity(botPhone, sock, update) {
     } catch (_) {}
 
     // 6. Récupérer les admins pour mention
-    let groupData = null;
     try {
-      groupData = await sock.groupMetadata(jid);
+      if (!groupData) groupData = await sock.groupMetadata(jid);
     } catch (_) {}
 
     const adminParticipants = groupData?.participants?.filter((p) => {
@@ -2212,9 +2262,10 @@ async function handleHelpCommand(sock, jid, isAdminUser, senderId = null, sessio
 `│ ⋄ *.requests* ⇠ فـحـص طـلـبـات الانـضـمـام وكـشـف الـبـوتـات 📥\n` +
 `│ ⋄ *.antibot [on/off]* ⇠ تـفـعـيـل أو تـعـطـيـل طـرد الـبـوتـات تـلـقـائـيـاً 🤖\n` +
 `│ ⋄ *.antispam [on/off]* ⇠ تـفـعـيـل أو تـعـطـيـل مـضـاد تـحـويـل الـسـبـام 🚨\n` +
-`│ ⋄ *.allowbot @عضو* ⇠ الـسـمـاح لـعـضـو بـاسـتـخـدام بـوت/ويـب 🛡️\n` +
-`│ ⋄ *.disallowbot @عضو* ⇠ إلـغـاء سـمـاح الـبـوت/ويـب 🚫\n` +
-`│ ⋄ *.allowedbots* ⇠ قـائـمـة الـمـصـرح لـهـم بـالـبـوت والـويـب 📋\n` +
+`│ ⋄ *.antispamadd [on/off]* ⇠ حـمـايـة مـن سـبـام الإضـافـات وأرقـام الـتـبـنـيـد 🛡️\n` +
+`│ ⋄ *.allowbot @عضو* ⇠ الـسـمـاح لـعـضـو بـاسـتـخـدام بـوت/ويـب (عـالـمـيـاً) 🌐\n` +
+`│ ⋄ *.disallowbot @عضو* ⇠ إلـغـاء سـمـاح الـبـوت/ويـب (عـالـمـيـاً) 🚫\n` +
+`│ ⋄ *.allowedbots* ⇠ قـائـمـة الـمـصـرح لـهـم بـالـبـوت والـويـب عـالـمـيـاً 📋\n` +
 `│ ⋄ *.trust @عضو* ⇠ إضـافـة لـلـقـائـمـة الـبـيـضـاء الـدائـمـة (ثـقـة 100%) 🌟\n` +
 `│ ⋄ *.untrust @عضو* ⇠ إلـغـاء الـثـقـة الـدائـمـة 🚫\n` +
 `│ ⋄ *.trustlist* ⇠ قـائـمـة الأعـضـاء الـمـوثـوقـيـن دائـمـاً 🌟\n` +
@@ -3086,6 +3137,65 @@ async function handleAntiSpamToggleCommand(sock, jid, messageText, senderIsAdmin
 }
 
 /**
+ * Commande .antispamadd on / .antispamadd off (Group Admins / Sudo)
+ * Protège le groupe contre les attaques par flood d'ajouts de membres (Add-to-Group Spam / Tabneed)
+ */
+async function handleAntiSpamAddToggleCommand(sock, jid, messageText, senderIsAdmin, senderIsSudo) {
+  try {
+    if (!senderIsAdmin && !senderIsSudo) {
+      await sock.sendMessage(jid, { text: '⚠️ *عـذراً!* هذا الأمر مخصص لمشرفي المجموعة أو مطوري البوت فقط.' });
+      return;
+    }
+
+    const words = messageText.trim().split(/\s+/);
+    const arg = (words[1] || '').toLowerCase();
+
+    if (arg === 'on' || arg === 'تشغيل' || arg === 'تفعيل') {
+      setAntiSpamAddEnabled(jid, true);
+      let text = `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🛡️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+      text += `       🏰 *إمـبـراطـوريـة بـاراديـس* 🏰\n`;
+      text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🛡️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n\n`;
+      text += `🛡️ *تـم تـفـعـيـل مـضـاد سـبـام الإضـافـات (Anti-Spam Add ON)*\n\n`;
+      text += `⋄ سـيـتـم رصـد وحـظـر أي هـجـوم إضـافـات مـكـثـف (Add-to-Group Spam) أو أرقـام تـبـنـيـد مـعـاديـة.\n`;
+      text += `⋄ الـمـشـرفـون ومـطـورو الـبـوت والـقـائـمـة الـبـيـضـاء مـسـتـثـنـون تـمـامـاً ومـحـمـيـون ✅.\n\n`;
+      text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚔️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+      text += `       🏰 *PARADIS EMPIRE* 🏰`;
+      await sock.sendMessage(jid, { text });
+      logActivity(`[AntiSpamAdd] Activé dans ${jid}`);
+      return;
+    }
+
+    if (arg === 'off' || arg === 'تعطيل' || arg === 'ايقاف') {
+      setAntiSpamAddEnabled(jid, false);
+      let text = `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚠️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+      text += `       🏰 *إمـبـراطـوريـة بـاراديـس* 🏰\n`;
+      text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚠️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n\n`;
+      text += `⚠️ *تـم إيـقـاف مـضـاد سـبـام الإضـافـات (Anti-Spam Add OFF)*\n\n`;
+      text += `⋄ يـمـكـن لـلـمـشـرفـيـن قـبـول كـافـة طـلـبـات الانـضـمـام وإضـافـة الأعـضـاء بـحـريـة تـامـة.\n\n`;
+      text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚔️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+      text += `       🏰 *PARADIS EMPIRE* 🏰`;
+      await sock.sendMessage(jid, { text });
+      logActivity(`[AntiSpamAdd] Désactivé dans ${jid}`);
+      return;
+    }
+
+    // Afficher statut actuel
+    const currentStatus = isAntiSpamAddEnabled(jid);
+    let text = `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🛡️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+    text += `       🏰 *إمـبـراطـوريـة بـاراديـس* 🏰\n`;
+    text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🛡️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n\n`;
+    text += `🛡️ *حـالـة مـضـاد سـبـام الإضـافـات* : ${currentStatus ? '🟢 مـفـعـل (ON)' : '🔴 مـعـطـل (OFF)'}\n\n`;
+    text += `⋄ لـلـتـفـعـيـل : *.antispamadd on*\n`;
+    text += `⋄ لـلـتـعـطـيـل : *.antispamadd off*\n\n`;
+    text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚔️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+    text += `       🏰 *PARADIS EMPIRE* 🏰`;
+    await sock.sendMessage(jid, { text });
+  } catch (err) {
+    console.error('Erreur handleAntiSpamAddToggleCommand:', err);
+  }
+}
+
+/**
  * Commande .scan (Group Admins / Sudo)
  * Scanne tous les membres du groupe pour détecter ceux qui ont lié leur WhatsApp à un appareil/bot
  * Affiche UNIQUEMENT les personnes détectées avec leur numéro réel (aucun ID/LID, aucun membre safe)
@@ -3443,14 +3553,15 @@ async function handleAllowBotCommand(sock, jid, messageText, msg, senderIsAdmin,
     let text = `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🛡️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
     text += `       🏰 *إمـبـراطـوريـة بـاراديـس* 🏰\n`;
     text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🛡️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n\n`;
-    text += `🛡️ *تـمـت الإضـافـة لـلـقـائـمـة الـبـيـضـاء لـمـضـاد الـبـوتـات (Whitelist)*\n\n`;
+    text += `🛡️ *تـمـت الإضـافـة لـلـقـائـمـة الـبـيـضـاء الـشـامـلـة (Global Whitelist)*\n\n`;
     text += `⋄ الـعـضـو : ${resolved.tag}\n`;
-    text += `⋄ أصـبـح مـصـرحـاً لـه بـاسـتـخـدام واتـسـاب ويـب / كـمـبـيـوتـر / بـوت دون أن يـتـم طـرده ✅.\n\n`;
+    text += `⋄ تـم تـصـريـحـه عـالـمـيـاً فـي *جـمـيـع مـجـمـوعـات الإمـبـراطـوريـة* (الـحـالـيـة والـمـسـتـقـبـلـيـة) 🌐.\n`;
+    text += `⋄ لـن يـتـم طـرده أبـداً عـنـد اسـتـخـدام واتـسـاب ويـب أو كـمـبـيـوتـر أو بـوت (ثـقـة تـامـة) ✅.\n\n`;
     text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚔️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
     text += `       🏰 *PARADIS EMPIRE* 🏰`;
 
     await sock.sendMessage(jid, { text, mentions: resolved.mentions });
-    logActivity(`[AntiBot] ${resolved.tag} ajouté à la whitelist dans ${jid}`);
+    logActivity(`[AntiBot] ${resolved.tag} ajouté à la whitelist globale dans ${jid}`);
   } catch (err) {
     console.error('Erreur handleAllowBotCommand:', err);
   }
@@ -3486,14 +3597,15 @@ async function handleDisallowBotCommand(sock, jid, messageText, msg, senderIsAdm
     let text = `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🚫 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
     text += `       🏰 *إمـبـراطـوريـة بـاراديـس* 🏰\n`;
     text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🚫 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n\n`;
-    text += `🚫 *تـم حـذفـه مـن الـقـائـمـة الـبـيـضـاء لـمـضـاد الـبـوتـات*\n\n`;
+    text += `🚫 *تـم حـذفـه مـن الـقـائـمـة الـبـيـضـاء الـشـامـلـة (Global Whitelist)*\n\n`;
     text += `⋄ الـعـضـو : ${resolved.tag}\n`;
+    text += `⋄ تـم إلـغـاء تـصـريـحـه فـي جـمـيـع الـمـجـمـوعـات.\n`;
     text += `⋄ سـيـتـم طـرده تـلـقـائـيـاً إذا اسـتـخـدم واتـسـاب مـرتـبـطـاً بـجـهـاز / بـوت ⚠️.\n\n`;
     text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚔️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
     text += `       🏰 *PARADIS EMPIRE* 🏰`;
 
     await sock.sendMessage(jid, { text, mentions: resolved.mentions });
-    logActivity(`[AntiBot] ${resolved.tag} retiré de la whitelist dans ${jid}`);
+    logActivity(`[AntiBot] ${resolved.tag} retiré de la whitelist globale dans ${jid}`);
   } catch (err) {
     console.error('Erreur handleDisallowBotCommand:', err);
   }
@@ -3513,10 +3625,10 @@ async function handleAllowedBotsListCommand(sock, jid, senderIsAdmin, senderIsSu
     let text = `⎔⋅• ━ ╼━ ╼╃ ⌬〔 📋 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
     text += `       🏰 *إمـبـراطـوريـة بـاراديـس* 🏰\n`;
     text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 📋 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n\n`;
-    text += `🛡️ *الـقـائـمـة الـبـيـضـاء لـمـسـتـخـدمـي الـبـوت والـويـب (Anti-Bot Whitelist)* 🛡️\n\n`;
+    text += `🛡️ *الـقـائـمـة الـبـيـضـاء الـشـامـلـة لـمـسـتـخـدمـي الـبـوت والـويـب (Global Whitelist)* 🛡️\n\n`;
 
     if (allowed.length === 0) {
-      text += `⋄ لا يـوجـد أي عـضـو مـسـتـثـنـى حـالـيـاً فـي هـذه الـمـجـمـوعـة.\n`;
+      text += `⋄ لا يـوجـد أي عـضـو مـسـتـثـنـى حـالـيـاً.\n`;
       text += `⋄ لإضـافـة عـضـو : *.allowbot @عضو* أو *.allowbot 212xxxxxxx*\n\n`;
       text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚔️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
       text += `       🏰 *PARADIS EMPIRE* 🏰`;
@@ -3524,11 +3636,11 @@ async function handleAllowedBotsListCommand(sock, jid, senderIsAdmin, senderIsSu
       return;
     }
 
-    text += `الأعـضـاء الـمـصـرح لـهـم بـاسـتـخـدام واتـسـاب ويـب / كـمـبـيـوتـر / بـوت :\n\n`;
+    text += `الأعـضـاء الـمـصـرح لـهـم بـاسـتـخـدام واتـسـاب ويـب / كـمـبـيـوتـر / بـوت فـي كـل الـمـجـمـوعـات :\n\n`;
     const mentions = [];
     allowed.forEach((u, i) => {
       const num = u.split('@')[0].split(':')[0];
-      text += `${i + 1}️⃣ @${num}\n`;
+      text += `${i + 1}️⃣ @${num} ↬ *مـصـرح عـالـمـيـاً* 🌐\n`;
       mentions.push(`${num}@s.whatsapp.net`);
     });
 
