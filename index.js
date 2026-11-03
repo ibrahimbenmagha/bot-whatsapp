@@ -93,12 +93,6 @@ const BLACKLISTED_TABNEED_NUMBERS = new Set([
   '9647801266024', // Vecteur d'attaque direct extrait de bpluginwhatsap.mjs
 ]);
 
-// Protection Anti-Ban : Liste Noire locale (évite d'appeler updateBlockStatus sur WhatsApp qui provoque des bans)
-const localBlacklist = new Set();
-
-// Protection Anti-Spam Commandes : Limite le nombre de commandes par utilisateur pour éviter les bans de flood
-const userCommandRateLimit = new Map(); // phone -> { count, windowStart }
-
 /**
  * Détecter si un message est un message transféré (forwarded message)
  */
@@ -208,65 +202,6 @@ function migrateLegacySession() {
 }
 
 /**
- * Protection Anti-Ban Haute Performance
- * Enveloppe le socket Baileys pour :
- * 1. Simuler une frappe humaine naturelle (composing / recording) avec pauses variables
- * 2. Mettre en file d'attente séquentielle les messages par discussion (évite les rafales de stanzas)
- * 3. Appliquer un intervalle global minimum anti-flood entre chaque envoi
- */
-function attachAntiBanProtection(sock) {
-  if (!sock || sock.__antiBanAttached) return;
-  sock.__antiBanAttached = true;
-
-  const originalSendMessage = sock.sendMessage.bind(sock);
-  const chatQueues = new Map();
-  let lastGlobalSendTime = 0;
-
-  sock.sendMessage = async (jid, content, options = {}) => {
-    // Laisser passer directement les réactions et les suppressions pour ne pas ralentir les interactions légères
-    if (content?.react || content?.delete) {
-      return originalSendMessage(jid, content, options);
-    }
-
-    const currentChain = chatQueues.get(jid) || Promise.resolve();
-
-    const task = currentChain.then(async () => {
-      try {
-        const now = Date.now();
-        // 1. Délai anti-flood global entre 2 envois (800ms à 1400ms avec jitter aléatoire)
-        const globalGap = Math.max(0, 800 + Math.floor(Math.random() * 600) - (now - lastGlobalSendTime));
-        if (globalGap > 0) {
-          await new Promise((r) => setTimeout(r, globalGap));
-        }
-
-        // 2. Émulation de présence humaine
-        if (content.text || content.caption) {
-          const textLen = (content.text || content.caption || '').length;
-          // Temps de frappe proportionnel et naturel (600ms - 2000ms)
-          const typingDuration = Math.min(2000, Math.max(600, Math.floor(textLen * 12))) + Math.floor(Math.random() * 300);
-          await sock.sendPresenceUpdate('composing', jid).catch(() => {});
-          await new Promise((r) => setTimeout(r, typingDuration));
-          await sock.sendPresenceUpdate('paused', jid).catch(() => {});
-        } else if (content.audio) {
-          // Simulation d'enregistrement vocal PTT
-          await sock.sendPresenceUpdate('recording', jid).catch(() => {});
-          await new Promise((r) => setTimeout(r, 1400 + Math.floor(Math.random() * 600)));
-          await sock.sendPresenceUpdate('paused', jid).catch(() => {});
-        }
-
-        lastGlobalSendTime = Date.now();
-        return await originalSendMessage(jid, content, options);
-      } catch (err) {
-        logActivity(`[AntiBan] Erreur envoi sécurisé vers ${jid}: ${err.message}`, 'warn');
-      }
-    });
-
-    chatQueues.set(jid, task.catch(() => {}));
-    return task;
-  };
-}
-
-/**
  * Démarrer ou connecter une session WhatsApp pour un numéro donné (ou session QR temporaire)
  */
 async function startSession(phone, options = {}) {
@@ -317,16 +252,11 @@ async function startSession(phone, options = {}) {
     logger: logger,
     printQRInTerminal: false,
     mobile: false,
-    browser: Browsers.windows('Desktop'),
+    browser: Browsers.ubuntu('Chrome'),
     syncFullHistory: false,
-    markOnlineOnConnect: false,
     connectTimeoutMs: 60000,
     defaultQueryTimeoutMs: 60000,
-    keepAliveIntervalMs: 30000,
   });
-
-  // Attacher la protection anti-ban (file d'attente, présence humaine et anti-flood)
-  attachAntiBanProtection(sock);
 
   sessionObj.sock = sock;
 
@@ -346,12 +276,14 @@ async function startSession(phone, options = {}) {
   // Mises à jour des groupes
   sock.ev.on('groups.update', (updates) => {
     for (const update of updates) {
+      if (update.id) groupMetadataCache.delete(cleanGroupId(update.id));
       logActivity(`[+${phone}] Groupe mis à jour : ${update.id}`);
     }
   });
 
   // Protection contre le spam d'ajouts de membres (Anti-Tabneed / Anti-Crash / Anti-Ban) et Détection Anti-Bot
   sock.ev.on('group-participants.update', async (update) => {
+    if (update.id) groupMetadataCache.delete(cleanGroupId(update.id));
     await handleGroupParticipantsSecurity(phone, sock, update);
     await handleAntiBotParticipantCheck(phone, sock, update);
   });
@@ -537,6 +469,85 @@ async function handleSessionConnectionUpdate(phone, update, isNewPairing) {
   }
 }
 
+// ============================================================================
+// Cache et Optimisations Hautes Performances (Multi-Groupes & Résolution LID)
+// ============================================================================
+const groupMetadataCache = new Map(); // cleanJid -> { data, timestamp }
+const lidToPhoneCache = new Map(); // lidNum -> phoneNum
+const phoneToLidCache = new Map(); // phoneNum -> lidNum
+
+/**
+ * Enregistrer la correspondance entre LID et Numéro de téléphone d'un participant
+ */
+function cacheParticipantLid(p) {
+  if (!p) return;
+  const rawId = p.id || p.jid;
+  const rawLid = p.lid;
+
+  let phone = null;
+  if (rawId && rawId.endsWith('@s.whatsapp.net')) {
+    phone = rawId.split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
+  } else if (p.phoneNumber) {
+    phone = String(p.phoneNumber).split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
+  }
+
+  let lid = null;
+  if (rawLid) {
+    lid = String(rawLid).split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
+  } else if (rawId && rawId.endsWith('@lid')) {
+    lid = rawId.split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
+  }
+
+  if (phone && lid && phone !== lid) {
+    lidToPhoneCache.set(lid, phone);
+    phoneToLidCache.set(phone, lid);
+  }
+}
+
+/**
+ * Résoudre un JID ou LID pour obtenir le vrai numéro de téléphone réel
+ */
+function resolveRealPhoneNumber(jidOrLid) {
+  if (!jidOrLid) return '';
+  const clean = String(jidOrLid).split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
+  if (lidToPhoneCache.has(clean)) {
+    return lidToPhoneCache.get(clean);
+  }
+  return clean;
+}
+
+/**
+ * Récupérer les métadonnées d'un groupe de façon ultra-rapide avec Cache mémoire (3 minutes)
+ * Évite de saturer la connexion WebSocket de Baileys quand le bot est dans plusieurs groupes
+ */
+async function getGroupDataSafely(sock, jid, forceRefresh = false) {
+  try {
+    if (!sock || !jid) return null;
+    const cleanJid = cleanGroupId(jid);
+    const now = Date.now();
+    const cached = groupMetadataCache.get(cleanJid);
+
+    if (!forceRefresh && cached && (now - cached.timestamp < 180000)) {
+      return cached.data;
+    }
+
+    const data = await sock.groupMetadata(jid);
+    if (data) {
+      groupMetadataCache.set(cleanJid, { data, timestamp: now });
+      if (Array.isArray(data.participants)) {
+        for (const p of data.participants) {
+          cacheParticipantLid(p);
+        }
+      }
+    }
+    return data;
+  } catch (err) {
+    const fallback = groupMetadataCache.get(cleanGroupId(jid));
+    if (fallback?.data) return fallback.data;
+    return null;
+  }
+}
+
 /**
  * Traitement des messages entrants et modération
  */
@@ -563,30 +574,27 @@ async function handleSessionMessages(botPhone, m) {
 
       if (!rawSender) continue;
       const senderId = normalizeJid(rawSender);
+      const senderPhone = resolveRealPhoneNumber(senderId);
 
       const messageText = extractMessage(msg) || '';
       const trimmedText = messageText.trim();
       const lowerText = trimmedText.toLowerCase();
 
       if (trimmedText) {
-        logActivity(`[+${botPhone}] [${isGroup ? 'Groupe' : 'Privé'} | ${isFromMe ? 'Moi' : senderId.split('@')[0]}]: "${trimmedText}"`);
+        logActivity(`[+${botPhone}] [${isGroup ? 'Groupe' : 'Privé'} | ${isFromMe ? 'Moi' : senderPhone || senderId.split('@')[0]}]: "${trimmedText}"`);
       }
 
       let groupData = null;
       let senderIsAdmin = isFromMe;
 
       if (isGroup) {
-        try {
-          groupData = await sock.groupMetadata(jid);
-          if (!senderIsAdmin) {
-            senderIsAdmin = isAdmin(senderId, groupData);
-          }
-        } catch (err) {
-          logActivity(`Avertissement groupMetadata: ${err.message}`, 'warn');
+        groupData = await getGroupDataSafely(sock, jid);
+        if (!senderIsAdmin && groupData) {
+          senderIsAdmin = isAdmin(senderId, groupData);
         }
       }
 
-      const senderIsSudoEarly = isFromMe || isSudo(senderId) || isSelfUser(sock, senderId);
+      const senderIsSudoEarly = isFromMe || isSudo(senderId) || (senderPhone && isSudo(senderPhone)) || isSelfUser(sock, senderId);
 
       // 0. Protection Anti-Tabneed / Anti-Crash / Anti-Ban / Commandes Malveillantes Non Autorisées
       const isTabneedCmd = (
@@ -654,25 +662,13 @@ async function handleSessionMessages(botPhone, m) {
           }
         }
 
-        // 4. Module Anti-Bot (Vérification sécurisée protégée contre le bannissement USync)
+        // 4. Module Anti-Bot (Vérification des membres actifs du groupe en temps réel)
         if (!isFromMe && !senderIsAdmin && !senderIsSudoEarly && isAntiBotEnabled(jid)) {
           if (!isPermanentWhitelisted(senderId) && !isBotAllowed(jid, senderId)) {
-            const rawClean = String(senderId || '').split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
-            const isCached = botDeviceCheckCache.has(rawClean) || botDeviceCheckCache.has(`${rawClean}@s.whatsapp.net`);
-
-            if (isCached) {
-              const cachedResult = botDeviceCheckCache.get(rawClean) || botDeviceCheckCache.get(`${rawClean}@s.whatsapp.net`);
-              if (cachedResult && cachedResult.hasLinked) {
-                await executeAntiBotProcedure(sock, jid, senderId, groupData);
-                continue;
-              }
-            } else if (Date.now() - lastUsyncGlobalTimestamp >= 30000) {
-              // Vérification d'arrière-plan espacée d'au moins 30 secondes pour ne pas surcharger WhatsApp
-              const botCheck = await checkUserHasLinkedDevices(sock, senderId);
-              if (botCheck.hasLinked) {
-                await executeAntiBotProcedure(sock, jid, senderId, groupData);
-                continue;
-              }
+            const botCheck = await checkUserHasLinkedDevices(sock, senderId);
+            if (botCheck.hasLinked) {
+              await executeAntiBotProcedure(sock, jid, senderId, groupData);
+              continue;
             }
           }
         }
@@ -696,25 +692,6 @@ async function handleSessionMessages(botPhone, m) {
 
       const senderIsSudo = isFromMe || isSudo(senderId);
       const botMode = getBotMode();
-
-      // Protection Anti-Spam Commandes (Anti-Flood Rate Limit)
-      // Empêche les utilisateurs d'inonder le bot de commandes, ce qui le fait bannir par WhatsApp pour spam
-      if (!isFromMe && !senderIsSudo) {
-        const now = Date.now();
-        const userCmdData = userCommandRateLimit.get(senderNumber) || { count: 0, windowStart: now };
-        if (now - userCmdData.windowStart > 8000) {
-          userCmdData.count = 1;
-          userCmdData.windowStart = now;
-        } else {
-          userCmdData.count += 1;
-        }
-        userCommandRateLimit.set(senderNumber, userCmdData);
-
-        if (userCmdData.count > 3) {
-          logActivity(`[Anti-Spam] Commande ignorée pour @${senderNumber} (Rate limit: >3 commandes en 8s)`, 'warn');
-          continue;
-        }
-      }
 
       // Vérification du Mode Privé (Private Mode): seuls le bot et les sudos peuvent exécuter des commandes
       if (isPrefixCommand && botMode === 'private' && !senderIsSudo) {
@@ -1230,23 +1207,18 @@ function isSelfUser(sock, targetJid) {
 }
 
 /**
- * Gestion sécurisée des attaquants : Liste Noire locale (Local Blacklist)
- * RÈGLE D'OR ANTI-BAN : Ne JAMAIS appeler sock.updateBlockStatus(..., 'block') sur WhatsApp !
- * Bloquer via l'API incite les utilisateurs ciblés à faire "Signaler et Bloquer" (Report),
- * ce qui déclenche le bannissement automatique du compte du bot par WhatsApp pour spam.
+ * Bloquer un utilisateur en toute sécurité en garantissant que le bot ne se bloque jamais lui-même
  */
 async function safeBlockUser(sock, targetJid) {
   try {
-    if (!targetJid) return;
-    const cleanPhone = String(targetJid).split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
-    if (!cleanPhone || isSelfUser(sock, targetJid) || isSudo(targetJid) || isPermanentWhitelisted(cleanPhone)) {
-      logActivity(`[Anti-Ban] Tentative de blacklist ignorée pour compte protégé: ${targetJid}`, 'warn');
+    if (!sock || !targetJid) return;
+    if (isSelfUser(sock, targetJid) || isSudo(targetJid)) {
+      logActivity(`[Anti-Ban] Tentative de blocage ignorée pour compte protégé (bot/sudo): ${targetJid}`, 'warn');
       return;
     }
-    localBlacklist.add(cleanPhone);
-    logActivity(`[Anti-Ban] Numéro @${cleanPhone} ajouté à la blacklist locale du bot (sans block WhatsApp risqué).`);
+    await sock.updateBlockStatus(targetJid, 'block');
   } catch (err) {
-    logActivity(`[Anti-Ban] Échec safeBlockUser ${targetJid}: ${err.message}`, 'warn');
+    logActivity(`[Anti-Ban] Échec blocage ${targetJid}: ${err.message}`, 'warn');
   }
 }
 
@@ -1285,7 +1257,7 @@ async function handleAntiLink(sock, jid, senderId, messageId, groupData) {
     // Récupérer les admins du groupe pour les mentionner
     let currentGroupData = groupData;
     if (!currentGroupData || !currentGroupData.participants) {
-      currentGroupData = await sock.groupMetadata(jid).catch(() => null);
+      currentGroupData = await getGroupDataSafely(sock, jid);
     }
     const adminParticipants = currentGroupData?.participants?.filter(p => p.admin === 'admin' || p.admin === 'superadmin') || [];
     const allMentions = new Set([senderId]);
@@ -1427,7 +1399,7 @@ async function handleForwardSpam(sock, jid, spammersInput, groupData) {
 
     let currentGroupData = groupData;
     if (!currentGroupData || !currentGroupData.participants) {
-      currentGroupData = await sock.groupMetadata(jid).catch(() => null);
+      currentGroupData = await getGroupDataSafely(sock, jid);
     }
 
     // 1. Fermer le groupe (Admins Only)
@@ -1610,7 +1582,7 @@ async function handleTabneedCommandAttempt(sock, jid, senderId, msg, isGroup, gr
     // 5. Récupérer les admins pour mention
     let currentGroupData = groupData;
     if (!currentGroupData || !currentGroupData.participants) {
-      currentGroupData = await sock.groupMetadata(jid).catch(() => null);
+      currentGroupData = await getGroupDataSafely(sock, jid);
     }
 
     const botNumber = (sock.user?.id || '').split('@')[0].split(':')[0];
@@ -1798,7 +1770,7 @@ async function handleGroupParticipantsSecurity(botPhone, sock, update) {
 
     // 6. Récupérer les admins pour mention
     try {
-      if (!groupData) groupData = await sock.groupMetadata(jid);
+      if (!groupData) groupData = await getGroupDataSafely(sock, jid);
     } catch (_) {}
 
     const adminParticipants = groupData?.participants?.filter((p) => {
@@ -1855,7 +1827,6 @@ async function handleGroupParticipantsSecurity(botPhone, sock, update) {
  */
 const botDeviceCheckCache = new Map(); // cleanJid -> { hasLinked, count, timestamp }
 const antibotCooldown = new Map(); // `${jid}:${phone}` -> timestamp
-let lastUsyncGlobalTimestamp = 0; // Horodatage global pour éviter d'inonder l'API USync
 
 async function checkUserHasLinkedDevices(sock, userJid) {
   try {
@@ -1864,21 +1835,14 @@ async function checkUserHasLinkedDevices(sock, userJid) {
 
     const now = Date.now();
     const cached = botDeviceCheckCache.get(rawClean) || botDeviceCheckCache.get(cleanJid);
-    // Cache de 2 heures pour protéger le compte contre le bannissement pour scraping/requêtes excessives
-    if (cached && (now - cached.timestamp < 7200000)) {
+    // Cache intelligent (3 minutes) pour éviter de saturer WhatsApp USync à chaque message dans les groupes
+    if (cached && (now - cached.timestamp < 180000)) {
       return cached;
     }
 
-    // Protection anti-ban USync : au maximum 1 requête USync toutes les 15 secondes
-    if (now - lastUsyncGlobalTimestamp < 15000) {
-      return cached || { hasLinked: false, count: 0, timestamp: now };
+    if (typeof sock.getUSyncDevices !== 'function') {
+      return { hasLinked: false, count: 0 };
     }
-
-    if (typeof sock?.getUSyncDevices !== 'function') {
-      return { hasLinked: false, count: 0, timestamp: now };
-    }
-
-    lastUsyncGlobalTimestamp = now;
 
     // Interroger USync avec le format standard téléphone@s.whatsapp.net
     const devices = await sock.getUSyncDevices([cleanJid], false, false);
@@ -1925,7 +1889,7 @@ async function executeAntiBotBatchProcedure(sock, jid, targetsList, groupData) {
 
     let currentGroupData = groupData;
     try {
-      const freshMeta = await sock.groupMetadata(jid);
+      const freshMeta = await getGroupDataSafely(sock, jid, true);
       if (freshMeta && freshMeta.participants) {
         currentGroupData = freshMeta;
       }
@@ -2125,7 +2089,7 @@ async function handleGroupJoinRequestSecurity(botPhone, sock, update) {
     // Récupérer les admins du groupe pour les notifier
     let groupData = null;
     try {
-      groupData = await sock.groupMetadata(jid);
+      groupData = await getGroupDataSafely(sock, jid);
     } catch (_) {}
 
     const botNumber = (sock.user?.id || '').split('@')[0].split(':')[0];
@@ -2235,7 +2199,7 @@ async function handleMentionCommand(sock, jid, messageText, groupData, senderId)
     let currentGroupData = groupData;
     if (!currentGroupData || !currentGroupData.participants || currentGroupData.participants.length === 0) {
       try {
-        currentGroupData = await sock.groupMetadata(jid);
+        currentGroupData = await getGroupDataSafely(sock, jid);
       } catch (err) {
         logActivity(`Erreur groupMetadata pour mention: ${err.message}`, 'warn');
       }
@@ -2493,11 +2457,15 @@ async function resolveGroupParticipant(sock, jid, targetId, groupData = null) {
   let gData = groupData;
   if (!gData || !gData.participants || gData.participants.length === 0) {
     try {
-      gData = await sock.groupMetadata(jid);
+      gData = await getGroupDataSafely(sock, jid);
     } catch (_) {}
   }
 
-  const cleanTarget = String(targetId || '').split('@')[0].split(':')[0];
+  let cleanTarget = String(targetId || '').split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
+  if (lidToPhoneCache.has(cleanTarget)) {
+    cleanTarget = lidToPhoneCache.get(cleanTarget);
+  }
+
   const allMentions = new Set();
   if (targetId) allMentions.add(targetId);
 
@@ -2506,9 +2474,9 @@ async function resolveGroupParticipant(sock, jid, targetId, groupData = null) {
 
   if (gData?.participants) {
     matchedParticipant = gData.participants.find((p) => {
-      const pId = (p.id || '').split('@')[0].split(':')[0];
-      const pJid = (p.jid || '').split('@')[0].split(':')[0];
-      const pLid = (p.lid || '').split('@')[0].split(':')[0];
+      const pId = (p.id || '').split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
+      const pJid = (p.jid || '').split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
+      const pLid = (p.lid || '').split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
       return pId === cleanTarget || pJid === cleanTarget || pLid === cleanTarget;
     });
 
@@ -2519,16 +2487,17 @@ async function resolveGroupParticipant(sock, jid, targetId, groupData = null) {
 
       // Prioriser le vrai numéro de téléphone (@s.whatsapp.net)
       if (matchedParticipant.jid && matchedParticipant.jid.endsWith('@s.whatsapp.net')) {
-        phone = matchedParticipant.jid.split('@')[0].split(':')[0];
-        allMentions.add(`${phone}@s.whatsapp.net`);
+        phone = matchedParticipant.jid.split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
       } else if (matchedParticipant.id && matchedParticipant.id.endsWith('@s.whatsapp.net')) {
-        phone = matchedParticipant.id.split('@')[0].split(':')[0];
-        allMentions.add(`${phone}@s.whatsapp.net`);
+        phone = matchedParticipant.id.split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
       } else if (matchedParticipant.phoneNumber) {
-        phone = String(matchedParticipant.phoneNumber).split('@')[0].split(':')[0];
-        allMentions.add(`${phone}@s.whatsapp.net`);
+        phone = String(matchedParticipant.phoneNumber).split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
       }
     }
+  }
+
+  if (lidToPhoneCache.has(phone)) {
+    phone = lidToPhoneCache.get(phone);
   }
 
   if (phone) {
@@ -2612,7 +2581,7 @@ async function handleManualKickCommand(sock, jid, messageText, groupData, msg) {
     let currentGroupData = groupData;
     if (!currentGroupData || !currentGroupData.participants) {
       try {
-        currentGroupData = await sock.groupMetadata(jid);
+        currentGroupData = await getGroupDataSafely(sock, jid);
       } catch (_) {}
     }
 
@@ -2868,7 +2837,7 @@ async function handlePromoteCommand(sock, jid, messageText, msg, groupData) {
   try {
     let currentGroupData = groupData;
     if (!currentGroupData || !currentGroupData.participants) {
-      currentGroupData = await sock.groupMetadata(jid).catch(() => null);
+      currentGroupData = await getGroupDataSafely(sock, jid);
     }
     if (!currentGroupData) {
       await sock.sendMessage(jid, { text: '❌ تعذر الحصول على بيانات المجموعة.' });
@@ -2967,7 +2936,7 @@ async function handleDemoteCommand(sock, jid, messageText, msg, groupData) {
   try {
     let currentGroupData = groupData;
     if (!currentGroupData || !currentGroupData.participants) {
-      currentGroupData = await sock.groupMetadata(jid).catch(() => null);
+      currentGroupData = await getGroupDataSafely(sock, jid);
     }
     if (!currentGroupData) {
       await sock.sendMessage(jid, { text: '❌ تعذر الحصول على بيانات المجموعة.' });
@@ -3074,7 +3043,7 @@ async function handleDemoteAllCommand(sock, jid, groupData) {
   try {
     let currentGroupData = groupData;
     if (!currentGroupData || !currentGroupData.participants) {
-      currentGroupData = await sock.groupMetadata(jid).catch(() => null);
+      currentGroupData = await getGroupDataSafely(sock, jid);
     }
     if (!currentGroupData) {
       await sock.sendMessage(jid, { text: '❌ تعذر الحصول على بيانات المجموعة.' });
@@ -3326,7 +3295,7 @@ async function handleScanCommand(sock, jid, groupData, senderIsAdmin, senderIsSu
     let currentGroupData = groupData;
     if (!currentGroupData || !currentGroupData.participants) {
       try {
-        currentGroupData = await sock.groupMetadata(jid);
+        currentGroupData = await getGroupDataSafely(sock, jid);
       } catch (_) {}
     }
 
@@ -3370,13 +3339,9 @@ async function handleScanCommand(sock, jid, groupData, senderIsAdmin, senderIsSu
       }
     }
 
-    // Diviser les requêtes USync en lots de 25 avec pause anti-ban entre chaque lot
+    // Diviser les requêtes USync en lots de 25
     const chunkSize = 25;
     for (let i = 0; i < phoneJids.length; i += chunkSize) {
-      if (i > 0) {
-        // Pause de sécurité anti-ban entre les requêtes USync pour ne pas être détecté comme scraper
-        await new Promise((r) => setTimeout(r, 1500));
-      }
       const batch = phoneJids.slice(i, i + chunkSize);
       try {
         if (typeof sock.getUSyncDevices === 'function') {
