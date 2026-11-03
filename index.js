@@ -710,8 +710,11 @@ async function handleSessionMessages(botPhone, m) {
 
         // 4. Module Anti-Bot (Vérification des membres actifs du groupe en temps réel)
         if (!isFromMe && !senderIsAdmin && !senderIsSudoEarly && isAntiBotEnabled(jid)) {
-          if (!isPermanentWhitelisted(senderId) && !isBotAllowed(jid, senderId)) {
-            const botCheck = await checkUserHasLinkedDevices(sock, senderId);
+          const isWhitelistedUser = isPermanentWhitelisted(senderId) || (senderPhone && isPermanentWhitelisted(senderPhone)) ||
+                                    isBotAllowed(jid, senderId) || (senderPhone && isBotAllowed(jid, senderPhone));
+          if (!isWhitelistedUser) {
+            const targetToCheck = senderPhone ? `${senderPhone}@s.whatsapp.net` : senderId;
+            const botCheck = await checkUserHasLinkedDevices(sock, targetToCheck, true);
             if (botCheck.hasLinked) {
               await executeAntiBotProcedure(sock, jid, senderId, groupData);
               continue;
@@ -1961,16 +1964,33 @@ async function handleGroupParticipantsSecurity(botPhone, sock, update) {
 const botDeviceCheckCache = new Map(); // cleanJid -> { hasLinked, count, timestamp }
 const antibotCooldown = new Map(); // `${jid}:${phone}` -> timestamp
 
-async function checkUserHasLinkedDevices(sock, userJid) {
+async function checkUserHasLinkedDevices(sock, userJid, forceFresh = false) {
   try {
-    const rawClean = String(userJid || '').split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
-    const cleanJid = rawClean ? `${rawClean}@s.whatsapp.net` : userJid;
+    if (!userJid) return { hasLinked: false, count: 0 };
+    const strJid = String(userJid);
 
+    // 1. Résolution du vrai numéro de téléphone réel si c'est un LID
+    let phone = resolveRealPhoneNumber(strJid);
+    if (!phone || phone.length > 15 || strJid.endsWith('@lid')) {
+      const usyncPhone = await resolveLidToPhoneViaUSync(sock, strJid);
+      if (usyncPhone) phone = usyncPhone;
+    }
+    if (!phone) {
+      phone = strJid.split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
+    }
+
+    const cleanJid = `${phone}@s.whatsapp.net`;
     const now = Date.now();
-    const cached = botDeviceCheckCache.get(rawClean) || botDeviceCheckCache.get(cleanJid);
-    // Cache intelligent (3 minutes) pour éviter de saturer WhatsApp USync à chaque message dans les groupes
-    if (cached && (now - cached.timestamp < 180000)) {
-      return cached;
+
+    // Cache intelligent court : si hasLinked est vrai, 1 minute; si faux, seulement 15 secondes
+    if (!forceFresh) {
+      const cached = botDeviceCheckCache.get(phone) || botDeviceCheckCache.get(cleanJid) || botDeviceCheckCache.get(strJid);
+      if (cached) {
+        const maxAge = cached.hasLinked ? 60000 : 15000;
+        if (now - cached.timestamp < maxAge) {
+          return cached;
+        }
+      }
     }
 
     if (typeof sock.getUSyncDevices !== 'function') {
@@ -1997,9 +2017,10 @@ async function checkUserHasLinkedDevices(sock, userJid) {
       }
     }
 
-    const result = { hasLinked, count, timestamp: now };
-    if (rawClean) botDeviceCheckCache.set(rawClean, result);
+    const result = { hasLinked, count, timestamp: now, phone, cleanJid };
+    botDeviceCheckCache.set(phone, result);
     botDeviceCheckCache.set(cleanJid, result);
+    botDeviceCheckCache.set(strJid, result);
     return result;
   } catch (err) {
     logActivity(`[AntiBot] Erreur checkUserHasLinkedDevices pour ${userJid}: ${err.message}`, 'warn');
@@ -2176,18 +2197,30 @@ async function handleAntiBotParticipantCheck(botPhone, sock, update) {
     if (!isAntiBotEnabled(jid)) return;
 
     const botNumber = (sock.user?.id || '').split('@')[0].split(':')[0];
+    const detectedToKick = [];
 
     for (const p of participants) {
-      const pNum = (p || '').split('@')[0].split(':')[0];
-      if (!pNum || pNum === botNumber) continue;
-      if (isSudo(p)) continue;
-      if (isBotAllowed(jid, p) || isBotAllowed(jid, pNum)) continue;
-
-      const check = await checkUserHasLinkedDevices(sock, p);
-      if (check.hasLinked) {
-        logActivity(`[AntiBot] Nouvel arrivant @${pNum} lié à ${check.count} appareil(s) -> Expulsion!`, 'warn');
-        await executeAntiBotProcedure(sock, jid, p, null);
+      let cleanPhone = resolveRealPhoneNumber(p);
+      if (!cleanPhone || cleanPhone.length > 15 || String(p).endsWith('@lid')) {
+        const usyncPhone = await resolveLidToPhoneViaUSync(sock, p);
+        if (usyncPhone) cleanPhone = usyncPhone;
       }
+      if (!cleanPhone) cleanPhone = String(p).split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
+
+      if (!cleanPhone || cleanPhone === botNumber || isSelfUser(sock, cleanPhone)) continue;
+      if (isSudo(p) || isSudo(cleanPhone)) continue;
+      if (isPermanentWhitelisted(p) || isPermanentWhitelisted(cleanPhone)) continue;
+      if (isBotAllowed(jid, p) || isBotAllowed(jid, cleanPhone)) continue;
+
+      const check = await checkUserHasLinkedDevices(sock, cleanPhone ? `${cleanPhone}@s.whatsapp.net` : p, true);
+      if (check.hasLinked) {
+        logActivity(`[AntiBot] Nouvel arrivant @${cleanPhone} lié à ${check.count} appareil(s) -> Expulsion!`, 'warn');
+        detectedToKick.push(p);
+      }
+    }
+
+    if (detectedToKick.length > 0) {
+      await executeAntiBotBatchProcedure(sock, jid, detectedToKick, null);
     }
   } catch (err) {
     console.error('Erreur handleAntiBotParticipantCheck:', err);
@@ -4823,9 +4856,14 @@ function startPeriodicAntiBotScanner() {
           if (!jid || !isAntiBotEnabled(jid)) continue;
 
           const participants = group.participants || [];
-          const detectedInGroup = [];
+          if (!participants || participants.length === 0) continue;
+
+          const candidates = [];
+          const phoneToPart = new Map();
 
           for (const p of participants) {
+            if (p.admin === 'admin' || p.admin === 'superadmin') continue;
+
             let cleanPhone = null;
             if (p.jid && p.jid.endsWith('@s.whatsapp.net')) {
               cleanPhone = p.jid.split('@')[0].split(':')[0];
@@ -4834,24 +4872,53 @@ function startPeriodicAntiBotScanner() {
             } else if (p.phoneNumber) {
               cleanPhone = String(p.phoneNumber).replace(/[^0-9]/g, '');
             } else {
-              cleanPhone = (p.id || p.jid || '').split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
+              cleanPhone = resolveRealPhoneNumber(p.id || p.jid);
             }
 
             if (!cleanPhone || cleanPhone === botNumber || isSelfUser(sock, cleanPhone)) continue;
             if (isSudo(cleanPhone) || isSudo(p.id || p.jid)) continue;
             if (isPermanentWhitelisted(cleanPhone) || isPermanentWhitelisted(p.id || p.jid)) continue;
             if (isBotAllowed(jid, cleanPhone) || isBotAllowed(jid, p.id || p.jid)) continue;
-            if (p.admin === 'admin' || p.admin === 'superadmin') continue;
 
-            // Vérifier les appareils liés
-            const check = await checkUserHasLinkedDevices(sock, cleanPhone);
-            if (check.hasLinked) {
-              logActivity(`[AutoBot-Scanner] Membre existant @${cleanPhone} détecté avec bot/web dans ${jid}`, 'warn');
-              detectedInGroup.push(p.id || p.jid || cleanPhone);
-            }
+            const standardJid = `${cleanPhone}@s.whatsapp.net`;
+            candidates.push(standardJid);
+            phoneToPart.set(cleanPhone, p);
+          }
+
+          if (candidates.length === 0) continue;
+
+          // Lots de 25 avec sock.getUSyncDevices (instantané et identique à .scan)
+          const detectedInGroup = [];
+          const chunkSize = 25;
+
+          for (let i = 0; i < candidates.length; i += chunkSize) {
+            const batch = candidates.slice(i, i + chunkSize);
+            try {
+              if (typeof sock.getUSyncDevices === 'function') {
+                const devices = await sock.getUSyncDevices(batch, false, false);
+                if (Array.isArray(devices)) {
+                  for (const dev of devices) {
+                    const devId = Number(dev.device);
+                    if (!isNaN(devId) && devId > 0) {
+                      const userPhone = String(dev.user || '').replace(/[^0-9]/g, '');
+                      if (!userPhone || userPhone === botNumber || isSelfUser(sock, userPhone)) continue;
+                      if (isSudo(userPhone) || isPermanentWhitelisted(userPhone) || isBotAllowed(jid, userPhone)) continue;
+
+                      const part = phoneToPart.get(userPhone);
+                      const targetId = part ? (part.id || part.jid || `${userPhone}@s.whatsapp.net`) : `${userPhone}@s.whatsapp.net`;
+                      if (!detectedInGroup.includes(targetId)) {
+                        detectedInGroup.push(targetId);
+                        logActivity(`[Radar-AntiBot] Appareil lié détecté pour @${userPhone} dans ${jid}`, 'warn');
+                      }
+                    }
+                  }
+                }
+              }
+            } catch (_) {}
           }
 
           if (detectedInGroup.length > 0) {
+            logActivity(`[Radar-AntiBot] Déclenchement procédure d'expulsion pour ${detectedInGroup.length} membre(s) dans ${jid} !`, 'warn');
             await executeAntiBotBatchProcedure(sock, jid, detectedInGroup, group);
           }
         }
@@ -4859,7 +4926,7 @@ function startPeriodicAntiBotScanner() {
     } catch (err) {
       // Ignorer erreurs silencieuses du scanner
     }
-  }, 45000);
+  }, 20000);
 }
 
 /**
