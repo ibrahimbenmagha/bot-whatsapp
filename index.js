@@ -742,17 +742,6 @@ async function handleSessionMessages(botPhone, m) {
       // Vérification du Mode Privé (Private Mode): seuls le bot et les sudos peuvent exécuter des commandes
       if (isPrefixCommand && botMode === 'private' && !senderIsSudo) {
         reactToMessage(sock, jid, msg.key, '🔒');
-        await sock.sendMessage(jid, {
-          text: `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🔒 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n` +
-                `       🏰 *إمـبـراطـوريـة بـاراديـس* 🏰\n` +
-                `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🔒 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n\n` +
-                `⛔ *الـبـوت حـالـيـاً فـي الـوضـع الـخـاص (Private Mode)*\n\n` +
-                `⋄ الأوامـر مـتـاحـة فـقـط لـمـالـك الـبـوت والـمـطـوريـن الـمـعـتـمـديـن (Sudo List).\n` +
-                `⋄ يـمـكـن لـلـمـطـور تـفـعـيـل الـوضـع الـعـام بـأمـر : *.mode public*\n\n` +
-                `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚔️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n` +
-                `       🏰 *PARADIS EMPIRE* 🏰`,
-          mentions: [senderId]
-        });
         continue;
       }
 
@@ -766,16 +755,13 @@ async function handleSessionMessages(botPhone, m) {
       // Commande .mention / .منشن / .tagall
       if (isCmd('mention') || isCmd('منشن') || isCmd('tagall') || isCmd('الكل') ||
           startsWithCmd('mention') || startsWithCmd('منشن') || startsWithCmd('tagall') || startsWithCmd('الكل')) {
+        if (!senderIsAdmin && !senderIsSudo) {
+          reactToMessage(sock, jid, msg.key, '🔒');
+          continue;
+        }
         reactToMessage(sock, jid, msg.key, '📢');
         if (!isGroup) {
           await sock.sendMessage(jid, { text: 'ℹ️ هذه العملية تعمل فقط داخل المجموعات.' });
-          continue;
-        }
-        if (!senderIsAdmin && !senderIsSudo) {
-          await sock.sendMessage(jid, { 
-            text: '⚠️ *عـذراً!* أمـر الـمـنـشـن الـجـمـاعـي مـخـصـص لـمـشـرفـي الـمـجـمـوعـة فـقـط 🛡️',
-            mentions: [senderId]
-          });
           continue;
         }
         await handleMentionCommand(sock, jid, messageText, groupData, senderId);
@@ -808,7 +794,11 @@ async function handleSessionMessages(botPhone, m) {
       }
 
       // Commande .warn (Admins / Sudo)
-      if ((startsWithCmd('warn ') || startsWithCmd('انذار ')) && (senderIsAdmin || senderIsSudo)) {
+      if (startsWithCmd('warn ') || startsWithCmd('انذار ') || isCmd('warn') || isCmd('انذار')) {
+        if (!senderIsAdmin && !senderIsSudo) {
+          reactToMessage(sock, jid, msg.key, '🔒');
+          continue;
+        }
         reactToMessage(sock, jid, msg.key, '⚠️');
         if (!isGroup) {
           await sock.sendMessage(jid, { text: 'ℹ️ Cette commande fonctionne uniquement dans un groupe.' });
@@ -819,7 +809,11 @@ async function handleSessionMessages(botPhone, m) {
       }
 
       // Commande .resetwarn (Admins / Sudo)
-      if ((startsWithCmd('resetwarn') || startsWithCmd('تصفير')) && (senderIsAdmin || senderIsSudo)) {
+      if (startsWithCmd('resetwarn') || startsWithCmd('تصفير') || isCmd('resetwarn') || isCmd('تصفير')) {
+        if (!senderIsAdmin && !senderIsSudo) {
+          reactToMessage(sock, jid, msg.key, '🔒');
+          continue;
+        }
         reactToMessage(sock, jid, msg.key, '🔄');
         if (!isGroup) {
           await sock.sendMessage(jid, { text: 'ℹ️ Cette commande fonctionne uniquement dans un groupe.' });
@@ -830,17 +824,14 @@ async function handleSessionMessages(botPhone, m) {
       }
 
       // Commande .kick (Admins / Sudo)
-      if (startsWithCmd('kick') || startsWithCmd('طرد')) {
+      if (startsWithCmd('kick') || startsWithCmd('طرد') || isCmd('kick') || isCmd('طرد')) {
+        if (!senderIsAdmin && !senderIsSudo) {
+          reactToMessage(sock, jid, msg.key, '🔒');
+          continue;
+        }
         reactToMessage(sock, jid, msg.key, '🚪');
         if (!isGroup) {
           await sock.sendMessage(jid, { text: 'ℹ️ هذه العملية تعمل فقط داخل المجموعات.' });
-          continue;
-        }
-        if (!senderIsAdmin && !senderIsSudo) {
-          await sock.sendMessage(jid, { 
-            text: '⚠️ *عـذراً!* أمـر الـطـرد مـخـصـص لـمـشـرفـي الـمـجـمـوعـة فـقـط 🛡️', 
-            mentions: [senderId] 
-          });
           continue;
         }
         await handleManualKickCommand(sock, jid, messageText, groupData, msg);
@@ -848,42 +839,58 @@ async function handleSessionMessages(botPhone, m) {
       }
 
       // Commande .mode [public/private] (Sudo / Owner)
-      if (startsWithCmd('mode') || startsWithCmd('الوضع')) {
+      if (startsWithCmd('mode') || startsWithCmd('الوضع') || isCmd('mode') || isCmd('الوضع')) {
+        if (!senderIsSudo) {
+          reactToMessage(sock, jid, msg.key, '🔒');
+          continue;
+        }
         reactToMessage(sock, jid, msg.key, '⚙️');
         await handleModeCommand(sock, jid, messageText, senderIsSudo);
         continue;
       }
 
       // Commande .sudo / .addsudo @user (Sudo / Owner)
-      if (startsWithCmd('sudo') || startsWithCmd('addsudo') || startsWithCmd('ترقية_بوت')) {
+      if (startsWithCmd('sudo') || startsWithCmd('addsudo') || startsWithCmd('ترقية_بوت') || isCmd('sudo') || isCmd('addsudo')) {
+        if (!senderIsSudo) {
+          reactToMessage(sock, jid, msg.key, '🔒');
+          continue;
+        }
         reactToMessage(sock, jid, msg.key, '🛡️');
         await handleAddSudoCommand(sock, jid, messageText, msg, senderIsSudo);
         continue;
       }
 
       // Commande .delsudo @user (Sudo / Owner)
-      if (startsWithCmd('delsudo') || startsWithCmd('removesudo') || startsWithCmd('حذف_مطور')) {
+      if (startsWithCmd('delsudo') || startsWithCmd('removesudo') || startsWithCmd('حذف_مطور') || isCmd('delsudo') || isCmd('removesudo')) {
+        if (!senderIsSudo) {
+          reactToMessage(sock, jid, msg.key, '🔒');
+          continue;
+        }
         reactToMessage(sock, jid, msg.key, '🗑️');
         await handleRemoveSudoCommand(sock, jid, messageText, msg, senderIsSudo);
         continue;
       }
 
-      // Commande .sudolist (Sudo / Owner / All)
-      if (isCmd('sudolist') || isCmd('sudos') || isCmd('المطورين') || isCmd('قائمة_المطورين')) {
+      // Commande .sudolist (Sudo / Owner)
+      if (isCmd('sudolist') || isCmd('sudos') || isCmd('المطورين') || isCmd('قائمة_المطورين') || startsWithCmd('sudolist') || startsWithCmd('sudos')) {
+        if (!senderIsSudo) {
+          reactToMessage(sock, jid, msg.key, '🔒');
+          continue;
+        }
         reactToMessage(sock, jid, msg.key, '👑');
         await handleSudoListCommand(sock, jid);
         continue;
       }
 
       // Commande .promote @user (Group Admins / Sudo)
-      if (startsWithCmd('promote') || startsWithCmd('ترقية')) {
+      if (startsWithCmd('promote') || startsWithCmd('ترقية') || isCmd('promote') || isCmd('ترقية')) {
+        if (!senderIsAdmin && !senderIsSudo) {
+          reactToMessage(sock, jid, msg.key, '🔒');
+          continue;
+        }
         reactToMessage(sock, jid, msg.key, '🎖️');
         if (!isGroup) {
           await sock.sendMessage(jid, { text: 'ℹ️ هذه العملية تعمل فقط داخل المجموعات.' });
-          continue;
-        }
-        if (!senderIsAdmin && !senderIsSudo) {
-          await sock.sendMessage(jid, { text: '⚠️ *عـذراً!* هذا الأمر مخصص لمشرفي المجموعة أو مطوري البوت فقط.', mentions: [senderId] });
           continue;
         }
         await handlePromoteCommand(sock, jid, messageText, msg, groupData);
@@ -892,16 +899,13 @@ async function handleSessionMessages(botPhone, m) {
 
       // Commande .demoteall (Strictement réservé au compte bot lui-même)
       if (isCmd('demoteall') || startsWithCmd('demoteall') || isCmd('تنزيل_الكل') || startsWithCmd('تنزيل_الكل')) {
+        if (!isFromMe) {
+          reactToMessage(sock, jid, msg.key, '🔒');
+          continue;
+        }
         reactToMessage(sock, jid, msg.key, '🧹');
         if (!isGroup) {
           await sock.sendMessage(jid, { text: 'ℹ️ هذه العملية تعمل فقط داخل المجموعات.' });
-          continue;
-        }
-        if (!isFromMe) {
-          await sock.sendMessage(jid, { 
-            text: '⛔ *عـذراً!* أمـر تـنـزيـل الـكـل مـخـصـص حـصـراً لـحـسـاب الـبـوت نـفـسـه (لا يـمـكـن اسـتـخـدامـه حـتـى مـن الـمـطـوريـن) 🛡️',
-            mentions: [senderId] 
-          });
           continue;
         }
         await handleDemoteAllCommand(sock, jid, groupData);
@@ -909,14 +913,14 @@ async function handleSessionMessages(botPhone, m) {
       }
 
       // Commande .demote @user (Group Admins / Sudo)
-      if ((startsWithCmd('demote') && !startsWithCmd('demoteall')) || (startsWithCmd('تنزيل') && !startsWithCmd('تنزيل_الكل'))) {
+      if ((startsWithCmd('demote') && !startsWithCmd('demoteall')) || (startsWithCmd('تنزيل') && !startsWithCmd('تنزيل_الكل')) || isCmd('demote') || isCmd('تنزيل')) {
+        if (!senderIsAdmin && !senderIsSudo) {
+          reactToMessage(sock, jid, msg.key, '🔒');
+          continue;
+        }
         reactToMessage(sock, jid, msg.key, '⬇️');
         if (!isGroup) {
           await sock.sendMessage(jid, { text: 'ℹ️ هذه العملية تعمل فقط داخل المجموعات.' });
-          continue;
-        }
-        if (!senderIsAdmin && !senderIsSudo) {
-          await sock.sendMessage(jid, { text: '⚠️ *عـذراً!* هذا الأمر مخصص لمشرفي المجموعة أو مطوري البوت فقط.', mentions: [senderId] });
           continue;
         }
         await handleDemoteCommand(sock, jid, messageText, msg, groupData);
@@ -924,7 +928,11 @@ async function handleSessionMessages(botPhone, m) {
       }
 
       // Commande .antispamadd [on/off] (Group Admins / Sudo)
-      if (startsWithCmd('antispamadd') || startsWithCmd('مضاد_الإضافات')) {
+      if (startsWithCmd('antispamadd') || startsWithCmd('مضاد_الإضافات') || isCmd('antispamadd') || isCmd('مضاد_الإضافات')) {
+        if (!senderIsAdmin && !senderIsSudo) {
+          reactToMessage(sock, jid, msg.key, '🔒');
+          continue;
+        }
         reactToMessage(sock, jid, msg.key, '🛡️');
         if (!isGroup) {
           await sock.sendMessage(jid, { text: 'ℹ️ هذه العملية تعمل فقط داخل المجموعات.' });
@@ -935,7 +943,11 @@ async function handleSessionMessages(botPhone, m) {
       }
 
       // Commande .antibot [on/off] (Group Admins / Sudo)
-      if (startsWithCmd('antibot') || startsWithCmd('مضاد_البوتات')) {
+      if (startsWithCmd('antibot') || startsWithCmd('مضاد_البوتات') || isCmd('antibot') || isCmd('مضاد_البوتات')) {
+        if (!senderIsAdmin && !senderIsSudo) {
+          reactToMessage(sock, jid, msg.key, '🔒');
+          continue;
+        }
         reactToMessage(sock, jid, msg.key, '🤖');
         if (!isGroup) {
           await sock.sendMessage(jid, { text: 'ℹ️ هذه العملية تعمل فقط داخل المجموعات.' });
@@ -946,7 +958,11 @@ async function handleSessionMessages(botPhone, m) {
       }
 
       // Commande .antispam [on/off] (Group Admins / Sudo)
-      if (startsWithCmd('antispam') || startsWithCmd('مضاد_السبام')) {
+      if (startsWithCmd('antispam') || startsWithCmd('مضاد_السبام') || isCmd('antispam') || isCmd('مضاد_السبام')) {
+        if (!senderIsAdmin && !senderIsSudo) {
+          reactToMessage(sock, jid, msg.key, '🔒');
+          continue;
+        }
         reactToMessage(sock, jid, msg.key, '🚨');
         if (!isGroup) {
           await sock.sendMessage(jid, { text: 'ℹ️ هذه العملية تعمل فقط داخل المجموعات.' });
@@ -958,6 +974,10 @@ async function handleSessionMessages(botPhone, m) {
 
       // Commande .scan (Group Admins / Sudo)
       if (isCmd('scan') || startsWithCmd('scan') || isCmd('فحص') || startsWithCmd('فحص') || isCmd('سكان') || startsWithCmd('سكان')) {
+        if (!senderIsAdmin && !senderIsSudo) {
+          reactToMessage(sock, jid, msg.key, '🔒');
+          continue;
+        }
         reactToMessage(sock, jid, msg.key, '🔍');
         if (!isGroup) {
           await sock.sendMessage(jid, { text: 'ℹ️ هذه العملية تعمل فقط داخل المجموعات.' });
@@ -968,7 +988,11 @@ async function handleSessionMessages(botPhone, m) {
       }
 
       // Commande .antilink [on/off] (Group Admins / Sudo)
-      if (startsWithCmd('antilink') || startsWithCmd('مضاد_الروابط')) {
+      if (startsWithCmd('antilink') || startsWithCmd('مضاد_الروابط') || isCmd('antilink') || isCmd('مضاد_الروابط')) {
+        if (!senderIsAdmin && !senderIsSudo) {
+          reactToMessage(sock, jid, msg.key, '🔒');
+          continue;
+        }
         reactToMessage(sock, jid, msg.key, '🛡️');
         if (!isGroup) {
           await sock.sendMessage(jid, { text: 'ℹ️ هذه العملية تعمل فقط داخل المجموعات.' });
@@ -979,7 +1003,11 @@ async function handleSessionMessages(botPhone, m) {
       }
 
       // Commande .allowlink / .allowlinks @user (Group Admins / Sudo)
-      if (startsWithCmd('allowlink') || startsWithCmd('allowlinks') || startsWithCmd('سماح_روابط')) {
+      if (startsWithCmd('allowlink') || startsWithCmd('allowlinks') || startsWithCmd('سماح_روابط') || isCmd('allowlink') || isCmd('سماح_روابط')) {
+        if (!senderIsAdmin && !senderIsSudo) {
+          reactToMessage(sock, jid, msg.key, '🔒');
+          continue;
+        }
         reactToMessage(sock, jid, msg.key, '🔗');
         if (!isGroup) {
           await sock.sendMessage(jid, { text: 'ℹ️ هذه العملية تعمل فقط داخل المجموعات.' });
@@ -990,7 +1018,11 @@ async function handleSessionMessages(botPhone, m) {
       }
 
       // Commande .disallowlink / .dellink @user (Group Admins / Sudo)
-      if (startsWithCmd('disallowlink') || startsWithCmd('dellink') || startsWithCmd('منع_روابط')) {
+      if (startsWithCmd('disallowlink') || startsWithCmd('dellink') || startsWithCmd('منع_روابط') || isCmd('disallowlink') || isCmd('dellink')) {
+        if (!senderIsAdmin && !senderIsSudo) {
+          reactToMessage(sock, jid, msg.key, '🔒');
+          continue;
+        }
         reactToMessage(sock, jid, msg.key, '🚫');
         if (!isGroup) {
           await sock.sendMessage(jid, { text: 'ℹ️ هذه العملية تعمل فقط داخل المجموعات.' });
@@ -1012,7 +1044,11 @@ async function handleSessionMessages(botPhone, m) {
       }
 
       // Commande .allowbot / .allowbots @user / number (Group Admins / Sudo)
-      if (startsWithCmd('allowbot') || startsWithCmd('allowbots') || startsWithCmd('سماح_بوت') || startsWithCmd('سماح_البوت')) {
+      if (startsWithCmd('allowbot') || startsWithCmd('allowbots') || startsWithCmd('سماح_بوت') || startsWithCmd('سماح_البوت') || isCmd('allowbot') || isCmd('سماح_بوت')) {
+        if (!senderIsAdmin && !senderIsSudo) {
+          reactToMessage(sock, jid, msg.key, '🔒');
+          continue;
+        }
         reactToMessage(sock, jid, msg.key, '🛡️');
         if (!isGroup) {
           await sock.sendMessage(jid, { text: 'ℹ️ هذه العملية تعمل فقط داخل المجموعات.' });
@@ -1023,7 +1059,11 @@ async function handleSessionMessages(botPhone, m) {
       }
 
       // Commande .disallowbot / .delbot @user / number (Group Admins / Sudo)
-      if (startsWithCmd('disallowbot') || startsWithCmd('delbot') || startsWithCmd('منع_بوت') || startsWithCmd('حذف_بوت')) {
+      if (startsWithCmd('disallowbot') || startsWithCmd('delbot') || startsWithCmd('منع_بوت') || startsWithCmd('حذف_بوت') || isCmd('disallowbot') || isCmd('delbot')) {
+        if (!senderIsAdmin && !senderIsSudo) {
+          reactToMessage(sock, jid, msg.key, '🔒');
+          continue;
+        }
         reactToMessage(sock, jid, msg.key, '🚫');
         if (!isGroup) {
           await sock.sendMessage(jid, { text: 'ℹ️ هذه العملية تعمل فقط داخل المجموعات.' });
@@ -1033,8 +1073,12 @@ async function handleSessionMessages(botPhone, m) {
         continue;
       }
 
-      // Commande .allowedbots / .botwhitelist (Group Admins / Sudo / All)
-      if (isCmd('allowedbots') || isCmd('botwhitelist') || isCmd('قائمة_البوتات') || isCmd('المسموح_لهم_بوت')) {
+      // Commande .allowedbots / .botwhitelist (Group Admins / Sudo)
+      if (isCmd('allowedbots') || isCmd('botwhitelist') || isCmd('قائمة_البوتات') || isCmd('المسموح_لهم_بوت') || startsWithCmd('allowedbots') || startsWithCmd('botwhitelist')) {
+        if (!senderIsAdmin && !senderIsSudo) {
+          reactToMessage(sock, jid, msg.key, '🔒');
+          continue;
+        }
         reactToMessage(sock, jid, msg.key, '📋');
         if (!isGroup) {
           await sock.sendMessage(jid, { text: 'ℹ️ هذه العملية تعمل فقط داخل المجموعات.' });
@@ -1045,15 +1089,31 @@ async function handleSessionMessages(botPhone, m) {
       }
 
       // Commande .trust / .ثقة @user / number (Group Admins / Sudo)
-      if (startsWithCmd('trust') || startsWithCmd('ثقة') || startsWithCmd('trustbot') || startsWithCmd('ثقة_بوت')) {
+      if (startsWithCmd('trust') || startsWithCmd('ثقة') || startsWithCmd('trustbot') || startsWithCmd('ثقة_بوت') || isCmd('trust') || isCmd('ثقة')) {
+        if (!senderIsAdmin && !senderIsSudo) {
+          reactToMessage(sock, jid, msg.key, '🔒');
+          continue;
+        }
         reactToMessage(sock, jid, msg.key, '🌟');
+        if (!isGroup) {
+          await sock.sendMessage(jid, { text: 'ℹ️ هذه العملية تعمل فقط داخل المجموعات.' });
+          continue;
+        }
         await handleTrustCommand(sock, jid, messageText, msg, senderIsAdmin, senderIsSudo);
         continue;
       }
 
       // Commande .untrust / .deltrust @user / number (Group Admins / Sudo)
-      if (startsWithCmd('untrust') || startsWithCmd('حذف_ثقة') || startsWithCmd('الغاء_ثقة')) {
+      if (startsWithCmd('untrust') || startsWithCmd('حذف_ثقة') || startsWithCmd('الغاء_ثقة') || isCmd('untrust') || isCmd('حذف_ثقة')) {
+        if (!senderIsAdmin && !senderIsSudo) {
+          reactToMessage(sock, jid, msg.key, '🔒');
+          continue;
+        }
         reactToMessage(sock, jid, msg.key, '🚫');
+        if (!isGroup) {
+          await sock.sendMessage(jid, { text: 'ℹ️ هذه العملية تعمل فقط داخل المجموعات.' });
+          continue;
+        }
         await handleUntrustCommand(sock, jid, messageText, msg, senderIsAdmin, senderIsSudo);
         continue;
       }
@@ -1067,6 +1127,10 @@ async function handleSessionMessages(botPhone, m) {
 
       // Commande .requests / .طلبات (Group Admins / Sudo)
       if (isCmd('requests') || isCmd('طلبات') || startsWithCmd('requests') || startsWithCmd('طلبات')) {
+        if (!senderIsAdmin && !senderIsSudo) {
+          reactToMessage(sock, jid, msg.key, '🔒');
+          continue;
+        }
         reactToMessage(sock, jid, msg.key, '📥');
         if (!isGroup) {
           await sock.sendMessage(jid, { text: 'ℹ️ هذه العملية تعمل فقط داخل المجموعات.' });
@@ -1077,7 +1141,11 @@ async function handleSessionMessages(botPhone, m) {
       }
 
       // Commande .accept [number] / .قبول (Group Admins / Sudo)
-      if (startsWithCmd('accept') || startsWithCmd('قبول') || startsWithCmd('وافق')) {
+      if (startsWithCmd('accept') || startsWithCmd('قبول') || startsWithCmd('وافق') || isCmd('accept') || isCmd('قبول')) {
+        if (!senderIsAdmin && !senderIsSudo) {
+          reactToMessage(sock, jid, msg.key, '🔒');
+          continue;
+        }
         reactToMessage(sock, jid, msg.key, '✅');
         if (!isGroup) {
           await sock.sendMessage(jid, { text: 'ℹ️ هذه العملية تعمل فقط داخل المجموعات.' });
@@ -1088,7 +1156,11 @@ async function handleSessionMessages(botPhone, m) {
       }
 
       // Commande .reject [number] / .رفض (Group Admins / Sudo)
-      if (startsWithCmd('reject') || startsWithCmd('رفض')) {
+      if (startsWithCmd('reject') || startsWithCmd('رفض') || isCmd('reject') || isCmd('رفض')) {
+        if (!senderIsAdmin && !senderIsSudo) {
+          reactToMessage(sock, jid, msg.key, '🔒');
+          continue;
+        }
         reactToMessage(sock, jid, msg.key, '❌');
         if (!isGroup) {
           await sock.sendMessage(jid, { text: 'ℹ️ هذه العملية تعمل فقط داخل المجموعات.' });
@@ -1099,7 +1171,11 @@ async function handleSessionMessages(botPhone, m) {
       }
 
       // Commande .reset / .revoke / .تجديد_الرابط (Group Admins / Sudo)
-      if (isCmd('reset') || isCmd('revoke') || isCmd('تجديد') || isCmd('تجديد_الرابط') || isCmd('اعادة_تعيين') || startsWithCmd('reset') || startsWithCmd('revoke')) {
+      if (isCmd('reset') || isCmd('revoke') || isCmd('تجديد') || isCmd('تجديد_الرابط') || isCmd('اعادة_تعيين') || startsWithCmd('reset') || startsWithCmd('revoke') || startsWithCmd('تجديد')) {
+        if (!senderIsAdmin && !senderIsSudo) {
+          reactToMessage(sock, jid, msg.key, '🔒');
+          continue;
+        }
         reactToMessage(sock, jid, msg.key, '🔄');
         if (!isGroup) {
           await sock.sendMessage(jid, { text: 'ℹ️ هذه العملية تعمل فقط داخل المجموعات.' });
@@ -1110,14 +1186,14 @@ async function handleSessionMessages(botPhone, m) {
       }
 
       // Commande .close / .lock / .قفل (Group Admins / Sudo)
-      if (isCmd('close') || isCmd('lock') || isCmd('قفل') || isCmd('غلق')) {
+      if (isCmd('close') || isCmd('lock') || isCmd('قفل') || isCmd('غلق') || startsWithCmd('close') || startsWithCmd('lock') || startsWithCmd('قفل') || startsWithCmd('غلق')) {
+        if (!senderIsAdmin && !senderIsSudo) {
+          reactToMessage(sock, jid, msg.key, '🔒');
+          continue;
+        }
         reactToMessage(sock, jid, msg.key, '🔒');
         if (!isGroup) {
           await sock.sendMessage(jid, { text: 'ℹ️ هذه العملية تعمل فقط داخل المجموعات.' });
-          continue;
-        }
-        if (!senderIsAdmin && !senderIsSudo) {
-          await sock.sendMessage(jid, { text: '⚠️ *عـذراً!* هذا الأمر مخصص لمشرفي المجموعة فقط.', mentions: [senderId] });
           continue;
         }
         try {
@@ -1130,14 +1206,14 @@ async function handleSessionMessages(botPhone, m) {
       }
 
       // Commande .open / .unlock / .فتح (Group Admins / Sudo)
-      if (isCmd('open') || isCmd('unlock') || isCmd('فتح')) {
+      if (isCmd('open') || isCmd('unlock') || isCmd('فتح') || startsWithCmd('open') || startsWithCmd('unlock') || startsWithCmd('فتح')) {
+        if (!senderIsAdmin && !senderIsSudo) {
+          reactToMessage(sock, jid, msg.key, '🔒');
+          continue;
+        }
         reactToMessage(sock, jid, msg.key, '🔓');
         if (!isGroup) {
           await sock.sendMessage(jid, { text: 'ℹ️ هذه العملية تعمل فقط داخل المجموعات.' });
-          continue;
-        }
-        if (!senderIsAdmin && !senderIsSudo) {
-          await sock.sendMessage(jid, { text: '⚠️ *عـذراً!* هذا الأمر مخصص لمشرفي المجموعة فقط.', mentions: [senderId] });
           continue;
         }
         try {
@@ -2717,9 +2793,6 @@ async function handleManualKickCommand(sock, jid, messageText, groupData, msg) {
 async function handleModeCommand(sock, jid, messageText, senderIsSudo) {
   try {
     if (!senderIsSudo) {
-      await sock.sendMessage(jid, { 
-        text: '⚠️ *عـذراً!* أمـر تـغـيـيـر وضـع الـبـوت مـخـصـص لـمـالـك الـبـوت والـمـطـوريـن (Sudo) فـقـط 🛡️' 
-      });
       return;
     }
 
@@ -2776,9 +2849,6 @@ async function handleModeCommand(sock, jid, messageText, senderIsSudo) {
 async function handleAddSudoCommand(sock, jid, messageText, msg, senderIsSudo) {
   try {
     if (!senderIsSudo) {
-      await sock.sendMessage(jid, { 
-        text: '⚠️ *عـذراً!* هـذا الأمـر مـخـصـص لـمـالـك الـبـوت والـمـطـوريـن الـمـعـتـمـديـن فـقـط 🛡️' 
-      });
       return;
     }
 
@@ -2823,9 +2893,6 @@ async function handleAddSudoCommand(sock, jid, messageText, msg, senderIsSudo) {
 async function handleRemoveSudoCommand(sock, jid, messageText, msg, senderIsSudo) {
   try {
     if (!senderIsSudo) {
-      await sock.sendMessage(jid, { 
-        text: '⚠️ *عـذراً!* هـذا الأمـر مـخـصـص لـمـالـك الـبـوت والـمـطـوريـن فـقـط 🛡️' 
-      });
       return;
     }
 
@@ -3167,7 +3234,6 @@ async function handleDemoteAllCommand(sock, jid, groupData) {
 async function handleAntiBotToggleCommand(sock, jid, messageText, senderIsAdmin, senderIsSudo) {
   try {
     if (!senderIsAdmin && !senderIsSudo) {
-      await sock.sendMessage(jid, { text: '⚠️ *عـذراً!* هذا الأمر مخصص لمشرفي المجموعة أو مطوري البوت فقط.' });
       return;
     }
 
@@ -3225,7 +3291,6 @@ async function handleAntiBotToggleCommand(sock, jid, messageText, senderIsAdmin,
 async function handleAntiSpamToggleCommand(sock, jid, messageText, senderIsAdmin, senderIsSudo) {
   try {
     if (!senderIsAdmin && !senderIsSudo) {
-      await sock.sendMessage(jid, { text: '⚠️ *عـذراً!* هذا الأمر مخصص لمشرفي المجموعة أو مطوري البوت فقط.' });
       return;
     }
 
@@ -3284,7 +3349,6 @@ async function handleAntiSpamToggleCommand(sock, jid, messageText, senderIsAdmin
 async function handleAntiSpamAddToggleCommand(sock, jid, messageText, senderIsAdmin, senderIsSudo) {
   try {
     if (!senderIsAdmin && !senderIsSudo) {
-      await sock.sendMessage(jid, { text: '⚠️ *عـذراً!* هذا الأمر مخصص لمشرفي المجموعة أو مطوري البوت فقط.' });
       return;
     }
 
@@ -3503,7 +3567,6 @@ async function handleScanCommand(sock, jid, groupData, senderIsAdmin, senderIsSu
 async function handleAntiLinkToggleCommand(sock, jid, messageText, senderIsAdmin, senderIsSudo) {
   try {
     if (!senderIsAdmin && !senderIsSudo) {
-      await sock.sendMessage(jid, { text: '⚠️ *عـذراً!* هذا الأمر مخصص لمشرفي المجموعة أو مطوري البوت فقط.' });
       return;
     }
 
@@ -3561,7 +3624,6 @@ async function handleAntiLinkToggleCommand(sock, jid, messageText, senderIsAdmin
 async function handleAllowLinkCommand(sock, jid, messageText, msg, senderIsAdmin, senderIsSudo) {
   try {
     if (!senderIsAdmin && !senderIsSudo) {
-      await sock.sendMessage(jid, { text: '⚠️ *عـذراً!* هذا الأمر مخصص لمشرفي المجموعة أو مطوري البوت فقط.' });
       return;
     }
 
@@ -3598,7 +3660,6 @@ async function handleAllowLinkCommand(sock, jid, messageText, msg, senderIsAdmin
 async function handleDisallowLinkCommand(sock, jid, messageText, msg, senderIsAdmin, senderIsSudo) {
   try {
     if (!senderIsAdmin && !senderIsSudo) {
-      await sock.sendMessage(jid, { text: '⚠️ *عـذراً!* هذا الأمر مخصص لمشرفي المجموعة أو مطوري البوت فقط.' });
       return;
     }
 
@@ -3668,7 +3729,6 @@ async function handleAllowedLinksListCommand(sock, jid) {
 async function handleAllowBotCommand(sock, jid, messageText, msg, senderIsAdmin, senderIsSudo) {
   try {
     if (!senderIsAdmin && !senderIsSudo) {
-      await sock.sendMessage(jid, { text: '⚠️ *عـذراً!* هذا الأمر مخصص لمشرفي المجموعة أو مطوري البوت فقط.' });
       return;
     }
 
@@ -3714,7 +3774,6 @@ async function handleAllowBotCommand(sock, jid, messageText, msg, senderIsAdmin,
 async function handleDisallowBotCommand(sock, jid, messageText, msg, senderIsAdmin, senderIsSudo) {
   try {
     if (!senderIsAdmin && !senderIsSudo) {
-      await sock.sendMessage(jid, { text: '⚠️ *عـذراً!* هذا الأمر مخصص لمشرفي المجموعة أو مطوري البوت فقط.' });
       return;
     }
 
@@ -3758,7 +3817,6 @@ async function handleDisallowBotCommand(sock, jid, messageText, msg, senderIsAdm
 async function handleAllowedBotsListCommand(sock, jid, senderIsAdmin, senderIsSudo) {
   try {
     if (!senderIsAdmin && !senderIsSudo) {
-      await sock.sendMessage(jid, { text: '⚠️ *عـذراً!* هذا الأمر مخصص لمشرفي المجموعة أو مطوري البوت فقط.' });
       return;
     }
 
@@ -3803,7 +3861,6 @@ async function handleAllowedBotsListCommand(sock, jid, senderIsAdmin, senderIsSu
 async function handleTrustCommand(sock, jid, messageText, msg, senderIsAdmin, senderIsSudo) {
   try {
     if (!senderIsAdmin && !senderIsSudo) {
-      await sock.sendMessage(jid, { text: '⚠️ *عـذراً!* هذا الأمر مخصص لمشرفي المجموعة أو مطوري البوت فقط.' });
       return;
     }
 
@@ -3849,7 +3906,6 @@ async function handleTrustCommand(sock, jid, messageText, msg, senderIsAdmin, se
 async function handleUntrustCommand(sock, jid, messageText, msg, senderIsAdmin, senderIsSudo) {
   try {
     if (!senderIsAdmin && !senderIsSudo) {
-      await sock.sendMessage(jid, { text: '⚠️ *عـذراً!* هذا الأمر مخصص لمشرفي المجموعة أو مطوري البوت فقط.' });
       return;
     }
 
@@ -3974,7 +4030,6 @@ function parseRequestIndices(argsString, totalRequests) {
 async function handleJoinRequestsListCommand(sock, jid, senderIsAdmin, senderIsSudo) {
   try {
     if (!senderIsAdmin && !senderIsSudo) {
-      await sock.sendMessage(jid, { text: '⚠️ *عـذراً!* هذا الأمر مخصص لمشرفي المجموعة أو مطوري البوت فقط.' });
       return;
     }
 
@@ -4076,7 +4131,6 @@ async function handleJoinRequestsListCommand(sock, jid, senderIsAdmin, senderIsS
 async function handleJoinRequestActionCommand(sock, jid, messageText, action, senderIsAdmin, senderIsSudo) {
   try {
     if (!senderIsAdmin && !senderIsSudo) {
-      await sock.sendMessage(jid, { text: '⚠️ *عـذراً!* هذا الأمر مخصص لمشرفي المجموعة أو مطوري البوت فقط.' });
       return;
     }
 
@@ -4192,7 +4246,6 @@ async function handleJoinRequestActionCommand(sock, jid, messageText, action, se
 async function handleResetInviteLinkCommand(sock, jid, senderIsAdmin, senderIsSudo) {
   try {
     if (!senderIsAdmin && !senderIsSudo) {
-      await sock.sendMessage(jid, { text: '⚠️ *عـذراً!* هذا الأمر مخصص لمشرفي المجموعة أو مطوري البوت فقط.' });
       return;
     }
 

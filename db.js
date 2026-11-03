@@ -267,7 +267,7 @@ export function setSetting(key, value) {
 }
 
 export function getBotMode() {
-  return getSetting('bot_mode', 'public');
+  return getSetting('bot_mode', 'private');
 }
 
 export function setBotMode(mode) {
@@ -412,12 +412,12 @@ export function getAllowedLinkUsers(groupId) {
 
 export function isAntiBotEnabled(groupId) {
   try {
-    if (!groupId) return true;
+    if (!groupId) return false;
     const cleanId = cleanGroupId(groupId);
-    const val = getSetting(`antibot_${cleanId}`, 'on');
-    return val !== 'off';
+    const val = getSetting(`antibot_${cleanId}`, 'off');
+    return val === 'on';
   } catch (error) {
-    return true;
+    return false;
   }
 }
 
@@ -432,12 +432,12 @@ export function setAntiBotEnabled(groupId, enabled) {
 
 export function isAntiSpamEnabled(groupId) {
   try {
-    if (!groupId) return true;
+    if (!groupId) return false;
     const cleanId = cleanGroupId(groupId);
-    const val = getSetting(`antispam_${cleanId}`, 'on');
-    return val !== 'off';
+    const val = getSetting(`antispam_${cleanId}`, 'off');
+    return val === 'on';
   } catch (error) {
-    return true;
+    return false;
   }
 }
 
