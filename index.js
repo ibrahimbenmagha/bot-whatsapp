@@ -7,6 +7,7 @@ import 'dotenv/config';
 import express from 'express';
 import path from 'path';
 import fs from 'fs';
+import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 import makeWASocket, { useMultiFileAuthState, DisconnectReason, Browsers } from '@whiskeysockets/baileys';
 import { Boom } from '@hapi/boom';
@@ -3974,6 +3975,147 @@ async function handleJoinRequestActionCommand(sock, jid, messageText, action, se
 const app = express();
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
+
+// ----------------------------------------------------
+// Authentification & Sécurité Espace Admin (/admin)
+// Login: JellalFernandez | Mdp: 120501
+// ----------------------------------------------------
+
+const ADMIN_CREDENTIALS = {
+  username: 'JellalFernandez',
+  password: '120501'
+};
+
+const adminTokens = new Map(); // token -> { username, loginTime }
+
+function verifyAdminToken(req) {
+  const authHeader = req.headers['authorization'] || '';
+  const token = authHeader.startsWith('Bearer ')
+    ? authHeader.slice(7).trim()
+    : req.headers['x-admin-token'] || req.query.token;
+
+  if (token && adminTokens.has(token)) {
+    return adminTokens.get(token);
+  }
+  return null;
+}
+
+// Page d'administration /admin demandée par l'utilisateur
+app.get('/admin', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'admin.html'));
+});
+
+// Redirection sécurisée des anciennes URL vers /admin
+app.get('/comptes.html', (req, res) => res.redirect('/admin'));
+app.get('/comptes', (req, res) => res.redirect('/admin'));
+
+/**
+ * API: Connexion Administrateur
+ */
+app.post('/api/admin/login', (req, res) => {
+  const { username, password } = req.body || {};
+  if (username === ADMIN_CREDENTIALS.username && String(password) === ADMIN_CREDENTIALS.password) {
+    const token = crypto.randomBytes(32).toString('hex');
+    adminTokens.set(token, {
+      username: ADMIN_CREDENTIALS.username,
+      loginTime: Date.now()
+    });
+    logActivity(`[ADMIN] Connexion réussie de l'administrateur ${username}`, 'system');
+    return res.json({
+      success: true,
+      token,
+      username: ADMIN_CREDENTIALS.username
+    });
+  }
+  logActivity(`[ADMIN] Échec de connexion avec le login "${username}"`, 'warn');
+  return res.status(401).json({
+    success: false,
+    error: 'Identifiant ou mot de passe incorrect.'
+  });
+});
+
+/**
+ * API: Déconnexion Administrateur
+ */
+app.post('/api/admin/logout', (req, res) => {
+  const authHeader = req.headers['authorization'] || '';
+  const token = authHeader.startsWith('Bearer ')
+    ? authHeader.slice(7).trim()
+    : req.headers['x-admin-token'] || req.body?.token;
+  if (token) {
+    adminTokens.delete(token);
+  }
+  res.json({ success: true, message: 'Déconnecté avec succès.' });
+});
+
+/**
+ * API: Vérifier validité du token admin
+ */
+app.get('/api/admin/verify', (req, res) => {
+  const session = verifyAdminToken(req);
+  if (session) {
+    return res.json({ success: true, username: session.username });
+  }
+  return res.status(401).json({ success: false, error: 'Session expirée ou non autorisée.' });
+});
+
+/**
+ * API: Liste des comptes protégée pour l'interface Admin
+ */
+app.get('/api/admin/accounts', async (req, res) => {
+  if (!verifyAdminToken(req)) {
+    return res.status(401).json({ success: false, error: 'Accès non autorisé. Veuillez vous connecter.' });
+  }
+  try {
+    const accounts = await getAllAccountsData();
+    res.json({ success: true, accounts });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/**
+ * API: Forcer la déconnexion d'un utilisateur / compte WhatsApp
+ */
+app.post('/api/admin/disconnect', async (req, res) => {
+  if (!verifyAdminToken(req)) {
+    return res.status(401).json({ success: false, error: 'Accès non autorisé.' });
+  }
+  try {
+    const { phoneNumber } = req.body || {};
+    const cleanPhone = String(phoneNumber || '').replace(/[^0-9]/g, '');
+
+    if (!cleanPhone) {
+      return res.status(400).json({ success: false, error: 'Numéro de téléphone requis.' });
+    }
+
+    logActivity(`[ADMIN] Déconnexion FORCÉE demandée pour le compte +${cleanPhone}...`, 'warn');
+
+    const session = sessions.get(cleanPhone);
+    if (session?.sock) {
+      try { await session.sock.logout(); } catch (_) {}
+      try { session.sock.ev.removeAllListeners(); session.sock.ws?.close(); } catch (_) {}
+    }
+
+    // Supprimer définitivement le dossier de session pour ce numéro
+    const sDir = path.join(SESSIONS_BASE_DIR, cleanPhone);
+    if (fs.existsSync(sDir)) {
+      try { fs.rmSync(sDir, { recursive: true, force: true }); } catch (_) {}
+    }
+
+    sessions.delete(cleanPhone);
+    logActivity(`[ADMIN] Compte +${cleanPhone} déconnecté de force et supprimé du serveur avec succès.`, 'system');
+    broadcastSSE({ type: 'session_deleted', phone: cleanPhone });
+
+    res.json({
+      success: true,
+      message: `Le compte +${cleanPhone} a été déconnecté de force avec succès.`
+    });
+  } catch (error) {
+    console.error('Erreur déconnexion forcée admin:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
 
 /**
  * API: Liste de tous les comptes WhatsApp connectés / enregistrés

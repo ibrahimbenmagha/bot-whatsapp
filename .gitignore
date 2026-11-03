@@ -6,6 +6,7 @@ node_modules/
 
 # WhatsApp Auth Session (CRITICAL: Never commit your session keys!)
 auth_info_multi/
+sessions/
 *.session
 
 # Logs

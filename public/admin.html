@@ -1,0 +1,470 @@
+<!DOCTYPE html>
+<html lang="fr" dir="ltr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Administration • إمبراطورية باراديس</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+  <style>
+    /* Styles spécifiques pour le panneau Admin */
+    .admin-login-wrapper {
+      min-height: calc(100vh - 120px);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+    }
+
+    .admin-login-card {
+      width: 100%;
+      max-width: 440px;
+      background: rgba(15, 23, 42, 0.85);
+      backdrop-filter: blur(20px);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      border-radius: 20px;
+      padding: 36px 30px;
+      box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.6), 0 0 30px rgba(37, 211, 102, 0.15);
+      animation: fadeInCard 0.4s ease-out;
+    }
+
+    @keyframes fadeInCard {
+      from { opacity: 0; transform: translateY(16px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    .admin-login-header {
+      text-align: center;
+      margin-bottom: 28px;
+    }
+
+    .admin-login-icon {
+      width: 64px;
+      height: 64px;
+      margin: 0 auto 16px;
+      background: linear-gradient(135deg, rgba(37, 211, 102, 0.2), rgba(16, 185, 129, 0.05));
+      border: 1px solid rgba(37, 211, 102, 0.4);
+      border-radius: 18px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 30px;
+      box-shadow: 0 0 20px rgba(37, 211, 102, 0.2);
+    }
+
+    .admin-login-header h2 {
+      font-size: 24px;
+      font-weight: 800;
+      color: #fff;
+      margin-bottom: 6px;
+      letter-spacing: -0.02em;
+    }
+
+    .admin-login-header p {
+      font-size: 14px;
+      color: #94a3b8;
+    }
+
+    .login-error-alert {
+      background: rgba(239, 68, 68, 0.12);
+      border: 1px solid rgba(239, 68, 68, 0.35);
+      color: #fca5a5;
+      padding: 12px 14px;
+      border-radius: 10px;
+      font-size: 13px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 20px;
+    }
+
+    .password-wrapper {
+      position: relative;
+    }
+
+    .password-toggle-btn {
+      position: absolute;
+      right: 12px;
+      top: 50%;
+      transform: translateY(-50%);
+      background: none;
+      border: none;
+      color: #94a3b8;
+      cursor: pointer;
+      font-size: 16px;
+      padding: 4px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .password-toggle-btn:hover {
+      color: #fff;
+    }
+
+    /* Admin Dashboard Topbar */
+    .admin-top-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 12px;
+      padding: 16px 20px;
+      background: rgba(15, 23, 42, 0.65);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 14px;
+      margin-bottom: 24px;
+    }
+
+    .admin-user-info {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .admin-badge-royal {
+      background: linear-gradient(135deg, #10b981, #059669);
+      color: #fff;
+      font-weight: 700;
+      font-size: 12px;
+      padding: 4px 10px;
+      border-radius: 20px;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    /* Stats Grid */
+    .admin-stats-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 16px;
+      margin-bottom: 24px;
+    }
+
+    .stat-card {
+      background: rgba(15, 23, 42, 0.6);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 14px;
+      padding: 18px;
+      display: flex;
+      align-items: center;
+      gap: 14px;
+    }
+
+    .stat-icon {
+      width: 44px;
+      height: 44px;
+      border-radius: 12px;
+      background: rgba(37, 211, 102, 0.12);
+      border: 1px solid rgba(37, 211, 102, 0.25);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 22px;
+    }
+
+    .stat-content h4 {
+      font-size: 12px;
+      color: #94a3b8;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      margin-bottom: 4px;
+    }
+
+    .stat-content .stat-number {
+      font-size: 22px;
+      font-weight: 800;
+      color: #fff;
+    }
+
+    /* Bouton Forcer Déconnexion */
+    .btn-force-disconnect {
+      background: linear-gradient(135deg, #ef4444, #dc2626) !important;
+      color: #fff !important;
+      border: 1px solid rgba(239, 68, 68, 0.5) !important;
+      padding: 8px 16px !important;
+      font-size: 13px !important;
+      font-weight: 700 !important;
+      border-radius: 10px !important;
+      display: inline-flex !important;
+      align-items: center !important;
+      gap: 8px !important;
+      cursor: pointer !important;
+      transition: all 0.2s ease !important;
+      box-shadow: 0 4px 12px rgba(220, 38, 38, 0.3) !important;
+    }
+
+    .btn-force-disconnect:hover {
+      background: linear-gradient(135deg, #dc2626, #b91c1c) !important;
+      transform: translateY(-1px) !important;
+      box-shadow: 0 6px 16px rgba(220, 38, 38, 0.45) !important;
+    }
+
+    /* Modal Confirmation */
+    .admin-modal-backdrop {
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.75);
+      backdrop-filter: blur(8px);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+      z-index: 9999;
+      animation: fadeInModal 0.2s ease-out;
+    }
+
+    @keyframes fadeInModal {
+      from { opacity: 0; }
+      to { opacity: 1; }
+    }
+
+    .admin-modal {
+      background: #0f172a;
+      border: 1px solid rgba(239, 68, 68, 0.3);
+      border-radius: 18px;
+      max-width: 460px;
+      width: 100%;
+      padding: 28px;
+      box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.8), 0 0 30px rgba(239, 68, 68, 0.2);
+    }
+
+    .admin-modal-icon {
+      font-size: 40px;
+      margin-bottom: 16px;
+      text-align: center;
+    }
+
+    .admin-modal h3 {
+      font-size: 20px;
+      font-weight: 800;
+      color: #fff;
+      text-align: center;
+      margin-bottom: 8px;
+    }
+
+    .admin-modal p {
+      font-size: 14px;
+      color: #94a3b8;
+      text-align: center;
+      line-height: 1.5;
+      margin-bottom: 24px;
+    }
+
+    .admin-modal-actions {
+      display: flex;
+      gap: 12px;
+      justify-content: flex-end;
+    }
+
+    .btn-secondary {
+      background: rgba(255, 255, 255, 0.08);
+      color: #e2e8f0;
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      padding: 10px 18px;
+      border-radius: 10px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s ease;
+    }
+
+    .btn-secondary:hover {
+      background: rgba(255, 255, 255, 0.15);
+    }
+  </style>
+</head>
+<body>
+  <div class="background-decorations">
+    <div class="glow-orb orb-1"></div>
+    <div class="glow-orb orb-2"></div>
+    <div class="glow-orb orb-3"></div>
+    <div class="grid-overlay"></div>
+  </div>
+
+  <!-- VUE 1 : Formulaire de Connexion Admin -->
+  <div id="loginView" class="admin-login-wrapper">
+    <div class="admin-login-card">
+      <div class="admin-login-header">
+        <div class="admin-login-icon">🏰</div>
+        <h2>إمبراطورية باراديس</h2>
+        <p>Panneau d'administration sécurisé</p>
+      </div>
+
+      <div id="loginError" class="login-error-alert" style="display: none;">
+        <span>⚠️</span>
+        <span id="loginErrorText">Identifiants incorrects.</span>
+      </div>
+
+      <form id="adminLoginForm">
+        <div class="input-group" style="margin-bottom: 18px;">
+          <label for="usernameInput">Nom d'utilisateur</label>
+          <div class="input-wrapper">
+            <input 
+              type="text" 
+              id="usernameInput" 
+              name="username" 
+              placeholder="JellalFernandez" 
+              required 
+              autocomplete="username"
+              autofocus
+            >
+          </div>
+        </div>
+
+        <div class="input-group" style="margin-bottom: 24px;">
+          <label for="passwordInput">Mot de passe</label>
+          <div class="input-wrapper password-wrapper">
+            <input 
+              type="password" 
+              id="passwordInput" 
+              name="password" 
+              placeholder="••••••" 
+              required 
+              autocomplete="current-password"
+            >
+            <button type="button" id="togglePasswordBtn" class="password-toggle-btn" title="Afficher/Masquer le mot de passe">
+              👁️
+            </button>
+          </div>
+        </div>
+
+        <button type="submit" id="btnLoginSubmit" class="btn btn-primary" style="width: 100%;">
+          <span>🔒 Connexion à l'espace Admin</span>
+        </button>
+      </form>
+    </div>
+  </div>
+
+  <!-- VUE 2 : Tableau de bord Administration -->
+  <div id="dashboardView" class="app-container" style="display: none;">
+    <!-- Top Header -->
+    <header class="app-header">
+      <div class="brand">
+        <div class="brand-logo">
+          <svg viewBox="0 0 24 24" width="28" height="28" fill="currentColor">
+            <path d="M12.04 2c-5.46 0-9.91 4.45-9.91 9.91 0 1.75.46 3.45 1.32 4.95L2.05 22l5.25-1.38c1.45.79 3.08 1.21 4.74 1.21 5.46 0 9.91-4.45 9.91-9.91 0-2.65-1.03-5.14-2.9-7.01A9.816 9.816 0 0 0 12.04 2m.01 1.67c2.2 0 4.26.86 5.82 2.42a8.225 8.225 0 0 1 2.41 5.83c0 4.54-3.7 8.24-8.24 8.24-1.42 0-2.82-.37-4.06-1.08l-.29-.17-3.12.82.83-3.04-.19-.3a8.217 8.217 0 0 1-1.26-4.46c0-4.54 3.7-8.24 8.24-8.24m4.54 11.63c-.25-.13-1.47-.72-1.7-.81-.23-.08-.39-.13-.56.13-.17.25-.64.81-.79.97-.14.17-.29.19-.54.06-.25-.13-1.06-.39-2.02-1.25-.75-.67-1.26-1.5-1.4-1.75-.15-.25-.02-.39.11-.51.11-.11.25-.29.37-.44.13-.15.17-.25.25-.42.08-.17.04-.31-.02-.44-.06-.13-.56-1.35-.77-1.85-.2-.49-.41-.42-.56-.43h-.48c-.17 0-.44.06-.67.31-.23.25-.88.86-.88 2.1 0 1.24.9 2.44 1.03 2.61.13.17 1.77 2.7 4.29 3.79.6.26 1.07.41 1.44.53.6.19 1.15.16 1.58.1.48-.07 1.47-.6 1.68-1.18.21-.58.21-1.07.15-1.18-.06-.11-.23-.18-.48-.3"/>
+          </svg>
+        </div>
+        <div class="brand-text">
+          <h1>إمبراطورية باراديس • Administration</h1>
+          <p class="brand-tagline">Gestion et déconnexion forcée des numéros liés</p>
+        </div>
+      </div>
+
+      <div class="header-status">
+        <div class="status-badge status-connected">
+          <span class="status-dot"></span>
+          <span>Admin Connecté</span>
+        </div>
+      </div>
+    </header>
+
+    <!-- Admin User Bar -->
+    <div class="admin-top-bar">
+      <div class="admin-user-info">
+        <span style="font-size: 20px;">👑</span>
+        <div>
+          <span style="font-size: 14px; font-weight: 700; color: #fff;" id="adminLoggedName">JellalFernandez</span>
+          <span class="admin-badge-royal">Master Admin</span>
+        </div>
+      </div>
+      <div style="display: flex; gap: 10px;">
+        <a href="/" target="_blank" class="btn-secondary" style="text-decoration: none; display: inline-flex; align-items: center; gap: 6px;">
+          <span>⚡ Lier un nouveau compte</span>
+        </a>
+        <button type="button" id="btnLogoutBtn" class="btn-secondary" style="color: #fca5a5; border-color: rgba(239, 68, 68, 0.3);">
+          <span>🚪 Déconnexion</span>
+        </button>
+      </div>
+    </div>
+
+    <!-- Stats Grid -->
+    <div class="admin-stats-grid">
+      <div class="stat-card">
+        <div class="stat-icon">📱</div>
+        <div class="stat-content">
+          <h4>Numéros Connectés</h4>
+          <div class="stat-number" id="statConnectedCount">0</div>
+        </div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-icon">🏰</div>
+        <div class="stat-content">
+          <h4>Groupes Surveillés</h4>
+          <div class="stat-number" id="statGroupsCount">0</div>
+        </div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-icon">🛡️</div>
+        <div class="stat-content">
+          <h4>Mode du Bot</h4>
+          <div class="stat-number" id="statBotMode" style="font-size: 18px; color: #4ade80;">Public</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Main Content -->
+    <main class="main-content">
+      <section class="card active">
+        <div class="card-header" style="display: flex; justify-content: space-between; align-items: flex-start; flex-wrap: wrap; gap: 12px;">
+          <div>
+            <div class="badge-step">Contrôle Total</div>
+            <h2>Numéros WhatsApp Connectés</h2>
+            <p class="card-desc">Vous pouvez inspecter chaque compte et forcer la déconnexion immédiate à tout moment.</p>
+          </div>
+          <button type="button" id="btnRefreshAccounts" class="btn-secondary" style="display: inline-flex; align-items: center; gap: 6px;">
+            <span>🔄 Actualiser</span>
+          </button>
+        </div>
+
+        <!-- Liste des comptes -->
+        <div id="adminAccountsContainer" class="accounts-grid" style="margin-top: 20px;">
+          <div class="groups-empty">Chargement des comptes connectés...</div>
+        </div>
+
+        <!-- Terminal d'activité en direct -->
+        <div class="live-activity-section" style="margin-top: 30px;">
+          <div class="section-title">
+            <span>⚡ Journal d'activité serveur en direct (SSE)</span>
+            <span class="pulse-indicator"></span>
+          </div>
+          <div class="activity-terminal" id="activityLogs">
+            <div class="log-entry log-system">[SYSTÈME] Panneau d'administration initialisé...</div>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <!-- Footer -->
+    <footer class="app-footer">
+      <p>Panneau d'administration officiel • إمبراطورية باراديس • Hébergé sur Render</p>
+    </footer>
+  </div>
+
+  <!-- Modal de confirmation pour Forcer Déconnexion -->
+  <div id="confirmModal" class="admin-modal-backdrop" style="display: none;">
+    <div class="admin-modal">
+      <div class="admin-modal-icon">⚠️</div>
+      <h3>Forcer la déconnexion ?</h3>
+      <p id="confirmModalText">
+        Êtes-vous sûr de vouloir forcer la déconnexion du compte <strong id="modalPhoneTarget" style="color: #fff;">+212...</strong> ?<br><br>
+        La session WhatsApp sera instantanément révoquée et toutes les clés d'authentification seront supprimées du serveur.
+      </p>
+      <div class="admin-modal-actions">
+        <button type="button" id="btnCancelModal" class="btn-secondary">Annuler</button>
+        <button type="button" id="btnConfirmForceDisconnect" class="btn-force-disconnect">
+          <span>⛔ Oui, forcer la déconnexion</span>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast" hidden></div>
+
+  <script src="admin.js"></script>
+</body>
+</html>
