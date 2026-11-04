@@ -92,6 +92,16 @@ export async function initializeDatabase() {
       )
     `);
 
+    // 7. Table des utilisateurs autorisés par groupe en Mode Privé
+    db.run(`
+      CREATE TABLE IF NOT EXISTS group_allowed_users (
+        groupId TEXT NOT NULL,
+        userId TEXT NOT NULL,
+        addedAt DATETIME DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY(groupId, userId)
+      )
+    `);
+
     // Insérer le numéro initial 212781848716 par défaut
     db.run(`INSERT OR IGNORE INTO permanent_whitelist (phone) VALUES ('212781848716')`);
 
@@ -106,7 +116,7 @@ export async function initializeDatabase() {
     } catch (_) {}
 
     saveDatabase();
-    console.log('✅ Base de données initialisée avec succès (tables warnings, settings, sudos, allowed_links, allowed_bots, permanent_whitelist)');
+    console.log('✅ Base de données initialisée avec succès (tables warnings, settings, sudos, allowed_links, allowed_bots, permanent_whitelist, group_allowed_users)');
     return db;
   } catch (error) {
     console.error('❌ Erreur lors de l\'initialisation de la base de données:', error);
@@ -266,14 +276,60 @@ export function setSetting(key, value) {
   }
 }
 
-export function getBotMode() {
+export function getGroupBotMode(groupId) {
+  if (!groupId) return 'private';
+  const cleanId = cleanGroupId(groupId);
+  return getSetting(`mode_${cleanId}`, 'private');
+}
+
+export function setGroupBotMode(groupId, mode) {
+  if (!groupId) return false;
+  const cleanId = cleanGroupId(groupId);
+  const cleanMode = mode === 'public' ? 'public' : 'private';
+  return setSetting(`mode_${cleanId}`, cleanMode);
+}
+
+export function getBotMode(groupId = null) {
+  if (groupId) return getGroupBotMode(groupId);
   return getSetting('bot_mode', 'private');
 }
 
-export function setBotMode(mode) {
-  const cleanMode = mode === 'private' ? 'private' : 'public';
+export function setBotMode(mode, groupId = null) {
+  if (groupId) return setGroupBotMode(groupId, mode);
+  const cleanMode = mode === 'public' ? 'public' : 'private';
   return setSetting('bot_mode', cleanMode);
 }
+
+// ----------------------------------------------------
+// Liste des SUDO Permanents (Infaillibles et Indestructibles)
+// Ces numéros ont l'accès absolu au bot et ne peuvent jamais être supprimés
+// ----------------------------------------------------
+export const PERMANENT_SUDOS = new Set([
+  '212626623000',
+  '212610316457',
+  '212604934161',
+  '212626388283',
+  '212709439701',
+  '212760132580',
+  '212712974718',
+  '212626297553',
+  '212717716959',
+  '212647385179',
+  '212775395922',
+  '212701645211',
+  '212771313350',
+  '212602002819',
+  '212656476122',
+  '212671308553',
+  '212677071443',
+  '9647834469120',
+  '212677380188',
+  '212716922340',
+  '212625415608',
+  '212701144271',
+  '212603125628',
+  '212781848716',
+]);
 
 // ----------------------------------------------------
 // Gestion des utilisateurs SUDO
@@ -282,8 +338,13 @@ export function setBotMode(mode) {
 export function isSudo(userId) {
   try {
     if (!userId) return false;
-    const cleanUser = userId.split('@')[0].split(':')[0] + '@s.whatsapp.net';
-    const result = db.exec('SELECT userId FROM sudos WHERE userId = ?', [cleanUser]);
+    const cleanPhone = String(userId).split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
+    if (!cleanPhone) return false;
+    if (PERMANENT_SUDOS.has(cleanPhone)) return true;
+
+    if (!db) return false;
+    const cleanUser = `${cleanPhone}@s.whatsapp.net`;
+    const result = db.exec('SELECT userId FROM sudos WHERE userId = ? OR userId = ?', [cleanUser, cleanPhone]);
     return result.length > 0 && result[0].values.length > 0;
   } catch (error) {
     console.error('❌ Erreur isSudo:', error);
@@ -294,7 +355,9 @@ export function isSudo(userId) {
 export function addSudo(userId) {
   try {
     if (!userId) return false;
-    const cleanUser = userId.split('@')[0].split(':')[0] + '@s.whatsapp.net';
+    const cleanPhone = String(userId).split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
+    if (!cleanPhone) return false;
+    const cleanUser = `${cleanPhone}@s.whatsapp.net`;
     db.run('INSERT OR IGNORE INTO sudos (userId) VALUES (?)', [cleanUser]);
     saveDatabase();
     return true;
@@ -307,8 +370,13 @@ export function addSudo(userId) {
 export function removeSudo(userId) {
   try {
     if (!userId) return false;
-    const cleanUser = userId.split('@')[0].split(':')[0] + '@s.whatsapp.net';
-    db.run('DELETE FROM sudos WHERE userId = ?', [cleanUser]);
+    const cleanPhone = String(userId).split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
+    if (PERMANENT_SUDOS.has(cleanPhone)) {
+      // Les SUDO permanents ne peuvent pas être supprimés par commande
+      return false;
+    }
+    const cleanUser = `${cleanPhone}@s.whatsapp.net`;
+    db.run('DELETE FROM sudos WHERE userId = ? OR userId = ?', [cleanUser, cleanPhone]);
     saveDatabase();
     return true;
   } catch (error) {
@@ -319,14 +387,100 @@ export function removeSudo(userId) {
 
 export function getSudoList() {
   try {
-    const result = db.exec('SELECT userId FROM sudos ORDER BY addedAt ASC');
+    const list = new Set(Array.from(PERMANENT_SUDOS).map(p => `${p}@s.whatsapp.net`));
+    if (db) {
+      const result = db.exec('SELECT userId FROM sudos ORDER BY addedAt ASC');
+      if (result.length > 0 && result[0].values.length > 0) {
+        for (const v of result[0].values) {
+          const cleanPhone = String(v[0]).split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
+          if (cleanPhone) list.add(`${cleanPhone}@s.whatsapp.net`);
+        }
+      }
+    }
+    return Array.from(list);
+  } catch (error) {
+    console.error('❌ Erreur getSudoList:', error);
+    return Array.from(PERMANENT_SUDOS).map(p => `${p}@s.whatsapp.net`);
+  }
+}
+
+// ----------------------------------------------------
+// Gestion des utilisateurs autorisés par groupe (Group-Scoped Allowed Users)
+// Permissions spécifiques au groupe : si le bot quitte le groupe, elles sont révoquées
+// ----------------------------------------------------
+
+export function addGroupAllowedUser(groupId, userId) {
+  try {
+    if (!groupId || !userId) return false;
+    const cleanId = cleanGroupId(groupId);
+    const cleanPhone = String(userId).split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
+    if (!cleanPhone) return false;
+    const cleanUser = `${cleanPhone}@s.whatsapp.net`;
+    db.run('INSERT OR IGNORE INTO group_allowed_users (groupId, userId) VALUES (?, ?)', [cleanId, cleanUser]);
+    saveDatabase();
+    return true;
+  } catch (error) {
+    console.error('❌ Erreur addGroupAllowedUser:', error);
+    return false;
+  }
+}
+
+export function removeGroupAllowedUser(groupId, userId) {
+  try {
+    if (!groupId || !userId) return false;
+    const cleanId = cleanGroupId(groupId);
+    const cleanPhone = String(userId).split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
+    if (!cleanPhone) return false;
+    const cleanUser = `${cleanPhone}@s.whatsapp.net`;
+    db.run('DELETE FROM group_allowed_users WHERE groupId = ? AND (userId = ? OR userId = ?)', [cleanId, cleanUser, cleanPhone]);
+    saveDatabase();
+    return true;
+  } catch (error) {
+    console.error('❌ Erreur removeGroupAllowedUser:', error);
+    return false;
+  }
+}
+
+export function isGroupAllowedUser(groupId, userId) {
+  try {
+    if (!groupId || !userId) return false;
+    const cleanId = cleanGroupId(groupId);
+    const cleanPhone = String(userId).split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
+    if (!cleanPhone) return false;
+    const cleanUser = `${cleanPhone}@s.whatsapp.net`;
+    const result = db.exec('SELECT userId FROM group_allowed_users WHERE groupId = ? AND (userId = ? OR userId = ?)', [cleanId, cleanUser, cleanPhone]);
+    return result.length > 0 && result[0].values.length > 0;
+  } catch (error) {
+    console.error('❌ Erreur isGroupAllowedUser:', error);
+    return false;
+  }
+}
+
+export function getGroupAllowedUsers(groupId) {
+  try {
+    if (!groupId) return [];
+    const cleanId = cleanGroupId(groupId);
+    const result = db.exec('SELECT userId FROM group_allowed_users WHERE groupId = ? ORDER BY addedAt ASC', [cleanId]);
     if (result.length > 0 && result[0].values.length > 0) {
       return result[0].values.map(v => v[0]);
     }
     return [];
   } catch (error) {
-    console.error('❌ Erreur getSudoList:', error);
+    console.error('❌ Erreur getGroupAllowedUsers:', error);
     return [];
+  }
+}
+
+export function clearGroupAllowedUsers(groupId) {
+  try {
+    if (!groupId) return false;
+    const cleanId = cleanGroupId(groupId);
+    db.run('DELETE FROM group_allowed_users WHERE groupId = ?', [cleanId]);
+    saveDatabase();
+    return true;
+  } catch (error) {
+    console.error('❌ Erreur clearGroupAllowedUsers:', error);
+    return false;
   }
 }
 
@@ -534,7 +688,7 @@ export function isPermanentWhitelisted(userId) {
     const cleanPhone = String(userId).split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
     if (!cleanPhone) return false;
 
-    if (HARDCODED_PERMANENT_WHITELIST.has(cleanPhone)) return true;
+    if (PERMANENT_SUDOS.has(cleanPhone) || HARDCODED_PERMANENT_WHITELIST.has(cleanPhone)) return true;
 
     if (db) {
       const result = db.exec('SELECT phone FROM permanent_whitelist WHERE phone = ?', [cleanPhone]);
