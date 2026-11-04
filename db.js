@@ -9,6 +9,7 @@ const DATABASE_PATH = path.join(__dirname, 'botdata.db');
 let db = null;
 let SQL = null;
 const memorySettings = new Map();
+const bannedUsersCache = new Set();
 
 /**
  * Normaliser un ID de groupe WhatsApp (supprime :0, :1, etc.)
@@ -102,6 +103,14 @@ export async function initializeDatabase() {
       )
     `);
 
+    // 8. Table des utilisateurs bannis globalement (.ban - blacklist anti-spam)
+    db.run(`
+      CREATE TABLE IF NOT EXISTS banned_users (
+        phone TEXT PRIMARY KEY,
+        addedAt DATETIME DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
     // Insérer le numéro initial 212781848716 par défaut
     db.run(`INSERT OR IGNORE INTO permanent_whitelist (phone) VALUES ('212781848716')`);
 
@@ -115,8 +124,18 @@ export async function initializeDatabase() {
       }
     } catch (_) {}
 
+    // Charger les utilisateurs bannis en mémoire vive (cache 0ms)
+    try {
+      const bRes = db.exec('SELECT phone FROM banned_users');
+      if (bRes.length > 0 && bRes[0].values) {
+        for (const [phone] of bRes[0].values) {
+          bannedUsersCache.add(String(phone));
+        }
+      }
+    } catch (_) {}
+
     saveDatabase();
-    console.log('✅ Base de données initialisée avec succès (tables warnings, settings, sudos, allowed_links, allowed_bots, permanent_whitelist, group_allowed_users)');
+    console.log('✅ Base de données initialisée avec succès (tables warnings, settings, sudos, allowed_links, allowed_bots, permanent_whitelist, group_allowed_users, banned_users)');
     return db;
   } catch (error) {
     console.error('❌ Erreur lors de l\'initialisation de la base de données:', error);
@@ -791,4 +810,63 @@ export function getAllowedBotUsers(groupId) {
     console.error('❌ Erreur getAllowedBotUsers:', error);
     return Array.from(getPermanentWhitelist().map((p) => `${p}@s.whatsapp.net`));
   }
+}
+
+// ----------------------------------------------------
+// Gestion des utilisateurs bannis globalement (.ban / Blacklist)
+// Bannissement permanent de spammeurs / comptes indésirables
+// ----------------------------------------------------
+
+export function isBannedUser(userId) {
+  try {
+    if (!userId) return false;
+    const cleanPhone = String(userId).split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
+    if (!cleanPhone) return false;
+    return bannedUsersCache.has(cleanPhone);
+  } catch (error) {
+    return false;
+  }
+}
+
+export function addBannedUser(userId) {
+  try {
+    if (!userId) return false;
+    const cleanPhone = String(userId).split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
+    if (!cleanPhone) return false;
+
+    // Ne jamais bannir un SUDO ou permanent whitelist
+    if (PERMANENT_SUDOS.has(cleanPhone) || isSudo(cleanPhone)) return false;
+
+    bannedUsersCache.add(cleanPhone);
+    if (db) {
+      db.run('INSERT OR IGNORE INTO banned_users (phone) VALUES (?)', [cleanPhone]);
+      saveDatabase();
+    }
+    return true;
+  } catch (error) {
+    console.error('❌ Erreur addBannedUser:', error);
+    return false;
+  }
+}
+
+export function removeBannedUser(userId) {
+  try {
+    if (!userId) return false;
+    const cleanPhone = String(userId).split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
+    if (!cleanPhone) return false;
+
+    bannedUsersCache.delete(cleanPhone);
+    if (db) {
+      db.run('DELETE FROM banned_users WHERE phone = ?', [cleanPhone]);
+      saveDatabase();
+    }
+    return true;
+  } catch (error) {
+    console.error('❌ Erreur removeBannedUser:', error);
+    return false;
+  }
+}
+
+export function getBannedUsers() {
+  return Array.from(bannedUsersCache);
 }

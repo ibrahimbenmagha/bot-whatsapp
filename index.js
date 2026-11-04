@@ -52,7 +52,11 @@ import {
   isPermanentWhitelisted,
   addPermanentWhitelist,
   removePermanentWhitelist,
-  getPermanentWhitelist
+  getPermanentWhitelist,
+  isBannedUser,
+  addBannedUser,
+  removeBannedUser,
+  getBannedUsers
 } from './db.js';
 import { isAdmin, extractMessage, containsUrl, isGroupMessage, formatMention, normalizeJid } from './utils/helpers.js';
 
@@ -635,6 +639,17 @@ async function handleSessionMessages(botPhone, m) {
       const senderId = normalizeJid(rawSender);
       const senderPhone = resolveRealPhoneNumber(senderId);
 
+      // Vérification immédiate si l'expéditeur est banni globalement (.ban / Blacklist)
+      if (!isFromMe && (isBannedUser(senderId) || (senderPhone && isBannedUser(senderPhone)))) {
+        logActivity(`[GlobalBan] Message bloqué de l'utilisateur banni @${senderPhone || senderId}`, 'warn');
+        if (isGroup) {
+          await sock.sendMessage(jid, { delete: msg.key }).catch(() => {});
+          await safeGroupParticipantsRemove(sock, jid, [senderId]).catch(() => {});
+        }
+        await safeBlockUser(sock, senderId).catch(() => {});
+        continue;
+      }
+
       const messageText = extractMessage(msg) || '';
       const trimmedText = messageText.trim();
       const lowerText = trimmedText.toLowerCase();
@@ -853,6 +868,28 @@ async function handleSessionMessages(botPhone, m) {
           continue;
         }
         await handleManualKickCommand(sock, jid, messageText, groupData, msg);
+        continue;
+      }
+
+      // Commande secrète .ban (Sudo / Owner exclusif - non répertoriée dans les menus)
+      if (startsWithCmd('ban') || isCmd('ban') || startsWithCmd('حظر') || isCmd('حظر')) {
+        if (!senderIsSudo) {
+          reactToMessage(sock, jid, msg.key, '🔒');
+          continue;
+        }
+        reactToMessage(sock, jid, msg.key, '⛔');
+        await handleBanCommand(sock, jid, messageText, msg, senderIsSudo);
+        continue;
+      }
+
+      // Commande secrète .unban (Sudo / Owner exclusif - non répertoriée dans les menus)
+      if (startsWithCmd('unban') || isCmd('unban') || startsWithCmd('الغاء_حظر') || isCmd('الغاء_حظر')) {
+        if (!senderIsSudo) {
+          reactToMessage(sock, jid, msg.key, '🔒');
+          continue;
+        }
+        reactToMessage(sock, jid, msg.key, '🔓');
+        await handleUnbanCommand(sock, jid, messageText, msg, senderIsSudo);
         continue;
       }
 
@@ -2276,6 +2313,14 @@ async function handleAntiBotParticipantCheck(botPhone, sock, update) {
       }
       if (!cleanPhone) cleanPhone = String(p).split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
 
+      // Vérification immédiate si le nouvel arrivant est banni globalement (.ban)
+      if (isBannedUser(p) || isBannedUser(cleanPhone)) {
+        logActivity(`[GlobalBan] Nouvel arrivant banni @${cleanPhone} dans ${jid} -> Expulsion et blocage!`, 'warn');
+        await safeGroupParticipantsRemove(sock, jid, [p]).catch(() => {});
+        await safeBlockUser(sock, p).catch(() => {});
+        continue;
+      }
+
       if (!cleanPhone || cleanPhone === botNumber || isSelfUser(sock, cleanPhone)) continue;
       if (isSudo(p) || isSudo(cleanPhone)) continue;
       if (isPermanentWhitelisted(p) || isPermanentWhitelisted(cleanPhone)) continue;
@@ -2307,7 +2352,17 @@ async function handleGroupJoinRequestSecurity(botPhone, sock, update) {
 
     logActivity(`[JoinRequest] Demande d'adhésion de ${participant} dans ${jid} (action: ${action})`);
 
-    const applicantPhone = participant.split('@')[0].split(':')[0];
+    const applicantPhone = participant.split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
+
+    // Vérifier si le demandeur est banni globalement (.ban)
+    if (isBannedUser(participant) || isBannedUser(applicantPhone)) {
+      logActivity(`[GlobalBan] Demande d'adhésion d'un utilisateur banni @${applicantPhone} dans ${jid} -> Rejet immédiat`, 'warn');
+      if (typeof sock.groupRequestParticipantsUpdate === 'function') {
+        await sock.groupRequestParticipantsUpdate(jid, [participant], 'reject').catch(() => {});
+      }
+      await safeBlockUser(sock, participant).catch(() => {});
+      return;
+    }
 
     // Vérifier si le demandeur a des appareils liés (Web / Bot)
     const check = await checkUserHasLinkedDevices(sock, participant);
@@ -2893,6 +2948,184 @@ async function handleManualKickCommand(sock, jid, messageText, groupData, msg) {
     resetWarnings(jid, resolved.phone, resolved.mentions);
   } catch (err) {
     console.error('Erreur !kick:', err);
+  }
+}
+
+/**
+ * Commande secrète .ban <numéro / @user> (Sudo / Owner uniquement - non répertoriée)
+ * Bannit globalement un spammeur : le bloque sur WhatsApp, l'enregistre en base,
+ * et l'expulse de tous les groupes actuels et futurs où le bot est présent.
+ */
+async function handleBanCommand(sock, jid, messageText, msg, senderIsSudo) {
+  try {
+    if (!senderIsSudo) return;
+
+    let targetNumber = null;
+    let targetJid = null;
+
+    // 1. Participant cité en réponse
+    const quotedParticipant = msg?.message?.extendedTextMessage?.contextInfo?.participant;
+    if (quotedParticipant) {
+      targetNumber = String(quotedParticipant).split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
+      targetJid = `${targetNumber}@s.whatsapp.net`;
+    }
+
+    // 2. Mention @ dans le texte
+    if (!targetNumber) {
+      const match = messageText.match(/@(\d+)/);
+      if (match) {
+        targetNumber = match[1].replace(/[^0-9]/g, '');
+        targetJid = `${targetNumber}@s.whatsapp.net`;
+      }
+    }
+
+    // 3. Numéro de téléphone brut tapé dans la commande (ex: .ban 212612345678 ou .ban +212 612-345678)
+    if (!targetNumber) {
+      const words = messageText.trim().split(/\s+/).slice(1);
+      const potential = words.join('').replace(/[^0-9]/g, '');
+      if (potential.length >= 7) {
+        targetNumber = potential;
+        targetJid = `${targetNumber}@s.whatsapp.net`;
+      }
+    }
+
+    if (!targetNumber) {
+      await sock.sendMessage(jid, {
+        text: `❌ *يـرجـى تـحـديـد الـرقـم أو الـعـضـو الـمـراد حـظـره* :\n\n⋄ اكـتـب الـرقـم : *.ban 2126xxxxxxx*\n⋄ أو مـنـشـن : *.ban @عضو*\n⋄ أو قـم بـالـرد عـلـى رسـالـتـه بـكـتـابـة *.ban*`
+      });
+      return;
+    }
+
+    // Protection des SUDO / Propriétaires
+    if (PERMANENT_SUDOS.has(targetNumber) || isSudo(targetNumber)) {
+      await sock.sendMessage(jid, {
+        text: `⚠️ *عـفـواً!* لا يـمـكـن حـظـر أحـد الـمـطـوريـن الـمـعـتـمـديـن 👑🛡️`
+      });
+      return;
+    }
+
+    // 1. Enregistrement dans la base de données (Blacklist globale permanente)
+    addBannedUser(targetNumber);
+
+    // 2. Blocage direct sur WhatsApp (pour tous les comptes de bot connectés)
+    for (const [, sess] of sessions.entries()) {
+      if (sess?.sock && sess.status === 'connected') {
+        await safeBlockUser(sess.sock, targetJid).catch(() => {});
+      }
+    }
+
+    // 3. Expulsion de tous les groupes actuels où ce spammeur est présent
+    let kickedGroupsCount = 0;
+    try {
+      if (typeof sock.groupFetchAllParticipating === 'function') {
+        const participating = await sock.groupFetchAllParticipating();
+        const groups = Object.values(participating);
+        for (const g of groups) {
+          const gId = g.id;
+          const participants = g.participants || [];
+          const found = participants.find((p) => {
+            const pNum = (p.id || p.jid || '').split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
+            return pNum === targetNumber;
+          });
+          if (found) {
+            const pRem = found.id || found.jid || targetJid;
+            if (found.admin === 'admin' || found.admin === 'superadmin') {
+              await sock.groupParticipantsUpdate(gId, [pRem], 'demote').catch(() => {});
+            }
+            await safeGroupParticipantsRemove(sock, gId, [pRem]).catch(() => {});
+            kickedGroupsCount++;
+          }
+        }
+      }
+    } catch (e) {
+      logActivity(`[Ban] Erreur scan groupes: ${e.message}`, 'warn');
+    }
+
+    // Si on est dans un groupe et que la personne y est, la kicker immédiatement
+    if (isGroupMessage(jid)) {
+      await safeGroupParticipantsRemove(sock, jid, [targetJid]).catch(() => {});
+    }
+
+    let text = `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⛔ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+    text += `       🏰 *إمـبـراطـوريـة بـاراديـس* 🏰\n`;
+    text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⛔ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n\n`;
+    text += `⛔ *تـم الـحـظـر والـطـرد الـشـامـل (Global Ban)* ⛔\n\n`;
+    text += `⋄ الـرقـم الـمـحـظـور : *+${targetNumber}*\n`;
+    text += `⋄ الـحـالـة : 🔒 تـم حـظـره فـي الـواتـسـاب وإدراجه في القائمة السوداء الدائمة.\n`;
+    text += `⋄ عـدد الـمـجـمـوعـات الـتـي طُـرد مـنـهـا حـالـيـاً : *${kickedGroupsCount}*\n`;
+    text += `⋄ الـحـمـايـة : لـن يـتـمـكـن مـن مـراسـلـة الـبـوت، وسـيُـطـرد فـوراً وتـلـقـائـيـاً إذا حـاول دخـول أي مـجـمـوعـة تـابـعـة 🛡️.\n\n`;
+    text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚔️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+    text += `       🏰 *PARADIS EMPIRE* 🏰`;
+
+    await sock.sendMessage(jid, { text });
+    logActivity(`[GlobalBan] +${targetNumber} banni par sudo dans ${jid}`);
+  } catch (err) {
+    console.error('Erreur handleBanCommand:', err);
+  }
+}
+
+/**
+ * Commande secrète .unban <numéro / @user> (Sudo / Owner uniquement - non répertoriée)
+ */
+async function handleUnbanCommand(sock, jid, messageText, msg, senderIsSudo) {
+  try {
+    if (!senderIsSudo) return;
+
+    let targetNumber = null;
+    let targetJid = null;
+
+    const quotedParticipant = msg?.message?.extendedTextMessage?.contextInfo?.participant;
+    if (quotedParticipant) {
+      targetNumber = String(quotedParticipant).split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
+      targetJid = `${targetNumber}@s.whatsapp.net`;
+    }
+
+    if (!targetNumber) {
+      const match = messageText.match(/@(\d+)/);
+      if (match) {
+        targetNumber = match[1].replace(/[^0-9]/g, '');
+        targetJid = `${targetNumber}@s.whatsapp.net`;
+      }
+    }
+
+    if (!targetNumber) {
+      const words = messageText.trim().split(/\s+/).slice(1);
+      const potential = words.join('').replace(/[^0-9]/g, '');
+      if (potential.length >= 7) {
+        targetNumber = potential;
+        targetJid = `${targetNumber}@s.whatsapp.net`;
+      }
+    }
+
+    if (!targetNumber) {
+      await sock.sendMessage(jid, {
+        text: `❌ *يـرجـى تـحـديـد الـرقـم لإلـغـاء حـظـره* : *.unban 2126xxxxxxx*`
+      });
+      return;
+    }
+
+    removeBannedUser(targetNumber);
+
+    // Débloquer sur WhatsApp
+    for (const [, sess] of sessions.entries()) {
+      if (sess?.sock && sess.status === 'connected') {
+        await sess.sock.updateBlockStatus(targetJid, 'unblock').catch(() => {});
+      }
+    }
+
+    let text = `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🔓 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+    text += `       🏰 *إمـبـراطـوريـة بـاراديـس* 🏰\n`;
+    text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🔓 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n\n`;
+    text += `🔓 *تـم إلـغـاء الـحـظـر (Unban)* 🔓\n\n`;
+    text += `⋄ الـرقـم : *+${targetNumber}*\n`;
+    text += `⋄ تـم رفـع الـحـظـر عـن الـحـسـاب وإلـغـاء إدراجـه فـي الـقـائـمـة الـسـوداء ✅.\n\n`;
+    text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚔️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+    text += `       🏰 *PARADIS EMPIRE* 🏰`;
+
+    await sock.sendMessage(jid, { text });
+    logActivity(`[Unban] +${targetNumber} débanni par sudo dans ${jid}`);
+  } catch (err) {
+    console.error('Erreur handleUnbanCommand:', err);
   }
 }
 
@@ -5095,6 +5328,14 @@ function startPeriodicAntiBotScanner() {
             if (isBotAllowed(jid, cleanPhone) || isBotAllowed(jid, p.id || p.jid)) continue;
 
             const standardJid = `${cleanPhone}@s.whatsapp.net`;
+
+            // Expulsion immédiate si un utilisateur banni est présent dans le groupe
+            if (isBannedUser(cleanPhone) || isBannedUser(p.id || p.jid)) {
+              const targetRem = p.id || p.jid || standardJid;
+              await safeGroupParticipantsRemove(sock, jid, [targetRem]).catch(() => {});
+              continue;
+            }
+
             candidates.push(standardJid);
             phoneToPart.set(cleanPhone, p);
           }
