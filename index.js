@@ -981,6 +981,20 @@ async function handleSessionMessages(botPhone, m) {
         continue;
       }
 
+      // Commande .blacklist / .banlist (Sudo / Owner exclusif)
+      if (
+        isCmd('blacklist') || isCmd('banlist') || isCmd('blacklisted') || isCmd('banned') || isCmd('المحظورين') || isCmd('القائمة_السوداء') ||
+        startsWithCmd('blacklist') || startsWithCmd('banlist') || startsWithCmd('blacklisted') || startsWithCmd('banned') || startsWithCmd('المحظورين') || startsWithCmd('القائمة_السوداء')
+      ) {
+        if (!senderIsSudo) {
+          reactToMessage(sock, jid, msg.key, '🔒');
+          continue;
+        }
+        reactToMessage(sock, jid, msg.key, '📋');
+        await handleBlacklistCommand(sock, jid, msg);
+        continue;
+      }
+
       // Commande .mode [public/private] (Sudo / Owner)
       if (startsWithCmd('mode') || startsWithCmd('الوضع') || isCmd('mode') || isCmd('الوضع')) {
         if (!senderIsSudo) {
@@ -3423,6 +3437,7 @@ async function handleUnbanCommand(sock, jid, messageText, msg, senderIsSudo) {
     }
 
     removeBannedUser(targetNumber);
+    BLACKLISTED_TABNEED_NUMBERS.delete(targetNumber);
 
     // Débloquer sur WhatsApp
     for (const [, sess] of sessions.entries()) {
@@ -3444,6 +3459,46 @@ async function handleUnbanCommand(sock, jid, messageText, msg, senderIsSudo) {
     logActivity(`[Unban] +${targetNumber} débanni par sudo dans ${jid}`);
   } catch (err) {
     console.error('Erreur handleUnbanCommand:', err);
+  }
+}
+
+/**
+ * Commande .blacklist / .banlist (Sudo / Owner uniquement)
+ * Affiche l'ensemble des numéros figurant dans la liste noire
+ */
+async function handleBlacklistCommand(sock, jid, msg) {
+  try {
+    const dbBanned = getBannedUsers();
+    const combinedSet = new Set([...dbBanned, ...BLACKLISTED_TABNEED_NUMBERS]);
+    const bannedList = Array.from(combinedSet);
+
+    const mentions = [];
+    let text = `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⛔ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+    text += `       🏰 *إمـبـراطـوريـة بـاراديـس* 🏰\n`;
+    text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⛔ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n\n`;
+    text += `⛔ *الـقـائـمـة الـسـوداء الـشـامـلـة (BLACKLIST)* (${bannedList.length}) ⛔\n\n`;
+
+    if (bannedList.length === 0) {
+      text += `✨ لا يـوجـد أي رقـم مـحـظـور حـالـيـاً فـي الـقـائـمـة الـسـوداء.\n\n`;
+    } else {
+      for (let i = 0; i < bannedList.length; i++) {
+        const phone = bannedList[i];
+        text += `• ${i + 1}. +${phone} (@${phone})\n`;
+        mentions.push(`${phone}@s.whatsapp.net`);
+      }
+      text += `\n`;
+    }
+
+    text += `──────────────────────\n`;
+    text += `💡 *إدارة الـقـائـمـة الـسـوداء* :\n`;
+    text += `⋄ لـحـظـر رقـم جـديـد : *.ban +212xxxxxxx*\n`;
+    text += `⋄ لإلـغـاء حـظـر رقـم : *.unban +212xxxxxxx*\n\n`;
+    text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚔️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+    text += `       🏰 *PARADIS EMPIRE SECURITY* 🏰`;
+
+    await sock.sendMessage(jid, { text, mentions }, { quoted: msg });
+  } catch (err) {
+    console.error('Erreur handleBlacklistCommand:', err);
   }
 }
 
