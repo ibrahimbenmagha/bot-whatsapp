@@ -809,7 +809,7 @@ async function handleSessionMessages(botPhone, m) {
       };
       const startsWithCmd = (name) => {
         const cleanName = name.replace(/^[.!/#]/, '').trim();
-        return cleanCmdText === cleanName || cleanCmdText.startsWith(`${cleanName} `);
+        return cleanCmdText === cleanName || cleanCmdText.startsWith(`${cleanName} `) || cleanCmdText.startsWith(`${cleanName}+`);
       };
       const isPrefixCommand = lowerText.startsWith('.') || lowerText.startsWith('!') || lowerText.startsWith('/') || lowerText.startsWith('#');
 
@@ -1303,8 +1303,11 @@ async function handleSessionMessages(botPhone, m) {
         continue;
       }
 
-      // Commande .requests / .طلبات (Group Admins / Sudo)
-      if (isCmd('requests') || isCmd('طلبات') || startsWithCmd('requests') || startsWithCmd('طلبات')) {
+      // Commande .requests / .request / .requeste / .طلبات (Group Admins / Sudo)
+      if (
+        isCmd('requests') || isCmd('request') || isCmd('requeste') || isCmd('طلبات') || isCmd('طلبات_الانضمام') ||
+        startsWithCmd('requests') || startsWithCmd('request') || startsWithCmd('requeste') || startsWithCmd('طلبات') || startsWithCmd('طلبات_الانضمام')
+      ) {
         if (!senderIsAdmin && !senderIsSudo) {
           reactToMessage(sock, jid, msg.key, '🔒');
           continue;
@@ -1314,11 +1317,11 @@ async function handleSessionMessages(botPhone, m) {
           await sock.sendMessage(jid, { text: 'ℹ️ هذه العملية تعمل فقط داخل المجموعات.' });
           continue;
         }
-        await handleJoinRequestsListCommand(sock, jid, senderIsAdmin, senderIsSudo);
+        await handleJoinRequestsListCommand(sock, jid, messageText, senderIsAdmin, senderIsSudo);
         continue;
       }
 
-      // Commande .accept [number] / .قبول (Group Admins / Sudo)
+      // Commande .accept [number/index] / .قبول (Group Admins / Sudo)
       if (startsWithCmd('accept') || startsWithCmd('قبول') || startsWithCmd('وافق') || isCmd('accept') || isCmd('قبول')) {
         if (!senderIsAdmin && !senderIsSudo) {
           reactToMessage(sock, jid, msg.key, '🔒');
@@ -1333,7 +1336,7 @@ async function handleSessionMessages(botPhone, m) {
         continue;
       }
 
-      // Commande .reject [number] / .رفض (Group Admins / Sudo)
+      // Commande .reject [number/index] / .رفض (Group Admins / Sudo)
       if (startsWithCmd('reject') || startsWithCmd('رفض') || isCmd('reject') || isCmd('رفض')) {
         if (!senderIsAdmin && !senderIsSudo) {
           reactToMessage(sock, jid, msg.key, '🔒');
@@ -4762,18 +4765,26 @@ async function handleTrustListCommand(sock, jid) {
 
 /**
  * Parser d'indices pour les commandes .accept et .reject
- * Supporte: 1, 1 2, 1 2 5 8, 1,5 (plage 1 à 5), 1-5, all, الكل
+ * Supporte: 1, 1 2, 1 2 5 8, 1,5 (plage 1 à 5), 1-5, all, الكل, a (premier candidat)
  */
 function parseRequestIndices(argsString, totalRequests) {
   const raw = argsString.trim().toLowerCase();
   if (raw === 'all' || raw === 'الكل' || raw === 'tout') {
     return Array.from({ length: totalRequests }, (_, i) => i);
   }
+  if (raw === 'a') {
+    return totalRequests > 0 ? [0] : [];
+  }
 
   const selectedIndices = new Set();
   const tokens = raw.split(/[\s]+/);
 
   for (const token of tokens) {
+    if (token === 'a') {
+      if (totalRequests >= 1) selectedIndices.add(0);
+      continue;
+    }
+
     // Plage comme "1,5" ou "1-5" ou "1..5"
     const rangeMatch = token.match(/^(\d+)[,\-.]+(\d+)$/);
     if (rangeMatch) {
@@ -4814,12 +4825,22 @@ function parseRequestIndices(argsString, totalRequests) {
 const lastDisplayedRequests = new Map();
 
 /**
- * Commande .requests / .طلبات (Group Admins / Sudo)
- * Affiche UNIQUEMENT les demandes d'adhésion liées à des appareils/bots avec résolution des numéros
+ * Commande .requests / .request / .requeste / .طلبات (Group Admins / Sudo)
+ * Liste et scanne les demandes d'adhésion en attente
+ * Supporte:
+ * - .request / .requests (liste complète avec état des appareils)
+ * - .request 1 / .request a (scan approfondi du 1er candidat)
+ * - .request 2, .request 3... (scan approfondi du candidat N)
+ * - .request +212xxxxxxx (scan approfondi d'un numéro spécifique)
  */
-async function handleJoinRequestsListCommand(sock, jid, senderIsAdmin, senderIsSudo) {
+async function handleJoinRequestsListCommand(sock, jid, messageText = '', senderIsAdmin = false, senderIsSudo = false) {
   try {
     if (!senderIsAdmin && !senderIsSudo) {
+      return;
+    }
+
+    if (!isGroupMessage(jid)) {
+      await sock.sendMessage(jid, { text: 'ℹ️ هذه العملية تعمل فقط داخل المجموعات.' });
       return;
     }
 
@@ -4828,93 +4849,201 @@ async function handleJoinRequestsListCommand(sock, jid, senderIsAdmin, senderIsS
       return;
     }
 
-    await sock.sendMessage(jid, { text: '🔍 *جـاري فـحـص طـلـبـات الانـضـمـام لـكـشـف الـحـسـابـات الـمـرتـبـطـة بـأجـهـزة/بـوت...*' });
+    let currentGroupData = await getGroupDataSafely(sock, jid);
+    if (!isBotAdmin(sock, currentGroupData)) {
+      await sock.sendMessage(jid, { 
+        text: '❌ *فـشـل الإجـراء* : يـجـب تـرقـيـة الـبـوت مـشـرفـاً (Admin) فـي الـمـجـمـوعـة لـعـرض وفـحـص طـلـبـات الانـضـمـام 🛡️' 
+      });
+      return;
+    }
+
+    const words = String(messageText || '').trim().split(/\s+/);
+    let arg = words.slice(1).join(' ').trim();
+    // Si l'utilisateur a écrit .request+212... sans espace
+    if (!arg && words[0]) {
+      const matchNoSpace = words[0].match(/^[.!/#]?(?:request|requests|requeste|طلبات)\+?([0-9a-zA-Z+]+)$/i);
+      if (matchNoSpace) {
+        arg = matchNoSpace[1];
+      }
+    }
 
     const rawRequests = await sock.groupRequestParticipantsList(jid).catch(() => []);
     if (!rawRequests || rawRequests.length === 0) {
       lastDisplayedRequests.set(jid, []);
-      await sock.sendMessage(jid, { text: 'ℹ️ لا تـوجـد أي طـلـبـات انـضـمـام مـعـلـقـة حـالـيـاً فـي هـذه الـمـجـمـوعـة.' });
+      let text = `⎔⋅• ━ ╼━ ╼╃ ⌬〔 📋 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+      text += `       🏰 *إمـبـراطـوريـة بـاراديـس* 🏰\n`;
+      text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 📋 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n\n`;
+      text += `📋 *طـلـبـات الانـضـمـام الـمـعـلـقـة* :\n\n`;
+      text += `✨ لا تـوجـد أي طـلـبـات انـضـمـام مـعـلـقـة حـالـيـاً فـي هـذه الـمـجـمـوعـة.\n\n`;
+      text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚔️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+      text += `       🏰 *PARADIS EMPIRE* 🏰`;
+      await sock.sendMessage(jid, { text });
       return;
     }
 
-    const linkedRequests = [];
-    const allMentions = [];
-
+    // Traitement et résolution des numéros pour tous les candidats
+    const allParsedRequests = [];
     for (let i = 0; i < rawRequests.length; i++) {
       const req = rawRequests[i];
       const rawJid = req.jid || req.id || '';
 
-      // Résolution du vrai numéro de téléphone réel
       let phone = req.phone_number || req.phoneNumber || req.phone || req.user || req.sender_pn;
       if (phone) {
         phone = String(phone).split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
       }
-
       if (!phone) {
         phone = resolveRealPhoneNumber(rawJid);
       }
-
-      // Si le numéro est encore un LID masqué, tenter de le résoudre via USync
       if (!phone || phone.length > 15 || rawJid.endsWith('@lid')) {
         const usyncPhone = await resolveLidToPhoneViaUSync(sock, rawJid);
-        if (usyncPhone) {
-          phone = usyncPhone;
+        if (usyncPhone) phone = usyncPhone;
+      }
+      if (!phone) {
+        phone = (rawJid || '').split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
+      }
+
+      allParsedRequests.push({
+        displayIndex: i + 1,
+        rawReq: req,
+        targetJid: rawJid,
+        phone: phone
+      });
+    }
+
+    lastDisplayedRequests.set(jid, allParsedRequests);
+
+    // ========================================================
+    // CAS A : Scan ciblé (.request 1, .request a, .request +212...)
+    // ========================================================
+    if (arg) {
+      let matched = null;
+      let targetIndex = null;
+
+      if (arg.toLowerCase() === 'a') {
+        targetIndex = 1;
+      } else if (/^\d+$/.test(arg) && parseInt(arg, 10) > 0 && parseInt(arg, 10) <= allParsedRequests.length) {
+        targetIndex = parseInt(arg, 10);
+      }
+
+      if (targetIndex !== null) {
+        matched = allParsedRequests[targetIndex - 1];
+      } else {
+        const cleanArgPhone = arg.replace(/[^0-9]/g, '');
+        if (cleanArgPhone) {
+          const last9 = cleanArgPhone.length >= 9 ? cleanArgPhone.slice(-9) : cleanArgPhone;
+          matched = allParsedRequests.find(r => {
+            if (r.phone === cleanArgPhone) return true;
+            if (r.phone && r.phone.endsWith(last9)) return true;
+            if (r.targetJid && r.targetJid.includes(cleanArgPhone)) return true;
+            return false;
+          });
         }
       }
 
-      if (!phone) {
-        phone = (rawJid || '').split('@')[0].split(':')[0];
+      // Si aucun candidat de la liste ne correspond au numéro demandé
+      if (!matched) {
+        const cleanTarget = arg.replace(/[^0-9]/g, '');
+        if (cleanTarget && cleanTarget.length >= 7) {
+          // Scanner quand même ce numéro pour renseigner l'admin
+          const check = await checkUserHasLinkedDevices(sock, `${cleanTarget}@s.whatsapp.net`, true);
+          const isBanned = isBannedUser(cleanTarget);
+          const isWhitelisted = isBotAllowed(jid, cleanTarget) || isPermanentWhitelisted(cleanTarget);
+
+          let text = `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🔍 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+          text += `       🏰 *إمـبـراطـوريـة بـاراديـس* 🏰\n`;
+          text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🔍 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n\n`;
+          text += `🔍 *فـحـص خـارجـي لـلـرقـم* : +${cleanTarget}\n\n`;
+          text += `ℹ️ *الـحـالـة فـي الـمـجـمـوعـة* : لا يـوجـد لـه طـلـب انـضـمـام مـعـلـق حـالـيـاً.\n\n`;
+          text += `🛡️ *نـتـيـجـة فـحـص الأجـهـزة الـمـرتـبـطـة* :\n`;
+          text += `⋄ الأجـهـزة : ${check.count > 0 ? `⚠️ *مـرتـبـط بـ ${check.count} أجهزة* (واتـسـاب ويـب / بـوت)` : '🟢 *حـسـاب عـادي* (0 جـهـاز)'}\n`;
+          text += `⋄ الـقـائـمـة الـبـيـضـاء : ${isWhitelisted ? '🟢 مـصـرح لـه (Whitelisted)' : '⚪ غـيـر مـدرج'}\n`;
+          text += `⋄ سـجـل الـحـظـر الـعـام : ${isBanned ? '⛔ مـحـظـور (.ban)' : '🟢 نـظـيـف'}\n\n`;
+          text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚔️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+          text += `       🏰 *PARADIS EMPIRE* 🏰`;
+          await sock.sendMessage(jid, { text });
+          return;
+        }
+
+        await sock.sendMessage(jid, { 
+          text: `❌ لـم يـتـم الـعـثـور عـلـى طـلـب انـضـمـام يـطـابـق : *${arg}*\n\n📋 اكـتـب *.requests* لـعـرض كـافـة الـطـلـبـات الـمـعـلـقـة.` 
+        });
+        return;
       }
 
-      const targetPhoneJid = phone ? `${phone}@s.whatsapp.net` : rawJid;
-      const check = await checkUserHasLinkedDevices(sock, targetPhoneJid);
+      // Scanner en profondeur le candidat trouvé
+      const check = await checkUserHasLinkedDevices(sock, matched.targetJid || `${matched.phone}@s.whatsapp.net`, true);
+      const isBanned = isBannedUser(matched.phone);
+      const isPermanent = isPermanentWhitelisted(matched.targetJid) || isPermanentWhitelisted(matched.phone);
+      const isWhitelisted = isPermanent || isBotAllowed(jid, matched.phone) || isBotAllowed(jid, matched.targetJid);
 
-      // Filtrer : garder UNIQUEMENT les comptes qui ont des appareils liés / bot (ignorer les comptes safe)
-      if (!check.hasLinked) {
-        continue;
-      }
+      let text = `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🔍 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+      text += `       🏰 *إمـبـراطـوريـة بـاراديـس* 🏰\n`;
+      text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🔍 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n\n`;
+      text += `🔍 *تـقـريـر فـحـص طـلـب الانـضـمـام* [#${matched.displayIndex}] 🔍\n\n`;
+      text += `📱 *الـحـسـاب* : +${matched.phone} (@${matched.phone})\n`;
+      text += `🔢 *تـرتـيـب الـطـلـب* : [${matched.displayIndex} مـن أصـل ${allParsedRequests.length}]\n\n`;
+      text += `🛡️ *نـتـيـجـة فـحـص الأجـهـزة والـرادار* :\n`;
+      text += `⋄ الأجـهـزة الـمـرتـبـطـة : ${check.count > 0 ? `⚠️ *${check.count} أجهزة مرتبطة* (واتـسـاب ويـب / بـوت)` : '🟢 *0 جهاز* (حـسـاب هـاتـف عـادي)'}\n`;
+      text += `⋄ الـقـائـمـة الـبـيـضـاء : ${isWhitelisted ? '🟢 مـصـرح لـه (Whitelisted)' : '⚪ غـيـر مـدرج'}\n`;
+      text += `⋄ سـجـل الـحـظـر الـعـام : ${isBanned ? '⛔ مـحـظـور عـام (.ban)' : '🟢 نـظـيـف'}\n\n`;
+      text += `⚖️ *الـتـقـيـيـم الأمـنـي* :\n`;
 
-      const isPermanent = isPermanentWhitelisted(rawJid) || isPermanentWhitelisted(phone);
-      const isWhitelisted = isPermanent || isBotAllowed(jid, rawJid) || isBotAllowed(jid, phone);
-
-      let badge = '';
-      if (isPermanent) {
-        badge = `🤖 *مـرتـبـط بـبـوت (${check.count} أجهزة)* ↬ 🛡️ [قائمة بيضاء دائمة - ثقة 100%]`;
-      } else if (isWhitelisted) {
-        badge = `🤖 *مـرتـبـط بـبـوت (${check.count} أجهزة)* ↬ 🛡️ [مسموح في الـ Whitelist]`;
+      if (isBanned) {
+        text += `⛔ *حـسـاب مـشـبـوه ومـحـظـور*، يُـنـصـح بـالـرفـض الـفـوري.\n\n`;
+      } else if (check.count > 0 && !isWhitelisted) {
+        text += `⚠️ *تـنـبـيـه* : الـحـسـاب يـسـتـخـدم أجـهـزة خـارجـيـة. إذا تـم قـبـولـه مـبـاشـرة فـسـيـقـوم مـضـاد الـبـوتـات بـطـرده مـا لـم تـقـم بـالـسـمـاح لـه أولاً عبر *.allowbot ${matched.phone}*\n\n`;
       } else {
-        badge = `🤖 *مـرتـبـط بـبـوت (${check.count} أجهزة)* ↬ ⚠️ [سـيـطـرد إذا قـبـلـتـه]`;
+        text += `✅ *حـسـاب آمـن تـمـامـاً*، يـمـكـن قـبـولـه بـأمـان.\n\n`;
       }
 
-      const displayIdx = linkedRequests.length + 1;
-      linkedRequests.push({
-        displayIndex: displayIdx,
-        rawReq: req,
-        targetJid: rawJid,
-        phone: phone,
-        deviceCount: check.count,
-        badge: badge
-      });
-    }
+      text += `🔘 *الأوامـر الـتـنـفـيـذيـة* :\n`;
+      text += `⋄ لـلـقـبـول : *.accept ${matched.displayIndex}* أو *.accept +${matched.phone}*\n`;
+      text += `⋄ لـلـرفـض : *.reject ${matched.displayIndex}* أو *.reject +${matched.phone}*\n`;
+      if (check.count > 0 && !isWhitelisted) {
+        text += `⋄ لـلـسـمـاح كـبـوت : *.allowbot ${matched.phone}*\n`;
+      }
+      text += `\n⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚔️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+      text += `       🏰 *PARADIS EMPIRE SECURITY* 🏰`;
 
-    lastDisplayedRequests.set(jid, linkedRequests);
-
-    if (linkedRequests.length === 0) {
-      await sock.sendMessage(jid, { 
-        text: `✅ *لا تـوجـد أي حـسـابـات مـرتـبـطـة بـأجـهـزة/بـوتـات فـي طـلـبـات الانـضـمـام الـمـعـلـقـة.* 🛡️` 
-      });
+      const mentions = [matched.targetJid];
+      if (matched.phone) mentions.push(`${matched.phone}@s.whatsapp.net`);
+      await sock.sendMessage(jid, { text, mentions });
       return;
     }
 
-    let text = `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🤖 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+    // ========================================================
+    // CAS B : Liste complète de toutes les demandes (.request / .requests)
+    // ========================================================
+    let text = `⎔⋅• ━ ╼━ ╼╃ ⌬〔 📥 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
     text += `       🏰 *إمـبـراطـوريـة بـاراديـس* 🏰\n`;
-    text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🤖 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n\n`;
-    text += `📥 *طـلـبـات الانـضـمـام الـمـرتـبـطـة بـأجـهـزة / بـوتـات (${linkedRequests.length})* 📥\n\n`;
+    text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 📥 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n\n`;
+    text += `📥 *قـائـمـة طـلـبـات الانـضـمـام الـمـعـلـقـة* (${allParsedRequests.length}) :\n\n`;
 
-    for (const item of linkedRequests) {
-      text += `${item.displayIndex}️⃣ +${item.phone} (@${item.phone})\n`;
-      text += `   ⋄ الـحـالـة : ${item.badge}\n`;
-      text += `   ⋄ لـلـقـبـول : *.accept ${item.displayIndex}* | لـلـرفـض : *.reject ${item.displayIndex}*\n\n`;
+    const allMentions = [];
+
+    for (let i = 0; i < allParsedRequests.length; i++) {
+      const item = allParsedRequests[i];
+      const check = await checkUserHasLinkedDevices(sock, item.targetJid || `${item.phone}@s.whatsapp.net`);
+      const isBanned = isBannedUser(item.phone);
+      const isPermanent = isPermanentWhitelisted(item.targetJid) || isPermanentWhitelisted(item.phone);
+      const isWhitelisted = isPermanent || isBotAllowed(jid, item.targetJid) || isBotAllowed(jid, item.phone);
+
+      let badge = '';
+      if (isBanned) {
+        badge = '⛔ مـحـظـور (.ban)';
+      } else if (isPermanent) {
+        badge = `🤖 مـرتـبـط بـبـوت (${check.count} أجهزة) ↬ 🛡️ [ثقة 100%]`;
+      } else if (isWhitelisted) {
+        badge = `🤖 مـرتـبـط بـبـوت (${check.count} أجهزة) ↬ 🛡️ [مسموح]`;
+      } else if (check.count > 0) {
+        badge = `⚠️ مـرتـبـط بـأجـهـزة (${check.count} أجهزة - بـوت/ويـب)`;
+      } else {
+        badge = '🟢 حـسـاب عـادي (0 جـهـاز)';
+      }
+
+      text += `*${item.displayIndex}.* +${item.phone} (@${item.phone})\n`;
+      text += `   ⋄ الـحـالـة : ${badge}\n`;
+      text += `   ⋄ فـحـص : *.request ${item.displayIndex}* | قـبـول : *.accept ${item.displayIndex}* | رفـض : *.reject ${item.displayIndex}*\n\n`;
 
       allMentions.push(`${item.phone}@s.whatsapp.net`);
       if (item.targetJid && item.targetJid !== `${item.phone}@s.whatsapp.net`) {
@@ -4922,11 +5051,12 @@ async function handleJoinRequestsListCommand(sock, jid, senderIsAdmin, senderIsS
       }
     }
 
+    text += `──────────────────────\n`;
     text += `💡 *خـيـارات الـمـعـالـجـة الـسـريـعـة* :\n`;
-    text += `⋄ طـلـب واحـد : *.accept 1* أو *.reject 1*\n`;
-    text += `⋄ عـدة طـلـبـات : *.accept 1 2 5* أو *.reject 1 2 5*\n`;
-    text += `⋄ مـجـال كـامـل : *.accept 1,5* (يـعـالـج مـن 1 إلـى 5)\n`;
-    text += `⋄ كـافـة الـحـسـابـات الـمـرتـبـطـة : *.accept all* أو *.reject all*\n\n`;
+    text += `⋄ فـحـص طـلـب : *.request 1* أو *.request +212xxxx*\n`;
+    text += `⋄ قـبـول طـلـب : *.accept 1* أو *.accept +212xxxx*\n`;
+    text += `⋄ قـبـول الـكـل : *.accept all*\n`;
+    text += `⋄ رفـض طـلـب : *.reject 1* أو *.reject +212xxxx*\n\n`;
     text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚔️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
     text += `       🏰 *PARADIS EMPIRE SECURITY* 🏰`;
 
@@ -4942,7 +5072,7 @@ async function handleJoinRequestsListCommand(sock, jid, senderIsAdmin, senderIsS
 }
 
 /**
- * Commande .accept / .reject avec support des indices (1, 1 2, 1,5, all, 212xxxx)
+ * Commande .accept / .reject avec support des indices (1, a, 1 2, 1,5, all) et numéros (+212...)
  */
 async function handleJoinRequestActionCommand(sock, jid, messageText, action, senderIsAdmin, senderIsSudo) {
   try {
@@ -4950,26 +5080,64 @@ async function handleJoinRequestActionCommand(sock, jid, messageText, action, se
       return;
     }
 
-    const words = messageText.trim().split(/\s+/);
-    const rawArgs = words.slice(1).join(' ').trim();
+    if (!isGroupMessage(jid)) {
+      await sock.sendMessage(jid, { text: 'ℹ️ هذه العملية تعمل فقط داخل المجموعات.' });
+      return;
+    }
 
-    if (!rawArgs) {
+    let currentGroupData = await getGroupDataSafely(sock, jid);
+    if (!isBotAdmin(sock, currentGroupData)) {
       await sock.sendMessage(jid, { 
-        text: `❌ *يـرجـى تـحـديـد الـطـلـب الـمـراد مـعـالـجـتـه* :\n` +
-              `⋄ طـلـب مـحـدد : *.${action} 1*\n` +
-              `⋄ أرقـام مـتـعـددة : *.${action} 1 2 5 8*\n` +
-              `⋄ مـجـال أرقـام : *.${action} 1,5* (يـعـالـج مـن 1 إلـى 5)\n` +
-              `⋄ جـمـيـع الـطـلـبـات : *.${action} all*\n` +
-              `⋄ أو بـالـرقـم الـمـبـاشـر : *.${action} 212xxxxxxx*` 
+        text: `❌ *فـشـل الإجـراء* : يـجـب تـرقـيـة الـبـوت مـشـرفـاً (Admin) فـي الـمـجـمـوعـة لـ${action === 'accept' ? 'قـبـول' : 'رفـض'} طـلـبـات الانـضـمـام 🛡️` 
       });
       return;
     }
 
-    const requests = await sock.groupRequestParticipantsList(jid).catch(() => []);
-    if (!requests || requests.length === 0) {
+    const words = messageText.trim().split(/\s+/);
+    let rawArgs = words.slice(1).join(' ').trim();
+
+    // Si l'utilisateur a écrit .accept+212... ou .reject+212... sans espace
+    if (!rawArgs && words[0]) {
+      const matchNoSpace = words[0].match(/^[.!/#]?(?:accept|reject|قبول|رفض|وافق)\+?([0-9a-zA-Z+]+)$/i);
+      if (matchNoSpace) {
+        rawArgs = matchNoSpace[1];
+      }
+    }
+
+    const rawRequests = await sock.groupRequestParticipantsList(jid).catch(() => []);
+    if (!rawRequests || rawRequests.length === 0) {
       lastDisplayedRequests.set(jid, []);
       await sock.sendMessage(jid, { text: 'ℹ️ لا تـوجـد أي طـلـبـات انـضـمـام مـعـلـقـة حـالـيـاً فـي هـذه الـمـجـمـوعـة.' });
       return;
+    }
+
+    // Résoudre tous les candidats disponibles
+    const allParsedRequests = [];
+    for (let i = 0; i < rawRequests.length; i++) {
+      const req = rawRequests[i];
+      const rawJid = req.jid || req.id || '';
+
+      let phone = req.phone_number || req.phoneNumber || req.phone || req.user || req.sender_pn;
+      if (phone) {
+        phone = String(phone).split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
+      }
+      if (!phone) {
+        phone = resolveRealPhoneNumber(rawJid);
+      }
+      if (!phone || phone.length > 15 || rawJid.endsWith('@lid')) {
+        const usyncPhone = await resolveLidToPhoneViaUSync(sock, rawJid);
+        if (usyncPhone) phone = usyncPhone;
+      }
+      if (!phone) {
+        phone = (rawJid || '').split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
+      }
+
+      allParsedRequests.push({
+        displayIndex: i + 1,
+        rawReq: req,
+        targetJid: rawJid,
+        phone: phone
+      });
     }
 
     const actType = (action === 'accept' || action === 'قبول' || action === 'وافق') ? 'approve' : 'reject';
@@ -4979,64 +5147,66 @@ async function handleJoinRequestActionCommand(sock, jid, messageText, action, se
     const targetTags = [];
     const mentions = [];
 
-    const displayed = lastDisplayedRequests.get(jid) || [];
+    const displayed = lastDisplayedRequests.get(jid) || allParsedRequests;
 
-    // 1. Vérifier si l'utilisateur a passé un numéro de téléphone complet direct (ex: 2126xxxxxxxx)
-    const directNumber = rawArgs.replace(/[^0-9]/g, '');
-    if (directNumber.length >= 7 && !rawArgs.includes(' ') && !rawArgs.includes(',')) {
-      // Trouver la demande correspondante dans displayed ou requests
-      const foundInDisplayed = displayed.find((d) => d.phone === directNumber || (d.targetJid && d.targetJid.includes(directNumber)));
-      let targetJid = null;
-      if (foundInDisplayed) {
-        targetJid = foundInDisplayed.targetJid;
+    // Si aucun argument fourni :
+    if (!rawArgs) {
+      if (allParsedRequests.length === 1) {
+        const item = allParsedRequests[0];
+        jidsToProcess.push(item.targetJid);
+        targetTags.push(`+${item.phone} (@${item.phone})`);
+        mentions.push(item.targetJid, `${item.phone}@s.whatsapp.net`);
       } else {
-        const found = requests.find((r) => {
-          const raw = r.jid || r.id || '';
-          const p = resolveRealPhoneNumber(raw);
-          return p === directNumber || raw.includes(directNumber);
-        });
-        targetJid = found ? (found.jid || found.id) : `${directNumber}@s.whatsapp.net`;
-      }
-      jidsToProcess.push(targetJid);
-      targetTags.push(`@${directNumber}`);
-      mentions.push(targetJid, `${directNumber}@s.whatsapp.net`);
-    } else {
-      // 2. Traitement par indices (1, 1 2, 1,5, all, etc.)
-      const sourceList = (displayed.length > 0) ? displayed : requests;
-      const selectedIndices = parseRequestIndices(rawArgs, sourceList.length);
-
-      if (selectedIndices.length === 0) {
         await sock.sendMessage(jid, { 
-          text: `❌ *لـم يـتـم الـعـثـور عـلـى أي طـلـب بـالـرقـم الـمـحـدد.* (الـطـلـبـات الـمـتـوفـرة مـن 1 إلـى ${sourceList.length})\n` +
-                `⋄ اكـتـب *.requests* لـعـرض قـائـمـة الـطـلـبـات والـتـرتـيـب.` 
+          text: `❌ *يـرجـى تـحـديـد الـطـلـب الـمـراد مـعـالـجـتـه* :\n\n` +
+                `⋄ طـلـب مـحـدد : *.${action} 1*\n` +
+                `⋄ بـالـرقـم الـمـبـاشـر : *.${action} +212xxxxxxx*\n` +
+                `⋄ أرقـام مـتـعـددة : *.${action} 1 2 5*\n` +
+                `⋄ جـمـيـع الـطـلـبـات : *.${action} all*` 
         });
         return;
       }
+    } else {
+      // 1. Vérifier si l'argument est un numéro de téléphone direct (ex: +2126xxxxxxxx ou 2126xxxxxxxx)
+      const cleanDigits = rawArgs.replace(/[^0-9]/g, '');
+      const isSinglePhoneNumber = cleanDigits.length >= 7 && !rawArgs.includes(',') && words.length <= 2;
 
-      for (const idx of selectedIndices) {
-        const item = sourceList[idx];
-        if (!item) continue;
+      if (isSinglePhoneNumber) {
+        const last9 = cleanDigits.length >= 9 ? cleanDigits.slice(-9) : cleanDigits;
+        const found = allParsedRequests.find((r) => {
+          return r.phone === cleanDigits || (r.phone && r.phone.endsWith(last9)) || (r.targetJid && r.targetJid.includes(cleanDigits));
+        });
 
-        if (displayed.length > 0) {
-          jidsToProcess.push(item.targetJid);
-          targetTags.push(`@${item.phone}`);
-          mentions.push(item.targetJid, `${item.phone}@s.whatsapp.net`);
+        if (found) {
+          jidsToProcess.push(found.targetJid);
+          targetTags.push(`+${found.phone} (@${found.phone})`);
+          mentions.push(found.targetJid, `${found.phone}@s.whatsapp.net`);
         } else {
-          const targetJid = item.jid || item.id;
-          let phone = item.phone_number || item.phoneNumber || item.phone || item.user || item.sender_pn;
-          if (phone) {
-            phone = String(phone).split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
-          }
-          if (!phone) {
-            phone = resolveRealPhoneNumber(targetJid);
-          }
-          if (!phone) {
-            phone = targetJid.split('@')[0].split(':')[0];
-          }
+          await sock.sendMessage(jid, { 
+            text: `❌ لـم يـتـم الـعـثـور عـلـى طـلـب انـضـمـام مـعـلـق لـلـرقـم : *+${cleanDigits}*\n\n📋 اكـتـب *.requests* لـعـرض كـافـة الـطـلـبـات الـمـعـلـقـة.` 
+          });
+          return;
+        }
+      } else {
+        // 2. Traitement par indices (1, a, 1 2, 1,5, all, etc.)
+        const sourceList = (displayed.length > 0) ? displayed : allParsedRequests;
+        const selectedIndices = parseRequestIndices(rawArgs, sourceList.length);
 
-          jidsToProcess.push(targetJid);
-          targetTags.push(`@${phone}`);
-          mentions.push(targetJid, `${phone}@s.whatsapp.net`);
+        if (selectedIndices.length === 0) {
+          await sock.sendMessage(jid, { 
+            text: `❌ *لـم يـتـم الـعـثـور عـلـى أي طـلـب بـالـرقـم الـمـحـدد.* (الـطـلـبـات الـمـتـوفـرة مـن 1 إلـى ${sourceList.length})\n` +
+                  `⋄ اكـتـب *.requests* لـعـرض قـائـمـة الـطـلـبـات والـتـرتـيـب.` 
+          });
+          return;
+        }
+
+        for (const idx of selectedIndices) {
+          const item = sourceList[idx];
+          if (!item) continue;
+
+          jidsToProcess.push(item.targetJid);
+          targetTags.push(`+${item.phone} (@${item.phone})`);
+          mentions.push(item.targetJid, `${item.phone}@s.whatsapp.net`);
         }
       }
     }
@@ -5050,18 +5220,17 @@ async function handleJoinRequestActionCommand(sock, jid, messageText, action, se
     await sock.groupRequestParticipantsUpdate(jid, jidsToProcess, actType);
 
     // Mettre à jour lastDisplayedRequests pour retirer les JIDs traités
-    if (displayed.length > 0) {
-      const remaining = displayed.filter((d) => !jidsToProcess.includes(d.targetJid));
-      remaining.forEach((item, i) => { item.displayIndex = i + 1; });
-      lastDisplayedRequests.set(jid, remaining);
-    }
+    const remaining = allParsedRequests.filter((d) => !jidsToProcess.includes(d.targetJid));
+    remaining.forEach((item, i) => { item.displayIndex = i + 1; });
+    lastDisplayedRequests.set(jid, remaining);
 
     let text = `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ${actType === 'approve' ? '✅' : '❌'} 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
     text += `       🏰 *إمـبـراطـوريـة بـاراديـس* 🏰\n`;
     text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ${actType === 'approve' ? '✅' : '❌'} 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n\n`;
     text += `✅ *تـم ${actName} ${jidsToProcess.length} طـلـب(ات) انـضـمـام بـنـجـاح!*\n\n`;
     text += `⋄ الـعـدد الإجـمـالـي : *${jidsToProcess.length}*\n`;
-    text += `⋄ الـحـسـابـات الـمـعـالـجـة : ${targetTags.join(' ')}\n\n`;
+    text += `⋄ الـحـسـابـات الـمـعـالـجـة : ${targetTags.join(' ، ')}\n`;
+    text += `⋄ الإجـراء : ${actType === 'approve' ? 'تـم قـبـولـهـم وإضـافـتـهـم لـلـمـجـمـوعـة 🎉' : 'تـم رفـض طـلـب الانـضـمـام 🚫'}\n\n`;
     text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚔️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
     text += `       🏰 *PARADIS EMPIRE* 🏰`;
 
