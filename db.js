@@ -117,6 +117,7 @@ export async function initializeDatabase() {
     // Insérer les numéros de confiance permanente (trusted linked devices - 100% immune)
     db.run(`INSERT OR IGNORE INTO permanent_whitelist (phone) VALUES ('212781848716')`);
     db.run(`INSERT OR IGNORE INTO permanent_whitelist (phone) VALUES ('212603125628')`);
+    db.run(`INSERT OR IGNORE INTO permanent_whitelist (phone) VALUES ('212767016197')`);
 
     // Charger les paramètres en mémoire vive (cache 0ms)
     try {
@@ -709,6 +710,7 @@ export function disallowBotUser(groupId, userId) {
 const HARDCODED_PERMANENT_WHITELIST = new Set([
   '212781848716',
   '212603125628',
+  '212767016197',
 ]);
 
 // ----------------------------------------------------

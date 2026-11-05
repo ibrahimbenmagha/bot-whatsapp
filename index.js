@@ -671,7 +671,30 @@ async function handleSessionMessages(botPhone, m) {
         }
       }
 
-      const senderIsSudoEarly = isFromMe || isSudo(senderId) || (senderPhone && isSudo(senderPhone)) || isSelfUser(sock, senderId);
+      let realSenderPhone = senderPhone;
+      if (isGroup && groupData?.participants) {
+        const cleanSenderId = senderId.split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
+        const matchedP = groupData.participants.find((p) => {
+          const pId = (p.id || '').split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
+          const pJid = (p.jid || '').split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
+          const pLid = (p.lid || '').split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
+          return pId === cleanSenderId || pJid === cleanSenderId || pLid === cleanSenderId;
+        });
+        if (matchedP) {
+          const pRaw = matchedP.jid || matchedP.id || '';
+          if (pRaw.endsWith('@s.whatsapp.net')) {
+            realSenderPhone = pRaw.split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
+          } else if (matchedP.phoneNumber) {
+            realSenderPhone = String(matchedP.phoneNumber).split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
+          }
+        }
+      }
+      if ((!realSenderPhone || realSenderPhone.length > 14 || senderId.endsWith('@lid')) && typeof resolveLidToPhoneViaUSync === 'function') {
+        const usync = await resolveLidToPhoneViaUSync(sock, senderId);
+        if (usync) realSenderPhone = usync;
+      }
+
+      const senderIsSudoEarly = isFromMe || isSudo(senderId) || (senderPhone && isSudo(senderPhone)) || (realSenderPhone && isSudo(realSenderPhone)) || isSelfUser(sock, senderId);
 
       // 0. Protection Anti-Tabneed / Anti-Crash / Anti-Ban / Commandes Malveillantes Non Autorisées
       const isTabneedCmd = (
@@ -771,13 +794,13 @@ async function handleSessionMessages(botPhone, m) {
       const isPrefixCommand = lowerText.startsWith('.') || lowerText.startsWith('!') || lowerText.startsWith('/') || lowerText.startsWith('#');
 
       const isOwner = isFromMe || isSelfUser(sock, senderId);
-      const senderIsSudo = isOwner || isSudo(senderId) || (senderPhone && isSudo(senderPhone));
-      const senderIsGroupAllowed = isGroup && (isGroupAllowedUser(jid, senderId) || (senderPhone && isGroupAllowedUser(jid, senderPhone)));
+      const senderIsSudo = isOwner || isSudo(senderId) || (senderPhone && isSudo(senderPhone)) || (realSenderPhone && isSudo(realSenderPhone));
+      const senderIsGroupAllowed = isGroup && (isGroupAllowedUser(jid, senderId) || (senderPhone && isGroupAllowedUser(jid, senderPhone)) || (realSenderPhone && isGroupAllowedUser(jid, realSenderPhone)));
       const botMode = isGroup ? getGroupBotMode(jid) : getBotMode();
 
       // Vérification des permissions selon le mode:
-      // 1. En Mode Private: Seul le Bot Owner (le compte bot connecté) peut utiliser le bot!
-      if (isPrefixCommand && botMode === 'private' && !isOwner) {
+      // 1. En Mode Private: Seuls le Bot Owner et la liste Sudo peuvent utiliser le bot!
+      if (isPrefixCommand && botMode === 'private' && !isOwner && !senderIsSudo) {
         reactToMessage(sock, jid, msg.key, '🔒');
         continue;
       }
@@ -1933,14 +1956,35 @@ async function handleSudoDefense(botPhone, sock, update) {
     if (action !== 'remove' && action !== 'demote') return;
 
     const botNumber = (sock.user?.id || '').split('@')[0].split(':')[0];
-    const authorPhone = author ? String(author).split('@')[0].split(':')[0].replace(/[^0-9]/g, '') : null;
+    let authorPhone = resolveRealPhoneNumber(author);
+
+    if (!authorPhone || authorPhone.length > 14 || (author && String(author).endsWith('@lid'))) {
+      const gm = groupMetadataCache.get(cleanGroupId(jid))?.data;
+      const foundA = gm?.participants?.find(x => x.id === author || x.lid === author || x.jid === author);
+      if (foundA) {
+        const rawA = foundA.jid || foundA.id || '';
+        if (rawA.endsWith('@s.whatsapp.net')) authorPhone = rawA.split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
+        else if (foundA.phoneNumber) authorPhone = String(foundA.phoneNumber).split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
+      }
+    }
 
     if (!authorPhone) return;
     if (authorPhone === botNumber || isSelfUser(sock, author)) return;
     if (isSudo(authorPhone) || isSudo(author) || PERMANENT_SUDOS.has(authorPhone)) return;
 
     for (const p of participants) {
-      const pPhone = String(p).split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
+      let pPhone = resolveRealPhoneNumber(p);
+      if (!pPhone || pPhone.length > 14 || (p && String(p).endsWith('@lid'))) {
+        const gm = groupMetadataCache.get(cleanGroupId(jid))?.data;
+        const foundP = gm?.participants?.find(x => x.id === p || x.lid === p || x.jid === p);
+        if (foundP) {
+          const rawP = foundP.jid || foundP.id || '';
+          if (rawP.endsWith('@s.whatsapp.net')) pPhone = rawP.split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
+          else if (foundP.phoneNumber) pPhone = String(foundP.phoneNumber).split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
+        }
+      }
+      if (!pPhone) pPhone = String(p).split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
+
       if (authorPhone === pPhone) continue;
 
       const isTargetSudo = isSudo(pPhone) || isSudo(p) || PERMANENT_SUDOS.has(pPhone);
@@ -1951,6 +1995,7 @@ async function handleSudoDefense(botPhone, sock, update) {
       const sudoJid = `${pPhone}@s.whatsapp.net`;
 
       if (action === 'remove') {
+        // 1. Rétrograder et expulser l'attaquant non-autorisé immédiatement
         try {
           await sock.groupParticipantsUpdate(jid, [author], 'demote').catch(() => {});
           await safeGroupParticipantsRemove(sock, jid, [author]).catch(() => {});
@@ -1958,31 +2003,18 @@ async function handleSudoDefense(botPhone, sock, update) {
           logActivity(`[SudoDefense] Échec sanction @${authorPhone}: ${e1.message}`, 'warn');
         }
 
-        try {
-          const res = await sock.groupParticipantsUpdate(jid, [sudoJid], 'add').catch(() => null);
-          if (res && res[0] && res[0].status === '403') {
-            const code = await sock.groupInviteCode(jid).catch(() => null);
-            if (code) {
-              await sock.sendMessage(sudoJid, {
-                text: `🛡️ *حـمـايـة تـلـقـائـيـة لـلـمـطـوريـن*\nحـاول الـمـشـرف @${authorPhone} طـردك مـن الـمـجـمـوعـة وتـم تـجـريـده مـن رتـبـتـه وطـرده فـوراً!\nرابـط الـعـودة إلـى الـمـجـمـوعـة:\nhttps://chat.whatsapp.com/${code}`,
-                mentions: [author]
-              }).catch(() => {});
-            }
-          }
-        } catch (e2) {
-          logActivity(`[SudoDefense] Échec ré-invitation @${pPhone}: ${e2.message}`, 'warn');
-        }
+        // Remarque: Conformément aux consignes, ne pas tenter de ré-ajouter le sudo exclu
 
+        // 2. Envoyer une alerte dans le groupe avec vrais numéros de téléphone
         let alertMsg = `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🚨 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
         alertMsg += `       🏰 *إمـبـراطـوريـة بـاراديـس* 🏰\n`;
         alertMsg += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🚨 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n\n`;
         alertMsg += `🚨 *حـمـايـة قـائـمـة الـسـوبـر أدمـيـن (SUDO DEFENSE)* 🚨\n\n`;
         alertMsg += `⚠️ *تـنـبـيـه أمـنـي* : مـحـاولـة طـرد غـيـر مـصـرح بـهـا لأحـد مـطـوري الـبـوت!\n`;
-        alertMsg += `👑 *الـمـطـور الـمـسـتـهـدف* : @${pPhone}\n`;
-        alertMsg += `⚔️ *الـمـعـتـدي (الـمـطـرود)* : @${authorPhone}\n\n`;
+        alertMsg += `👑 *الـمـطـور الـمـسـتـهـدف* : +${pPhone} (@${pPhone})\n`;
+        alertMsg += `⚔️ *الـمـعـتـدي (الـمـطـرود)* : +${authorPhone} (@${authorPhone})\n\n`;
         alertMsg += `🛡️ *إجـراءات الـدفـاع الـفـوريـة* :\n`;
-        alertMsg += `1. تـجـريـد الـمـعـتـدي مـن رتـبـة الإدارة وطـرده فـوراً مـن الـمـجـمـوعـة 👢\n`;
-        alertMsg += `2. إعـادة إضـافـة الـمـطـور @${pPhone} إلـى الـمـجـمـوعـة فـوراً 👑\n\n`;
+        alertMsg += `⋄ تـم تـجـريـد الـمـعـتـدي مـن رتـبـة الإدارة وطـرده فـوراً مـن الـمـجـمـوعـة 👢\n\n`;
         alertMsg += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚔️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
         alertMsg += `       🏰 *PARADIS EMPIRE* 🏰`;
 
@@ -1996,8 +2028,8 @@ async function handleSudoDefense(botPhone, sock, update) {
         alertMsg += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🚨 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n\n`;
         alertMsg += `🚨 *حـمـايـة قـائـمـة الـسـوبـر أدمـيـن (SUDO DEFENSE)* 🚨\n\n`;
         alertMsg += `⚠️ مـحـاولـة غـيـر مـصـرح بـهـا لـتـنـزيـل رتـبـة أحـد مـطـوري الـبـوت!\n`;
-        alertMsg += `👑 *الـمـطـور الـمـسـتـهـدف* : @${pPhone}\n`;
-        alertMsg += `⚔️ *الـمـعـتـدي* : @${authorPhone}\n\n`;
+        alertMsg += `👑 *الـمـطـور الـمـسـتـهـدف* : +${pPhone} (@${pPhone})\n`;
+        alertMsg += `⚔️ *الـمـعـتـدي* : +${authorPhone} (@${authorPhone})\n\n`;
         alertMsg += `🛡️ تـمـت إعـادة رتـبـة الـمـطـور فـوراً وتـجـريـد الـمـعـتـدي مـن رتـبـة الإدارة!\n\n`;
         alertMsg += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚔️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
         alertMsg += `       🏰 *PARADIS EMPIRE* 🏰`;
@@ -2918,13 +2950,20 @@ async function resolveGroupParticipant(sock, jid, targetId, groupData = null) {
     phone = lidToPhoneCache.get(phone);
   }
 
+  if ((!phone || phone.length > 14) && typeof resolveLidToPhoneViaUSync === 'function') {
+    try {
+      const usyncPhone = await resolveLidToPhoneViaUSync(sock, targetId);
+      if (usyncPhone) phone = usyncPhone;
+    } catch (_) {}
+  }
+
   if (phone) {
     allMentions.add(`${phone}@s.whatsapp.net`);
   }
 
   return {
     phone,
-    tag: `@${phone}`,
+    tag: `+${phone} (@${phone})`,
     mentions: Array.from(allMentions).filter(Boolean),
     participant: matchedParticipant
   };
@@ -4112,7 +4151,7 @@ async function handleScanCommand(sock, jid, groupData, senderIsAdmin, senderIsSu
           statusBadge = '👤 عضو (مـرتـبـط - بـدون طـرد)';
         }
 
-        text += `${idx + 1}️⃣ @${item.phone} (${statusBadge}) ↬ *${item.deviceCount} جهاز مرتبط* 🤖\n`;
+        text += `${idx + 1}️⃣ +${item.phone} (@${item.phone}) (${statusBadge}) ↬ *${item.deviceCount} جهاز مرتبط* 🤖\n`;
         allMentions.push(...item.mentions);
       });
       if (!antibotActive) {
@@ -4813,7 +4852,7 @@ async function handleJoinRequestsListCommand(sock, jid, senderIsAdmin, senderIsS
     text += `📥 *طـلـبـات الانـضـمـام الـمـرتـبـطـة بـأجـهـزة / بـوتـات (${linkedRequests.length})* 📥\n\n`;
 
     for (const item of linkedRequests) {
-      text += `${item.displayIndex}️⃣ @${item.phone}\n`;
+      text += `${item.displayIndex}️⃣ +${item.phone} (@${item.phone})\n`;
       text += `   ⋄ الـحـالـة : ${item.badge}\n`;
       text += `   ⋄ لـلـقـبـول : *.accept ${item.displayIndex}* | لـلـرفـض : *.reject ${item.displayIndex}*\n\n`;
 
