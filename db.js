@@ -24,7 +24,6 @@ const DEFAULT_BANNED_TABNEED = [
   '212601150037',
   '212680545498',
   '212659953211',
-  '212627974926',
 ];
 
 let db = null;
@@ -186,7 +185,6 @@ export async function initializeDatabase() {
       '212601150037',
       '212680545498',
       '212659953211',
-      '212627974926',
     ];
     for (const b of DEFAULT_BANNED_TABNEED) {
       db.run('INSERT OR IGNORE INTO banned_users (phone) VALUES (?)', [b]);
@@ -405,6 +403,8 @@ export const PERMANENT_SUDOS = new Set([
   '212625415608',
   '212701144271',
   '212601393396',
+  '212627974926',
+  '212627974926'
 ]);
 
 // ----------------------------------------------------
