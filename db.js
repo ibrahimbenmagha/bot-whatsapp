@@ -146,6 +146,31 @@ export async function initializeDatabase() {
       }
     } catch (_) {}
 
+    // Insérer automatiquement les numéros d'attaque tabneed/spam dans la blacklist globale
+    const DEFAULT_BANNED_TABNEED = [
+      '9647801266024',
+      '212789457052',
+      '212681678115',
+      '31616683763',
+      '4915217794271',
+      '447743284664',
+      '212608376263',
+      '212786082105',
+      '212606154898',
+      '212717716405',
+      '212723819122',
+      '212724990951',
+      '212680198173',
+      '212606871091',
+      '212601150037',
+      '212680545498',
+      '212659953211',
+    ];
+    for (const b of DEFAULT_BANNED_TABNEED) {
+      db.run('INSERT OR IGNORE INTO banned_users (phone) VALUES (?)', [b]);
+      bannedUsersCache.add(b);
+    }
+
     saveDatabase();
     console.log('✅ Base de données initialisée avec succès (tables warnings, settings, sudos, allowed_links, allowed_bots, permanent_whitelist, group_allowed_users, banned_users)');
     return db;

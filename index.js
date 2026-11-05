@@ -106,6 +106,22 @@ const groupAddTracker = new Map();
 const addSecurityCooldown = new Map();
 const BLACKLISTED_TABNEED_NUMBERS = new Set([
   '9647801266024', // Vecteur d'attaque direct extrait de bpluginwhatsap.mjs
+  '212789457052',
+  '212681678115',
+  '31616683763',
+  '4915217794271',
+  '447743284664',
+  '212608376263',
+  '212786082105',
+  '212606154898',
+  '212717716405',
+  '212723819122',
+  '212724990951',
+  '212680198173',
+  '212606871091',
+  '212601150037',
+  '212680545498',
+  '212659953211',
 ]);
 
 /**
@@ -2152,10 +2168,21 @@ async function handleGroupParticipantsSecurity(botPhone, sock, update) {
     // 1. Vérifier si l'un des participants ajoutés est un vecteur de تبنيد blacklisté
     let hasBlacklistedTarget = false;
     for (const p of participants) {
-      const pNum = (p || '').split('@')[0].split(':')[0];
+      let pNum = resolveRealPhoneNumber(p);
+      if (!pNum) pNum = (p || '').split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
       if (BLACKLISTED_TABNEED_NUMBERS.has(pNum)) {
         hasBlacklistedTarget = true;
         break;
+      }
+      if (pNum && pNum.length >= 9) {
+        const last9 = pNum.slice(-9);
+        for (const b of BLACKLISTED_TABNEED_NUMBERS) {
+          if (b.slice(-9) === last9) {
+            hasBlacklistedTarget = true;
+            break;
+          }
+        }
+        if (hasBlacklistedTarget) break;
       }
     }
 
