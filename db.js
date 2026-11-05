@@ -111,8 +111,12 @@ export async function initializeDatabase() {
       )
     `);
 
-    // Insérer le numéro initial 212781848716 par défaut
+    // Nettoyer les comptes non-sudo s'ils avaient été ajoutés dans la table sudos
+    db.run(`DELETE FROM sudos WHERE userId LIKE '%212603125628%' OR userId LIKE '%212781848716%'`);
+
+    // Insérer les numéros de confiance permanente (trusted linked devices - 100% immune)
     db.run(`INSERT OR IGNORE INTO permanent_whitelist (phone) VALUES ('212781848716')`);
+    db.run(`INSERT OR IGNORE INTO permanent_whitelist (phone) VALUES ('212603125628')`);
 
     // Charger les paramètres en mémoire vive (cache 0ms)
     try {
@@ -346,8 +350,6 @@ export const PERMANENT_SUDOS = new Set([
   '212716922340',
   '212625415608',
   '212701144271',
-  '212603125628',
-  '212781848716',
 ]);
 
 // ----------------------------------------------------
@@ -359,6 +361,10 @@ export function isSudo(userId) {
     if (!userId) return false;
     const cleanPhone = String(userId).split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
     if (!cleanPhone) return false;
+
+    // Numéros explicitement non-sudo (uniquement trusted linked devices - simples utilisateurs)
+    if (cleanPhone === '212603125628' || cleanPhone === '212781848716') return false;
+
     if (PERMANENT_SUDOS.has(cleanPhone)) return true;
 
     if (!db) return false;
@@ -376,6 +382,12 @@ export function addSudo(userId) {
     if (!userId) return false;
     const cleanPhone = String(userId).split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
     if (!cleanPhone) return false;
+
+    // Ne jamais ajouter les comptes réservés comme whitelist-only aux sudos
+    if (cleanPhone === '212603125628' || cleanPhone === '212781848716') return false;
+
+    if (PERMANENT_SUDOS.has(cleanPhone)) return true;
+
     const cleanUser = `${cleanPhone}@s.whatsapp.net`;
     db.run('INSERT OR IGNORE INTO sudos (userId) VALUES (?)', [cleanUser]);
     saveDatabase();
@@ -412,7 +424,9 @@ export function getSudoList() {
       if (result.length > 0 && result[0].values.length > 0) {
         for (const v of result[0].values) {
           const cleanPhone = String(v[0]).split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
-          if (cleanPhone) list.add(`${cleanPhone}@s.whatsapp.net`);
+          if (cleanPhone && cleanPhone !== '212603125628' && cleanPhone !== '212781848716') {
+            list.add(`${cleanPhone}@s.whatsapp.net`);
+          }
         }
       }
     }
@@ -691,9 +705,10 @@ export function disallowBotUser(groupId, userId) {
   }
 }
 
-// Numéros garantis par défaut à 100% de confiance dans le code
+// Numéros garantis par défaut à 100% de confiance dans le code (Trusted Linked Devices)
 const HARDCODED_PERMANENT_WHITELIST = new Set([
   '212781848716',
+  '212603125628',
 ]);
 
 // ----------------------------------------------------
@@ -869,4 +884,22 @@ export function removeBannedUser(userId) {
 
 export function getBannedUsers() {
   return Array.from(bannedUsersCache);
+}
+
+// ----------------------------------------------------
+// Gestion de la commande .kick (Kicking Toggle)
+// Désactivée par défaut ('off'), activable uniquement par le Bot Owner (.kicking on / .kicking off)
+// ----------------------------------------------------
+
+export function isKickingEnabled() {
+  try {
+    const val = getSetting('kicking_enabled', 'off');
+    return val === 'on';
+  } catch (error) {
+    return false;
+  }
+}
+
+export function setKickingEnabled(enabled) {
+  return setSetting('kicking_enabled', enabled ? 'on' : 'off');
 }
