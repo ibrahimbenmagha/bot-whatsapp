@@ -298,13 +298,13 @@ async function startSession(phone, options = {}) {
 
   // Protection contre le spam d'ajouts de membres (Anti-Tabneed / Anti-Crash / Anti-Ban) et Détection Anti-Bot
   sock.ev.on('group-participants.update', async (update) => {
-    if (update.id) groupMetadataCache.delete(cleanGroupId(update.id));
     const botNumber = (sock.user?.id || '').split('@')[0].split(':')[0];
     if (update.action === 'remove' && (update.participants?.includes(botNumber) || update.participants?.some(p => isSelfUser(sock, p)))) {
       clearGroupAllowedUsers(update.id);
       logActivity(`[GroupLeave] Bot a quitté le groupe ${update.id} -> Permissions spécifiques révoquées.`);
     }
     await handleSudoDefense(phone, sock, update);
+    if (update.id) groupMetadataCache.delete(cleanGroupId(update.id));
     await handleGroupParticipantsSecurity(phone, sock, update);
     await handleAntiBotParticipantCheck(phone, sock, update);
   });
@@ -3100,17 +3100,15 @@ async function handleManualKickCommand(sock, jid, messageText, groupData, msg, s
     const jidToRemove = resolved.participant?.id || resolved.participant?.jid || targetUserId;
     const targetPhone = resolved.phone;
 
-    // Protection des membres de la Sudo List:
-    // Seul un membre Sudo ou le Owner peut kicker un membre Sudo
+    // Protection absolue des membres de la Sudo List:
+    // Personne ne peut kicker un membre Sudo via le bot!
     const targetIsSudo = isSudo(targetUserId) || (targetPhone && isSudo(targetPhone)) || (targetPhone && PERMANENT_SUDOS.has(targetPhone));
     if (targetIsSudo) {
-      if (!senderIsSudo && !isOwner) {
-        await sock.sendMessage(jid, {
-          text: `🛡️ *حـمـايـة قـائـمـة الـسـوبـر أدمـيـن (Sudo)* 🛡️\n\n❌ لا يـمـكـن طـرد الـعـضـو ${resolved.tag} لأنـه يـنـتـمـي إلـى قـائـمـة الـمـطـوريـن (Sudo List)!\nفـقـط مـطـور مـعـتـمـد يـمـكـنـه اتـخـاذ هـذا الإجـراء.`,
-          mentions: resolved.mentions
-        }, { quoted: msg });
-        return;
-      }
+      await sock.sendMessage(jid, {
+        text: `🛡️ *حـمـايـة قـائـمـة الـسـوبـر أدمـيـن (Sudo)* 🛡️\n\n❌ لا يـمـكـن طـرد الـعـضـو ${resolved.tag} لأنـه يـنـتـمـي إلـى قـائـمـة الـمـطـوريـن (Sudo List) والـحـسـاب مـحـمـي تـمـامـاً مـن الـطـرد 👑.`,
+        mentions: resolved.mentions
+      }, { quoted: msg });
+      return;
     }
 
     // Protection créateur / fondateur du groupe
