@@ -104,6 +104,7 @@ const groupSpamCooldown = new Map();
 // key = `${jid}:${authorNumber}` -> Array<timestamp>
 const groupAddTracker = new Map();
 const addSecurityCooldown = new Map();
+const blacklistAdminAlertCooldown = new Map();
 const BLACKLISTED_TABNEED_NUMBERS = new Set([
   '9647801266024', // Vecteur d'attaque direct extrait de bpluginwhatsap.mjs
   '212789457052',
@@ -351,6 +352,8 @@ async function startSession(phone, options = {}) {
     if (update.id) groupMetadataCache.delete(cleanGroupId(update.id));
     await handleGroupParticipantsSecurity(phone, sock, update);
     await handleAntiBotParticipantCheck(phone, sock, update);
+    // Vérification immédiate et purge blacklist (si bot ajouté, si promotion admin, etc.)
+    await checkAndPurgeBlacklistInGroup(sock, update.id);
   });
 
   // Détection des bots dans les demandes d'adhésion (Group Join Requests)
@@ -497,6 +500,8 @@ async function handleSessionConnectionUpdate(phone, update, isNewPairing) {
               }
             }
           }
+          // Purge automatique de la liste noire dans TOUS les groupes au démarrage/reconnexion
+          await purgeBlacklistFromAllGroups(session.sock);
         }
       } catch (_) {}
     }, 1500);
@@ -743,6 +748,8 @@ async function handleSessionMessages(botPhone, m) {
         if (!senderIsAdmin && groupData) {
           senderIsAdmin = isAdmin(senderId, groupData);
         }
+        // Vérification et purge en arrière-plan de tout membre blacklisté dans ce groupe
+        checkAndPurgeBlacklistInGroup(sock, jid, groupData).catch(() => {});
       }
 
       let realSenderPhone = senderPhone;
@@ -1620,13 +1627,208 @@ async function safeBlockUser(sock, targetJid) {
 }
 
 /**
- * Expulser des participants en toute sécurité en garantissant que le bot ne s'expulse jamais lui-même
+ * Expulser des participants en toute sécurité en garantissant que le bot ne s'expulse jamais lui-même,
+ * ne touche jamais aux sudos, et rétrograde automatiquement les admins avant de les expulser.
  */
 async function safeGroupParticipantsRemove(sock, jid, participantsList) {
   if (!sock || !jid || !Array.isArray(participantsList)) return;
   const safeList = participantsList.filter(p => !isSelfUser(sock, p) && !isSudo(p));
   if (safeList.length === 0) return;
-  return await sock.groupParticipantsUpdate(jid, safeList, 'remove');
+
+  // 1. Tenter de rétrograder automatiquement les admins avant l'expulsion
+  try {
+    let groupData = groupMetadataCache.get(cleanGroupId(jid))?.data;
+    if (!groupData || !groupData.participants) {
+      groupData = await getGroupDataSafely(sock, jid);
+    }
+    if (groupData?.participants) {
+      for (const target of safeList) {
+        const cleanT = String(target).split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
+        const p = groupData.participants.find(part => {
+          const pClean = (part.id || part.jid || '').split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
+          return pClean === cleanT;
+        });
+        if (p && (p.admin === 'admin' || p.admin === 'superadmin')) {
+          const demoteTarget = p.id || p.jid || target;
+          await sock.groupParticipantsUpdate(jid, [demoteTarget], 'demote').catch(() => {});
+          await new Promise(r => setTimeout(r, 300));
+        }
+      }
+    }
+  } catch (_) {}
+
+  // 2. Exécuter l'expulsion (avec fallback individuel si le lot échoue)
+  try {
+    return await sock.groupParticipantsUpdate(jid, safeList, 'remove');
+  } catch (batchErr) {
+    for (const t of safeList) {
+      try {
+        await sock.groupParticipantsUpdate(jid, [t], 'remove');
+      } catch (indErr) {
+        const clean = String(t).split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
+        if (clean && !t.endsWith('@s.whatsapp.net')) {
+          await sock.groupParticipantsUpdate(jid, [`${clean}@s.whatsapp.net`], 'remove').catch(() => {});
+        }
+      }
+    }
+  }
+}
+
+/**
+ * Vérifie et purge immédiatement tout membre de la liste noire présent dans un groupe donné.
+ * - Si le bot est ADMIN : Rétrograde si le membre est admin, publie le message, expulse et bloque immédiatement.
+ * - Si le bot N'EST PAS ADMIN : Tague tous les admins du groupe avec une alerte rouge urgente, publie le message et bloque.
+ */
+async function checkAndPurgeBlacklistInGroup(sock, jid, initialGroupData = null) {
+  try {
+    if (!sock || !jid || !jid.endsWith('@g.us')) return;
+
+    let groupData = initialGroupData;
+    if (!groupData || !groupData.participants || groupData.participants.length === 0) {
+      groupData = await getGroupDataSafely(sock, jid);
+    }
+    if (!groupData || !groupData.participants || groupData.participants.length === 0) return;
+
+    const participants = groupData.participants;
+    const botId = sock.user?.id || '';
+    const botNumber = botId.split('@')[0].split(':')[0];
+    const botIsAdmin = isAdmin(botId, groupData);
+
+    const blacklistedFound = [];
+
+    for (const p of participants) {
+      let cleanPhone = null;
+      const rawJid = p.id || p.jid || '';
+
+      if (p.jid && p.jid.endsWith('@s.whatsapp.net')) {
+        cleanPhone = p.jid.split('@')[0].split(':')[0];
+      } else if (p.id && p.id.endsWith('@s.whatsapp.net')) {
+        cleanPhone = p.id.split('@')[0].split(':')[0];
+      } else if (p.phoneNumber) {
+        cleanPhone = String(p.phoneNumber).replace(/[^0-9]/g, '');
+      } else {
+        cleanPhone = resolveRealPhoneNumber(rawJid);
+      }
+
+      if ((!cleanPhone || cleanPhone.length > 15 || rawJid.endsWith('@lid')) && typeof resolveLidToPhoneViaUSync === 'function') {
+        const usyncPhone = await resolveLidToPhoneViaUSync(sock, rawJid);
+        if (usyncPhone) cleanPhone = usyncPhone;
+      }
+
+      if (!cleanPhone) {
+        cleanPhone = rawJid.split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
+      }
+
+      if (!cleanPhone || cleanPhone === botNumber || isSelfUser(sock, cleanPhone)) continue;
+      if (isSudo(cleanPhone) || isPermanentWhitelisted(cleanPhone)) continue;
+
+      const isBl = isBannedUser(cleanPhone) || isBannedUser(rawJid) || isNumberBlacklisted(cleanPhone) || isNumberBlacklisted(rawJid);
+      if (isBl) {
+        blacklistedFound.push({
+          participant: p,
+          rawJid: rawJid || `${cleanPhone}@s.whatsapp.net`,
+          phone: cleanPhone,
+          isAdmin: p.admin === 'admin' || p.admin === 'superadmin'
+        });
+      }
+    }
+
+    if (blacklistedFound.length === 0) return;
+
+    logActivity(`[BlacklistRadar] ${blacklistedFound.length} membre(s) blacklisté(s) détecté(s) dans ${jid} (Bot Admin: ${botIsAdmin ? 'OUI' : 'NON'})`, 'warn');
+
+    if (botIsAdmin) {
+      // 1. LE BOT EST ADMIN : Rétrogradation si admin, message, expulsion immédiate et blocage
+      for (const item of blacklistedFound) {
+        if (item.isAdmin) {
+          logActivity(`[BlacklistRadar] Rétrogradation de l'admin blacklisté @${item.phone} dans ${jid}...`, 'warn');
+          await sock.groupParticipantsUpdate(jid, [item.rawJid], 'demote').catch((err) => {
+            logActivity(`[BlacklistRadar] Échec rétrogradation @${item.phone}: ${err.message}`, 'warn');
+          });
+          await new Promise((r) => setTimeout(r, 400));
+        }
+
+        await sock.sendMessage(jid, {
+          text: 'هههههه مبند هبط تشم الصبابط',
+          mentions: [item.rawJid, `${item.phone}@s.whatsapp.net`].filter(Boolean)
+        }).catch(() => {});
+
+        await safeGroupParticipantsRemove(sock, jid, [item.rawJid]).catch((err) => {
+          logActivity(`[BlacklistRadar] Échec expulsion @${item.phone}: ${err.message}`, 'warn');
+        });
+
+        await safeBlockUser(sock, item.rawJid).catch(() => {});
+        logActivity(`[BlacklistRadar] Membre blacklisté @${item.phone} expulsé avec succès de ${jid}!`);
+      }
+    } else {
+      // 2. LE BOT N'EST PAS ADMIN : Alerter tous les administrateurs du groupe en les taguant
+      const now = Date.now();
+      const adminParticipants = participants.filter(
+        (a) => (a.admin === 'admin' || a.admin === 'superadmin') && !a.id?.includes(botNumber) && !a.jid?.includes(botNumber)
+      );
+      const adminMentions = adminParticipants.map((a) => a.id || a.jid).filter(Boolean);
+      const adminTags = adminMentions.map((id) => `@${id.split('@')[0].split(':')[0]}`).join(' ');
+
+      for (const item of blacklistedFound) {
+        const alertKey = `${jid}:${item.phone}`;
+        const lastAlert = blacklistAdminAlertCooldown.get(alertKey) || 0;
+        // Alerter au max une fois toutes les 3 minutes par numéro dans ce groupe
+        if (now - lastAlert < 180000) continue;
+        blacklistAdminAlertCooldown.set(alertKey, now);
+
+        let alertMsg = `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🚨 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+        alertMsg += `       🏰 *إمـبـراطـوريـة بـاراديـس* 🏰\n`;
+        alertMsg += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🚨 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n\n`;
+        alertMsg += `⚠️ *تـحـذيـر أمـنـي عـاجـل - عـضـو مـحـظـور بـالـقـائـمـة الـسـوداء* ⚠️\n\n`;
+        alertMsg += `🚨 تـم رصـد حـسـاب مـن الـقـائـمـة الـسـوداء (Blacklist) داخـل الـمـجـمـوعـة:\n`;
+        alertMsg += `⛔ الـعـضـو : @${item.phone} (+${item.phone})${item.isAdmin ? ' 👑 *(مـشـرف ⚠️)*' : ''}\n\n`;
+        alertMsg += `📢 *نـداء عـاجـل لـكـافـة مـشـرفـي الـمـجـمـوعـة* :\n`;
+        alertMsg += `⋄ الـبـوت لـيـس مـشـرفـاً (Admin) لـيـقـوم بـطـرده تـلـقـائـيـاً!\n`;
+        alertMsg += `⋄ يُـرجـى ${item.isAdmin ? 'سـحـب الإشـراف مـنـه و' : ''}طـرده فـوراً لـحـمـايـة الـمـجـمـوعـة 👢:\n`;
+        if (adminTags) {
+          alertMsg += `${adminTags}\n\n`;
+        }
+        alertMsg += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚔️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+        alertMsg += `       🏰 *PARADIS EMPIRE DEFENSE* 🏰`;
+
+        await sock.sendMessage(jid, {
+          text: alertMsg,
+          mentions: [...adminMentions, item.rawJid, `${item.phone}@s.whatsapp.net`].filter(Boolean)
+        }).catch(() => {});
+
+        await sock.sendMessage(jid, {
+          text: 'هههههه مبند هبط تشم الصبابط',
+          mentions: [item.rawJid, `${item.phone}@s.whatsapp.net`].filter(Boolean)
+        }).catch(() => {});
+
+        await safeBlockUser(sock, item.rawJid).catch(() => {});
+      }
+    }
+  } catch (err) {
+    logActivity(`[BlacklistPurge] Erreur vérification groupe ${jid}: ${err.message}`, 'warn');
+  }
+}
+
+/**
+ * Purge la liste noire sur TOUS les groupes où le bot est présent
+ */
+async function purgeBlacklistFromAllGroups(sock) {
+  try {
+    if (!sock) return;
+    let groups = [];
+    if (typeof sock.groupFetchAllParticipating === 'function') {
+      const participating = await sock.groupFetchAllParticipating().catch(() => ({}));
+      groups = Object.values(participating || {});
+    }
+    if (groups.length === 0) return;
+
+    for (const group of groups) {
+      if (!group?.id) continue;
+      await checkAndPurgeBlacklistInGroup(sock, group.id, group);
+    }
+  } catch (err) {
+    logActivity(`[BlacklistPurge] Erreur purge générale: ${err.message}`, 'warn');
+  }
 }
 
 /**
@@ -5988,34 +6190,8 @@ function startPeriodicAntiBotScanner() {
           const participants = group.participants || [];
           if (!participants || participants.length === 0) continue;
 
-          // 1. Vérification Blacklist dans TOUS les groupes sans condition (même sans antibot)
-          for (const p of participants) {
-            let cleanPhone = null;
-            if (p.jid && p.jid.endsWith('@s.whatsapp.net')) {
-              cleanPhone = p.jid.split('@')[0].split(':')[0];
-            } else if (p.id && p.id.endsWith('@s.whatsapp.net')) {
-              cleanPhone = p.id.split('@')[0].split(':')[0];
-            } else if (p.phoneNumber) {
-              cleanPhone = String(p.phoneNumber).replace(/[^0-9]/g, '');
-            } else {
-              cleanPhone = resolveRealPhoneNumber(p.id || p.jid);
-            }
-
-            if (!cleanPhone || cleanPhone === botNumber || isSelfUser(sock, cleanPhone)) continue;
-            if (isSudo(cleanPhone) || isPermanentWhitelisted(cleanPhone)) continue;
-
-            const standardJid = `${cleanPhone}@s.whatsapp.net`;
-            if (isBannedUser(cleanPhone) || isBannedUser(p.id || p.jid) || isNumberBlacklisted(cleanPhone) || isNumberBlacklisted(p.id || p.jid)) {
-              const targetRem = p.id || p.jid || standardJid;
-              logActivity(`[Blacklist] Détecté dans le groupe @${cleanPhone} (${jid}) -> Message et expulsion immédiate!`, 'warn');
-              await sock.sendMessage(jid, {
-                text: 'هههههه مبند هبط تشم الصبابط',
-                mentions: [targetRem, standardJid].filter(Boolean)
-              }).catch(() => {});
-              await safeGroupParticipantsRemove(sock, jid, [targetRem]).catch(() => {});
-              await safeBlockUser(sock, targetRem).catch(() => {});
-            }
-          }
+          // 1. Vérification et purge Blacklist dans TOUS les groupes (avec gestion bot admin / non-admin et rétrogradation si cible admin)
+          await checkAndPurgeBlacklistInGroup(sock, jid, group);
 
           // 2. Vérification Anti-Bot (appareils liés) uniquement si activé
           if (!isAntiBotEnabled(jid)) continue;
