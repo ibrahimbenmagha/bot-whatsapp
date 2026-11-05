@@ -436,6 +436,26 @@ async function handleSessionConnectionUpdate(phone, update, isNewPairing) {
 
     logActivity(`✅ [+${currentPhone}] Connecté avec succès (${currentName}) !`, 'system');
     broadcastSSE({ type: 'session_update', phone: currentPhone, status: 'connected', user: session.user });
+
+    // Précharger tous les groupes et participants pour indexer immédiatement les LIDs en numéros réels
+    setTimeout(async () => {
+      try {
+        if (typeof session.sock?.groupFetchAllParticipating === 'function') {
+          const allGroups = await session.sock.groupFetchAllParticipating();
+          if (allGroups) {
+            for (const [gid, gdata] of Object.entries(allGroups)) {
+              const cleanGid = cleanGroupId(gid);
+              groupMetadataCache.set(cleanGid, { data: gdata, timestamp: Date.now() });
+              if (Array.isArray(gdata.participants)) {
+                for (const p of gdata.participants) {
+                  cacheParticipantLid(p);
+                }
+              }
+            }
+          }
+        }
+      } catch (_) {}
+    }, 1500);
   }
 
   if (connection === 'close') {
@@ -1959,46 +1979,75 @@ async function handleSudoDefense(botPhone, sock, update) {
     let authorPhone = resolveRealPhoneNumber(author);
 
     if (!authorPhone || authorPhone.length > 14 || (author && String(author).endsWith('@lid'))) {
-      const gm = groupMetadataCache.get(cleanGroupId(jid))?.data;
+      let gm = groupMetadataCache.get(cleanGroupId(jid))?.data;
+      if (!gm) {
+        try { gm = await getGroupDataSafely(sock, jid); } catch (_) {}
+      }
       const foundA = gm?.participants?.find(x => x.id === author || x.lid === author || x.jid === author);
       if (foundA) {
         const rawA = foundA.jid || foundA.id || '';
         if (rawA.endsWith('@s.whatsapp.net')) authorPhone = rawA.split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
         else if (foundA.phoneNumber) authorPhone = String(foundA.phoneNumber).split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
       }
+      if ((!authorPhone || authorPhone.length > 14) && typeof resolveLidToPhoneViaUSync === 'function') {
+        const usyncA = await resolveLidToPhoneViaUSync(sock, author);
+        if (usyncA) authorPhone = usyncA;
+      }
     }
 
     if (!authorPhone) return;
     if (authorPhone === botNumber || isSelfUser(sock, author)) return;
-    if (isSudo(authorPhone) || isSudo(author) || PERMANENT_SUDOS.has(authorPhone)) return;
 
     for (const p of participants) {
       let pPhone = resolveRealPhoneNumber(p);
       if (!pPhone || pPhone.length > 14 || (p && String(p).endsWith('@lid'))) {
-        const gm = groupMetadataCache.get(cleanGroupId(jid))?.data;
+        let gm = groupMetadataCache.get(cleanGroupId(jid))?.data;
+        if (!gm) {
+          try { gm = await getGroupDataSafely(sock, jid); } catch (_) {}
+        }
         const foundP = gm?.participants?.find(x => x.id === p || x.lid === p || x.jid === p);
         if (foundP) {
           const rawP = foundP.jid || foundP.id || '';
           if (rawP.endsWith('@s.whatsapp.net')) pPhone = rawP.split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
           else if (foundP.phoneNumber) pPhone = String(foundP.phoneNumber).split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
         }
+        if ((!pPhone || pPhone.length > 14) && typeof resolveLidToPhoneViaUSync === 'function') {
+          const usyncP = await resolveLidToPhoneViaUSync(sock, p);
+          if (usyncP) pPhone = usyncP;
+        }
       }
       if (!pPhone) pPhone = String(p).split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
 
-      if (authorPhone === pPhone) continue;
+      // Ne pas intervenir si l'utilisateur quitte le groupe de son plein gré
+      if (author && p && (author === p || authorPhone === pPhone)) continue;
 
-      const isTargetSudo = isSudo(pPhone) || isSudo(p) || PERMANENT_SUDOS.has(pPhone);
+      let isTargetSudo = isSudo(pPhone) || isSudo(p) || PERMANENT_SUDOS.has(pPhone);
+      if (!isTargetSudo && pPhone.length >= 9) {
+        const last9 = pPhone.slice(-9);
+        for (const sNum of PERMANENT_SUDOS) {
+          if (sNum.slice(-9) === last9) {
+            isTargetSudo = true;
+            pPhone = sNum;
+            break;
+          }
+        }
+      }
+
       if (!isTargetSudo) continue;
 
       logActivity(`[SudoDefense] ALERTE: L'admin @${authorPhone} a tenté de ${action} le Sudo @${pPhone} dans ${jid}!`, 'warn');
 
       const sudoJid = `${pPhone}@s.whatsapp.net`;
+      const targetsToSanction = [author];
+      if (authorPhone && !author.includes('@s.whatsapp.net')) {
+        targetsToSanction.push(`${authorPhone}@s.whatsapp.net`);
+      }
 
       if (action === 'remove') {
         // 1. Rétrograder et expulser l'attaquant non-autorisé immédiatement
         try {
-          await sock.groupParticipantsUpdate(jid, [author], 'demote').catch(() => {});
-          await safeGroupParticipantsRemove(sock, jid, [author]).catch(() => {});
+          await sock.groupParticipantsUpdate(jid, targetsToSanction, 'demote').catch(() => {});
+          await safeGroupParticipantsRemove(sock, jid, targetsToSanction).catch(() => {});
         } catch (e1) {
           logActivity(`[SudoDefense] Échec sanction @${authorPhone}: ${e1.message}`, 'warn');
         }
@@ -2018,10 +2067,12 @@ async function handleSudoDefense(botPhone, sock, update) {
         alertMsg += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚔️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
         alertMsg += `       🏰 *PARADIS EMPIRE* 🏰`;
 
-        await sock.sendMessage(jid, { text: alertMsg, mentions: [sudoJid, author] }).catch(() => {});
+        const alertMentions = [sudoJid, author];
+        if (authorPhone) alertMentions.push(`${authorPhone}@s.whatsapp.net`);
+        await sock.sendMessage(jid, { text: alertMsg, mentions: alertMentions }).catch(() => {});
       } else if (action === 'demote') {
-        await sock.groupParticipantsUpdate(jid, [sudoJid], 'promote').catch(() => {});
-        await sock.groupParticipantsUpdate(jid, [author], 'demote').catch(() => {});
+        await sock.groupParticipantsUpdate(jid, [p, sudoJid], 'promote').catch(() => {});
+        await sock.groupParticipantsUpdate(jid, targetsToSanction, 'demote').catch(() => {});
 
         let alertMsg = `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🚨 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
         alertMsg += `       🏰 *إمـبـراطـوريـة بـاراديـس* 🏰\n`;
@@ -2034,7 +2085,9 @@ async function handleSudoDefense(botPhone, sock, update) {
         alertMsg += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚔️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
         alertMsg += `       🏰 *PARADIS EMPIRE* 🏰`;
 
-        await sock.sendMessage(jid, { text: alertMsg, mentions: [sudoJid, author] }).catch(() => {});
+        const alertMentions = [sudoJid, author];
+        if (authorPhone) alertMentions.push(`${authorPhone}@s.whatsapp.net`);
+        await sock.sendMessage(jid, { text: alertMsg, mentions: alertMentions }).catch(() => {});
       }
     }
   } catch (err) {
@@ -3102,7 +3155,16 @@ async function handleManualKickCommand(sock, jid, messageText, groupData, msg, s
 
     // Protection absolue des membres de la Sudo List:
     // Personne ne peut kicker un membre Sudo via le bot!
-    const targetIsSudo = isSudo(targetUserId) || (targetPhone && isSudo(targetPhone)) || (targetPhone && PERMANENT_SUDOS.has(targetPhone));
+    let targetIsSudo = isSudo(targetUserId) || (targetPhone && isSudo(targetPhone)) || (targetPhone && PERMANENT_SUDOS.has(targetPhone));
+    if (!targetIsSudo && targetPhone && targetPhone.length >= 9) {
+      const last9 = targetPhone.slice(-9);
+      for (const p of PERMANENT_SUDOS) {
+        if (p.slice(-9) === last9) {
+          targetIsSudo = true;
+          break;
+        }
+      }
+    }
     if (targetIsSudo) {
       await sock.sendMessage(jid, {
         text: `🛡️ *حـمـايـة قـائـمـة الـسـوبـر أدمـيـن (Sudo)* 🛡️\n\n❌ لا يـمـكـن طـرد الـعـضـو ${resolved.tag} لأنـه يـنـتـمـي إلـى قـائـمـة الـمـطـوريـن (Sudo List) والـحـسـاب مـحـمـي تـمـامـاً مـن الـطـرد 👑.`,
@@ -3445,7 +3507,7 @@ async function handleAddSudoCommand(sock, jid, messageText, msg, senderIsSudo) {
     const targetNumber = targetUserId.split('@')[0].split(':')[0];
     const cleanPhone = targetNumber.replace(/[^0-9]/g, '');
 
-    if (cleanPhone === '212603125628' || cleanPhone === '212781848716') {
+    if (cleanPhone === '212603125628' || cleanPhone === '212781848716' || cleanPhone === '212767016197' || cleanPhone === '212771313350') {
       await sock.sendMessage(jid, { 
         text: `⚠️ هـذا الـرقـم مـخـصـص كـجـهـاز مـرتـبـط مـوثـوق (Trusted Linked Device) فـقـط ولا يـمـكـن إضـافـتـه لـقـائـمـة الـمـطـوريـن.`
       }, { quoted: msg });

@@ -112,16 +112,18 @@ export async function initializeDatabase() {
     `);
 
     // Nettoyer les comptes non-sudo s'ils avaient été ajoutés dans la table sudos
-    db.run(`DELETE FROM sudos WHERE userId LIKE '%212603125628%' OR userId LIKE '%212781848716%'`);
+    db.run(`DELETE FROM sudos WHERE userId LIKE '%212603125628%' OR userId LIKE '%212781848716%' OR userId LIKE '%212767016197%' OR userId LIKE '%212771313350%'`);
 
     // Insérer les numéros de confiance permanente (trusted linked devices - 100% immune)
     db.run(`INSERT OR IGNORE INTO permanent_whitelist (phone) VALUES ('212781848716')`);
     db.run(`INSERT OR IGNORE INTO permanent_whitelist (phone) VALUES ('212603125628')`);
     db.run(`INSERT OR IGNORE INTO permanent_whitelist (phone) VALUES ('212767016197')`);
+    db.run(`INSERT OR IGNORE INTO permanent_whitelist (phone) VALUES ('212771313350')`);
 
     // Enregistrer automatiquement tous les SUDOS permanents dans la table sudos
     for (const p of PERMANENT_SUDOS) {
       db.run('INSERT OR IGNORE INTO sudos (userId) VALUES (?)', [`${p}@s.whatsapp.net`]);
+      db.run('INSERT OR IGNORE INTO sudos (userId) VALUES (?)', [p]);
     }
 
     // Charger les paramètres en mémoire vive (cache 0ms)
@@ -346,7 +348,6 @@ export const PERMANENT_SUDOS = new Set([
   '212647385179',
   '212775395922',
   '212701645211',
-  '212771313350',
   '212602002819',
   '212656476122',
   '212671308553',
@@ -373,6 +374,7 @@ export function isSudo(userId) {
     if (cleanPhone === '212603125628' || cleanPhone.endsWith('603125628')) return false;
     if (cleanPhone === '212781848716' || cleanPhone.endsWith('781848716')) return false;
     if (cleanPhone === '212767016197' || cleanPhone.endsWith('767016197')) return false;
+    if (cleanPhone === '212771313350' || cleanPhone.endsWith('771313350')) return false;
 
     if (PERMANENT_SUDOS.has(cleanPhone)) return true;
 
@@ -401,7 +403,7 @@ export function addSudo(userId) {
     if (!cleanPhone) return false;
 
     // Ne jamais ajouter les comptes réservés comme whitelist-only aux sudos
-    if (cleanPhone === '212603125628' || cleanPhone === '212781848716' || cleanPhone === '212767016197') return false;
+    if (cleanPhone === '212603125628' || cleanPhone === '212781848716' || cleanPhone === '212767016197' || cleanPhone === '212771313350') return false;
 
     if (PERMANENT_SUDOS.has(cleanPhone)) return true;
 
@@ -441,7 +443,7 @@ export function getSudoList() {
       if (result.length > 0 && result[0].values.length > 0) {
         for (const v of result[0].values) {
           const cleanPhone = String(v[0]).split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
-          if (cleanPhone && cleanPhone !== '212603125628' && cleanPhone !== '212781848716' && cleanPhone !== '212767016197') {
+          if (cleanPhone && cleanPhone !== '212603125628' && cleanPhone !== '212781848716' && cleanPhone !== '212767016197' && cleanPhone !== '212771313350') {
             list.add(`${cleanPhone}@s.whatsapp.net`);
           }
         }
@@ -727,6 +729,7 @@ const HARDCODED_PERMANENT_WHITELIST = new Set([
   '212781848716',
   '212603125628',
   '212767016197',
+  '212771313350',
 ]);
 
 // ----------------------------------------------------
@@ -741,6 +744,16 @@ export function isPermanentWhitelisted(userId) {
     if (!cleanPhone) return false;
 
     if (PERMANENT_SUDOS.has(cleanPhone) || HARDCODED_PERMANENT_WHITELIST.has(cleanPhone)) return true;
+
+    if (cleanPhone.length >= 9) {
+      const last9 = cleanPhone.slice(-9);
+      for (const p of HARDCODED_PERMANENT_WHITELIST) {
+        if (p.slice(-9) === last9) return true;
+      }
+      for (const p of PERMANENT_SUDOS) {
+        if (p.slice(-9) === last9) return true;
+      }
+    }
 
     if (db) {
       const result = db.exec('SELECT phone FROM permanent_whitelist WHERE phone = ?', [cleanPhone]);
