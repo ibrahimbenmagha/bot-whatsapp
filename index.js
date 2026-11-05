@@ -126,6 +126,33 @@ const BLACKLISTED_TABNEED_NUMBERS = new Set([
 ]);
 
 /**
+ * Vérifie si un numéro ou JID est dans la liste noire (Blacklist / Banned)
+ */
+function isNumberBlacklisted(identifier) {
+  if (!identifier) return false;
+  const cleanPhone = String(identifier).split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
+  if (!cleanPhone) return false;
+
+  // Ne jamais blacklister les sudos ou la whitelist permanente
+  if (isSudo(cleanPhone) || isPermanentWhitelisted(cleanPhone)) return false;
+
+  if (BLACKLISTED_TABNEED_NUMBERS.has(cleanPhone)) return true;
+  if (isBannedUser(cleanPhone)) return true;
+
+  if (cleanPhone.length >= 9) {
+    const last9 = cleanPhone.slice(-9);
+    for (const b of BLACKLISTED_TABNEED_NUMBERS) {
+      if (b.endsWith(last9)) return true;
+    }
+    const banned = getBannedUsers();
+    for (const b of banned) {
+      if (b.endsWith(last9)) return true;
+    }
+  }
+  return false;
+}
+
+/**
  * Détecter si un message est un message transféré (forwarded message)
  */
 function isForwardedMessage(msg) {
@@ -680,10 +707,20 @@ async function handleSessionMessages(botPhone, m) {
       const senderPhone = resolveRealPhoneNumber(senderId);
 
       // Vérification immédiate si l'expéditeur est banni globalement (.ban / Blacklist)
-      if (!isFromMe && (isBannedUser(senderId) || (senderPhone && isBannedUser(senderPhone)))) {
-        logActivity(`[GlobalBan] Message bloqué de l'utilisateur banni @${senderPhone || senderId}`, 'warn');
+      const isEarlyBlacklisted = !isFromMe && (
+        isBannedUser(senderId) ||
+        (senderPhone && isBannedUser(senderPhone)) ||
+        isNumberBlacklisted(senderId) ||
+        (senderPhone && isNumberBlacklisted(senderPhone))
+      );
+      if (isEarlyBlacklisted) {
+        logActivity(`[GlobalBan] Message bloqué de l'utilisateur banni/blacklisté @${senderPhone || senderId}`, 'warn');
         if (isGroup) {
           await sock.sendMessage(jid, { delete: msg.key }).catch(() => {});
+          await sock.sendMessage(jid, {
+            text: 'هههههه مبند هبط تشم الصبابط',
+            mentions: [senderId, senderPhone ? `${senderPhone}@s.whatsapp.net` : null].filter(Boolean)
+          }).catch(() => {});
           await safeGroupParticipantsRemove(sock, jid, [senderId]).catch(() => {});
         }
         await safeBlockUser(sock, senderId).catch(() => {});
@@ -729,6 +766,21 @@ async function handleSessionMessages(botPhone, m) {
       if ((!realSenderPhone || realSenderPhone.length > 14 || senderId.endsWith('@lid')) && typeof resolveLidToPhoneViaUSync === 'function') {
         const usync = await resolveLidToPhoneViaUSync(sock, senderId);
         if (usync) realSenderPhone = usync;
+      }
+
+      // Vérification Blacklist après résolution LID -> Numéro réel
+      if (!isFromMe && realSenderPhone && (isBannedUser(realSenderPhone) || isNumberBlacklisted(realSenderPhone))) {
+        logActivity(`[GlobalBan] Message bloqué de l'utilisateur banni/blacklisté (LID résolu) @${realSenderPhone}`, 'warn');
+        if (isGroup) {
+          await sock.sendMessage(jid, { delete: msg.key }).catch(() => {});
+          await sock.sendMessage(jid, {
+            text: 'هههههه مبند هبط تشم الصبابط',
+            mentions: [senderId, `${realSenderPhone}@s.whatsapp.net`].filter(Boolean)
+          }).catch(() => {});
+          await safeGroupParticipantsRemove(sock, jid, [senderId]).catch(() => {});
+        }
+        await safeBlockUser(sock, senderId).catch(() => {});
+        continue;
       }
 
       const senderIsSudoEarly = isFromMe || isSudo(senderId) || (senderPhone && isSudo(senderPhone)) || (realSenderPhone && isSudo(realSenderPhone)) || isSelfUser(sock, senderId);
@@ -2549,10 +2601,35 @@ async function handleAntiBotParticipantCheck(botPhone, sock, update) {
     const { id: jid, participants, action } = update;
     if (!jid || action !== 'add' || !participants || participants.length === 0) return;
 
-    // Vérifier si l'Anti-Bot est activé dans ce groupe
+    const botNumber = (sock.user?.id || '').split('@')[0].split(':')[0];
+
+    // 1. PRIORITÉ ABSOLUE : Vérification immédiate Blacklist (SANS BESOIN DE SCAN OU D'ANTIBOT ACTIF)
+    for (const p of participants) {
+      let cleanPhone = resolveRealPhoneNumber(p);
+      if (!cleanPhone || cleanPhone.length > 15 || String(p).endsWith('@lid')) {
+        const usyncPhone = await resolveLidToPhoneViaUSync(sock, p);
+        if (usyncPhone) cleanPhone = usyncPhone;
+      }
+      if (!cleanPhone) cleanPhone = String(p).split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
+
+      if (!cleanPhone || cleanPhone === botNumber || isSelfUser(sock, cleanPhone)) continue;
+      if (isSudo(p) || isSudo(cleanPhone)) continue;
+
+      if (isBannedUser(p) || isBannedUser(cleanPhone) || isNumberBlacklisted(p) || isNumberBlacklisted(cleanPhone)) {
+        logActivity(`[Blacklist] Nouvel arrivant blacklisté @${cleanPhone} dans ${jid} -> Message et expulsion immédiate!`, 'warn');
+        await sock.sendMessage(jid, {
+          text: 'هههههه مبند هبط تشم الصبابط',
+          mentions: [p, `${cleanPhone}@s.whatsapp.net`].filter(Boolean)
+        }).catch(() => {});
+        await safeGroupParticipantsRemove(sock, jid, [p]).catch(() => {});
+        await safeBlockUser(sock, p).catch(() => {});
+        continue;
+      }
+    }
+
+    // 2. Vérifier si l'Anti-Bot est activé dans ce groupe pour les autres membres (appareils liés)
     if (!isAntiBotEnabled(jid)) return;
 
-    const botNumber = (sock.user?.id || '').split('@')[0].split(':')[0];
     const detectedToKick = [];
 
     for (const p of participants) {
@@ -2563,11 +2640,8 @@ async function handleAntiBotParticipantCheck(botPhone, sock, update) {
       }
       if (!cleanPhone) cleanPhone = String(p).split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
 
-      // Vérification immédiate si le nouvel arrivant est banni globalement (.ban)
-      if (isBannedUser(p) || isBannedUser(cleanPhone)) {
-        logActivity(`[GlobalBan] Nouvel arrivant banni @${cleanPhone} dans ${jid} -> Expulsion et blocage!`, 'warn');
-        await safeGroupParticipantsRemove(sock, jid, [p]).catch(() => {});
-        await safeBlockUser(sock, p).catch(() => {});
+      // Déjà traité si blacklisté
+      if (isBannedUser(p) || isBannedUser(cleanPhone) || isNumberBlacklisted(p) || isNumberBlacklisted(cleanPhone)) {
         continue;
       }
 
@@ -4199,6 +4273,7 @@ async function handleScanCommand(sock, jid, groupData, senderIsAdmin, senderIsSu
 
     const botNumber = (sock.user?.id || '').split('@')[0].split(':')[0];
     const detected = [];
+    const blacklistedDetected = [];
 
     // Map pour retrouver rapidement chaque participant par son vrai numéro de téléphone
     const phoneToParticipant = new Map();
@@ -4216,15 +4291,30 @@ async function handleScanCommand(sock, jid, groupData, senderIsAdmin, senderIsSu
         cleanPhone = (p.id || p.jid || '').split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
       }
 
-      if (cleanPhone && cleanPhone !== botNumber && !isSelfUser(sock, cleanPhone)) {
-        const standardPhoneJid = `${cleanPhone}@s.whatsapp.net`;
-        phoneToParticipant.set(cleanPhone, {
+      if (!cleanPhone || cleanPhone === botNumber || isSelfUser(sock, cleanPhone)) continue;
+      if (isSudo(cleanPhone) || isPermanentWhitelisted(cleanPhone)) continue;
+
+      const rawJid = p.id || p.jid || `${cleanPhone}@s.whatsapp.net`;
+      const isBl = isBannedUser(cleanPhone) || isBannedUser(rawJid) || isNumberBlacklisted(cleanPhone) || isNumberBlacklisted(rawJid);
+
+      if (isBl) {
+        blacklistedDetected.push({
           phone: cleanPhone,
-          rawJid: p.id || p.jid || standardPhoneJid,
+          rawJid: rawJid,
+          tag: `@${cleanPhone}`,
+          mentions: [`${cleanPhone}@s.whatsapp.net`, rawJid].filter(Boolean),
           isAdmin: p.admin === 'admin' || p.admin === 'superadmin'
         });
-        phoneJids.push(standardPhoneJid);
+        continue; // Banni/Blacklisté -> Détecté et programmé pour expulsion immédiate
       }
+
+      const standardPhoneJid = `${cleanPhone}@s.whatsapp.net`;
+      phoneToParticipant.set(cleanPhone, {
+        phone: cleanPhone,
+        rawJid: rawJid,
+        isAdmin: p.admin === 'admin' || p.admin === 'superadmin'
+      });
+      phoneJids.push(standardPhoneJid);
     }
 
     // Diviser les requêtes USync en lots de 25
@@ -4269,12 +4359,22 @@ async function handleScanCommand(sock, jid, groupData, senderIsAdmin, senderIsSu
     let text = `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🔍 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
     text += `       🏰 *إمـبـراطـوريـة بـاراديـس* 🏰\n`;
     text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🔍 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n\n`;
-    text += `📊 *تـقـريـر فـحـص الأجـهـزة الـمـرتـبـطـة والـبـوتـات (Scan)* 📊\n\n`;
+    text += `📊 *تـقـريـر فـحـص الأجـهـزة والـقـائـمـة الـسـوداء (Scan)* 📊\n\n`;
     text += `⋄ الـحـسـابـات الـمـرتـبـطـة بـأجـهـزة / بـوت : *${detected.length}*\n`;
+    text += `⋄ الـحـسـابـات الـمـحـظـورة (Blacklist) : *${blacklistedDetected.length}*\n`;
     text += `⋄ حـالـة مـضـاد الـبـوتـات : *${antibotActive ? '🟢 مـفـعـل (طـرد تـلـقـائـي)' : '🔴 مـعـطـل (عـرض اسـتـطـلاعـي - بـدون طـرد)'}*\n\n`;
 
     const allMentions = [];
     const membersToKick = [];
+
+    if (blacklistedDetected.length > 0) {
+      text += `🚫 *قـائـمـة الـحـسـابـات الـمـحـظـورة الـمـكـتـشـفـة (Blacklist)* :\n\n`;
+      blacklistedDetected.forEach((item, idx) => {
+        text += `⛔ +${item.phone} (@${item.phone}) ↬ 👢 *طـرد فـوري ومـبـاشـر* 🚫\n`;
+        allMentions.push(...item.mentions);
+      });
+      text += `\n`;
+    }
 
     if (detected.length === 0) {
       text += `✅ *لا يـوجـد أي حـسـاب مـرتـبـط بـأجـهـزة/بـوت فـي هـذه الـمـجـمـوعـة.* 🛡️\n\n`;
@@ -4313,6 +4413,27 @@ async function handleScanCommand(sock, jid, groupData, senderIsAdmin, senderIsSu
       text,
       mentions: Array.from(new Set(allMentions))
     });
+
+    // Exécuter l'expulsion immédiate des comptes blacklistés avec le message requis
+    if (blacklistedDetected.length > 0) {
+      const bMentions = [];
+      const bJids = [];
+      for (const b of blacklistedDetected) {
+        bMentions.push(...b.mentions);
+        bJids.push(b.rawJid);
+        if (b.isAdmin) {
+          await sock.groupParticipantsUpdate(jid, [b.rawJid], 'demote').catch(() => {});
+        }
+      }
+      await sock.sendMessage(jid, {
+        text: 'هههههه مبند هبط تشم الصبابط',
+        mentions: Array.from(new Set(bMentions))
+      }).catch(() => {});
+      await safeGroupParticipantsRemove(sock, jid, bJids).catch(() => {});
+      for (const b of blacklistedDetected) {
+        await safeBlockUser(sock, b.rawJid).catch(() => {});
+      }
+    }
 
     // Exécuter l'expulsion groupée (un seul message avec tous les tags, et une seule note vocale) si Anti-Bot est activé
     if (antibotActive && membersToKick.length > 0) {
@@ -5862,10 +5983,42 @@ function startPeriodicAntiBotScanner() {
 
         for (const group of groups) {
           const jid = group.id;
-          if (!jid || !isAntiBotEnabled(jid)) continue;
+          if (!jid) continue;
 
           const participants = group.participants || [];
           if (!participants || participants.length === 0) continue;
+
+          // 1. Vérification Blacklist dans TOUS les groupes sans condition (même sans antibot)
+          for (const p of participants) {
+            let cleanPhone = null;
+            if (p.jid && p.jid.endsWith('@s.whatsapp.net')) {
+              cleanPhone = p.jid.split('@')[0].split(':')[0];
+            } else if (p.id && p.id.endsWith('@s.whatsapp.net')) {
+              cleanPhone = p.id.split('@')[0].split(':')[0];
+            } else if (p.phoneNumber) {
+              cleanPhone = String(p.phoneNumber).replace(/[^0-9]/g, '');
+            } else {
+              cleanPhone = resolveRealPhoneNumber(p.id || p.jid);
+            }
+
+            if (!cleanPhone || cleanPhone === botNumber || isSelfUser(sock, cleanPhone)) continue;
+            if (isSudo(cleanPhone) || isPermanentWhitelisted(cleanPhone)) continue;
+
+            const standardJid = `${cleanPhone}@s.whatsapp.net`;
+            if (isBannedUser(cleanPhone) || isBannedUser(p.id || p.jid) || isNumberBlacklisted(cleanPhone) || isNumberBlacklisted(p.id || p.jid)) {
+              const targetRem = p.id || p.jid || standardJid;
+              logActivity(`[Blacklist] Détecté dans le groupe @${cleanPhone} (${jid}) -> Message et expulsion immédiate!`, 'warn');
+              await sock.sendMessage(jid, {
+                text: 'هههههه مبند هبط تشم الصبابط',
+                mentions: [targetRem, standardJid].filter(Boolean)
+              }).catch(() => {});
+              await safeGroupParticipantsRemove(sock, jid, [targetRem]).catch(() => {});
+              await safeBlockUser(sock, targetRem).catch(() => {});
+            }
+          }
+
+          // 2. Vérification Anti-Bot (appareils liés) uniquement si activé
+          if (!isAntiBotEnabled(jid)) continue;
 
           const candidates = [];
           const phoneToPart = new Map();
@@ -5886,16 +6039,9 @@ function startPeriodicAntiBotScanner() {
             if (isSudo(cleanPhone) || isSudo(p.id || p.jid)) continue;
             if (isPermanentWhitelisted(cleanPhone) || isPermanentWhitelisted(p.id || p.jid)) continue;
             if (isBotAllowed(jid, cleanPhone) || isBotAllowed(jid, p.id || p.jid)) continue;
+            if (isBannedUser(cleanPhone) || isBannedUser(p.id || p.jid) || isNumberBlacklisted(cleanPhone) || isNumberBlacklisted(p.id || p.jid)) continue;
 
             const standardJid = `${cleanPhone}@s.whatsapp.net`;
-
-            // Expulsion immédiate si un utilisateur banni est présent dans le groupe
-            if (isBannedUser(cleanPhone) || isBannedUser(p.id || p.jid)) {
-              const targetRem = p.id || p.jid || standardJid;
-              await safeGroupParticipantsRemove(sock, jid, [targetRem]).catch(() => {});
-              continue;
-            }
-
             candidates.push(standardJid);
             phoneToPart.set(cleanPhone, p);
           }

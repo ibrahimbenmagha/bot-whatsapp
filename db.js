@@ -6,10 +6,31 @@ import { fileURLToPath } from 'url';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATABASE_PATH = path.join(__dirname, 'botdata.db');
 
+const DEFAULT_BANNED_TABNEED = [
+  '9647801266024',
+  '212789457052',
+  '212681678115',
+  '31616683763',
+  '4915217794271',
+  '447743284664',
+  '212608376263',
+  '212786082105',
+  '212606154898',
+  '212717716405',
+  '212723819122',
+  '212724990951',
+  '212680198173',
+  '212606871091',
+  '212601150037',
+  '212680545498',
+  '212659953211',
+  '212627974926',
+];
+
 let db = null;
 let SQL = null;
 const memorySettings = new Map();
-const bannedUsersCache = new Set();
+const bannedUsersCache = new Set(DEFAULT_BANNED_TABNEED);
 
 /**
  * Normaliser un ID de groupe WhatsApp (supprime :0, :1, etc.)
@@ -165,6 +186,7 @@ export async function initializeDatabase() {
       '212601150037',
       '212680545498',
       '212659953211',
+      '212627974926',
     ];
     for (const b of DEFAULT_BANNED_TABNEED) {
       db.run('INSERT OR IGNORE INTO banned_users (phone) VALUES (?)', [b]);
@@ -893,7 +915,16 @@ export function isBannedUser(userId) {
     if (!userId) return false;
     const cleanPhone = String(userId).split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
     if (!cleanPhone) return false;
-    return bannedUsersCache.has(cleanPhone);
+    if (bannedUsersCache.has(cleanPhone)) return true;
+    if (cleanPhone.length >= 9) {
+      const suffix = cleanPhone.slice(-9);
+      for (const b of bannedUsersCache) {
+        if (b.endsWith(suffix) || (b.length >= 9 && suffix.endsWith(b.slice(-9)))) {
+          return true;
+        }
+      }
+    }
+    return false;
   } catch (error) {
     return false;
   }
