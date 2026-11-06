@@ -907,15 +907,14 @@ async function handleSessionMessages(botPhone, m) {
       }
 
       // Commande .status
-      if (isCmd('status') || isCmd('info') || isCmd('bot') || isCmd('حالة')) {
+      if (isCmd('status') || isCmd('info') || isCmd('bot')) {
         reactToMessage(sock, jid, msg.key, '⚡');
         await handleStatusCommand(sock, jid, groupData, session);
         continue;
       }
 
-      // Commande .mention / .منشن / .tagall
-      if (isCmd('mention') || isCmd('منشن') || isCmd('tagall') || isCmd('الكل') ||
-          startsWithCmd('mention') || startsWithCmd('منشن') || startsWithCmd('tagall') || startsWithCmd('الكل')) {
+      // Commande .mention / .tagall
+      if (isCmd('mention') || isCmd('tagall') || startsWithCmd('mention') || startsWithCmd('tagall')) {
         if (!senderIsAdmin && !senderIsSudo) {
           reactToMessage(sock, jid, msg.key, '🔒');
           continue;
@@ -929,22 +928,22 @@ async function handleSessionMessages(botPhone, m) {
         continue;
       }
 
-      // Commande .menu
-      if (isCmd('help') || isCmd('aide') || isCmd('menu') || isCmd('اوامر') || isCmd('الاوامر')) {
+      // Commande .menu / .help / .aide
+      if (isCmd('help') || isCmd('aide') || isCmd('menu')) {
         reactToMessage(sock, jid, msg.key, '🤖');
         await handleHelpCommand(sock, jid, senderIsAdmin, senderId, session, senderIsSudo, msg);
         continue;
       }
 
-      // Commande .rulls / .rules
-      if (isCmd('rulls') || isCmd('rules') || isCmd('regles') || isCmd('قوانين') || isCmd('القوانين')) {
+      // Commande .rulls / .rules / .regles
+      if (isCmd('rulls') || isCmd('rules') || isCmd('regles')) {
         reactToMessage(sock, jid, msg.key, '📜');
         await handleRulesCommand(sock, jid);
         continue;
       }
 
       // Commande .warnings
-      if (startsWithCmd('warnings') || startsWithCmd('warns') || startsWithCmd('انذارات') || startsWithCmd('انذاراتي')) {
+      if (startsWithCmd('warnings') || startsWithCmd('warns')) {
         reactToMessage(sock, jid, msg.key, '📋');
         if (!isGroup) {
           await sock.sendMessage(jid, { text: 'ℹ️ Cette commande fonctionne uniquement dans un groupe.' });
@@ -955,7 +954,7 @@ async function handleSessionMessages(botPhone, m) {
       }
 
       // Commande .warn (Admins / Sudo)
-      if (startsWithCmd('warn ') || startsWithCmd('انذار ') || isCmd('warn') || isCmd('انذار')) {
+      if (startsWithCmd('warn ') || isCmd('warn')) {
         if (!senderIsAdmin && !senderIsSudo) {
           reactToMessage(sock, jid, msg.key, '🔒');
           continue;
@@ -970,7 +969,7 @@ async function handleSessionMessages(botPhone, m) {
       }
 
       // Commande .resetwarn (Admins / Sudo)
-      if (startsWithCmd('resetwarn') || startsWithCmd('تصفير') || isCmd('resetwarn') || isCmd('تصفير')) {
+      if (startsWithCmd('resetwarn') || isCmd('resetwarn')) {
         if (!senderIsAdmin && !senderIsSudo) {
           reactToMessage(sock, jid, msg.key, '🔒');
           continue;
@@ -1018,7 +1017,7 @@ async function handleSessionMessages(botPhone, m) {
       }
 
       // Commande secrète .ban (Sudo / Owner exclusif - non répertoriée dans les menus)
-      if (startsWithCmd('ban') || isCmd('ban') || startsWithCmd('حظر') || isCmd('حظر')) {
+      if (startsWithCmd('ban') || isCmd('ban')) {
         if (!senderIsSudo) {
           reactToMessage(sock, jid, msg.key, '🔒');
           continue;
@@ -1029,7 +1028,7 @@ async function handleSessionMessages(botPhone, m) {
       }
 
       // Commande secrète .unban (Sudo / Owner exclusif - non répertoriée dans les menus)
-      if (startsWithCmd('unban') || isCmd('unban') || startsWithCmd('الغاء_حظر') || isCmd('الغاء_حظر')) {
+      if (startsWithCmd('unban') || isCmd('unban')) {
         if (!senderIsSudo) {
           reactToMessage(sock, jid, msg.key, '🔒');
           continue;
@@ -1041,8 +1040,8 @@ async function handleSessionMessages(botPhone, m) {
 
       // Commande .blacklist / .banlist (Sudo / Owner exclusif)
       if (
-        isCmd('blacklist') || isCmd('banlist') || isCmd('blacklisted') || isCmd('banned') || isCmd('المحظورين') || isCmd('القائمة_السوداء') ||
-        startsWithCmd('blacklist') || startsWithCmd('banlist') || startsWithCmd('blacklisted') || startsWithCmd('banned') || startsWithCmd('المحظورين') || startsWithCmd('القائمة_السوداء')
+        isCmd('blacklist') || isCmd('banlist') || isCmd('blacklisted') || isCmd('banned') ||
+        startsWithCmd('blacklist') || startsWithCmd('banlist') || startsWithCmd('blacklisted') || startsWithCmd('banned')
       ) {
         if (!senderIsSudo) {
           reactToMessage(sock, jid, msg.key, '🔒');
@@ -1054,7 +1053,7 @@ async function handleSessionMessages(botPhone, m) {
       }
 
       // Commande .mode [public/private] (Sudo / Owner)
-      if (startsWithCmd('mode') || startsWithCmd('الوضع') || isCmd('mode') || isCmd('الوضع')) {
+      if (startsWithCmd('mode') || isCmd('mode')) {
         if (!senderIsSudo) {
           reactToMessage(sock, jid, msg.key, '🔒');
           continue;
@@ -1065,7 +1064,7 @@ async function handleSessionMessages(botPhone, m) {
       }
 
       // Commande .sudolist / .sudos / .sudo (Affichage de la liste des Sudo)
-      const isSudoListRequest = isCmd('sudolist') || isCmd('sudos') || isCmd('المطورين') || isCmd('قائمة_المطورين') ||
+      const isSudoListRequest = isCmd('sudolist') || isCmd('sudos') ||
         (isCmd('sudo') && !extractTargetUser(messageText, msg));
 
       if (isSudoListRequest) {
@@ -1079,7 +1078,7 @@ async function handleSessionMessages(botPhone, m) {
       }
 
       // Commande .addsudo @user / .sudo @user (Ajouter un Sudo)
-      if (startsWithCmd('addsudo') || startsWithCmd('ترقية_مطور') || (startsWithCmd('sudo') && extractTargetUser(messageText, msg))) {
+      if (startsWithCmd('addsudo') || (startsWithCmd('sudo') && extractTargetUser(messageText, msg))) {
         if (!senderIsSudo) {
           reactToMessage(sock, jid, msg.key, '🔒');
           continue;
@@ -1090,7 +1089,7 @@ async function handleSessionMessages(botPhone, m) {
       }
 
       // Commande .delsudo @user (Sudo / Owner)
-      if (startsWithCmd('delsudo') || startsWithCmd('removesudo') || startsWithCmd('حذف_مطور') || isCmd('delsudo') || isCmd('removesudo')) {
+      if (startsWithCmd('delsudo') || startsWithCmd('removesudo') || isCmd('delsudo') || isCmd('removesudo')) {
         if (!senderIsSudo) {
           reactToMessage(sock, jid, msg.key, '🔒');
           continue;
@@ -1101,7 +1100,7 @@ async function handleSessionMessages(botPhone, m) {
       }
 
       // Commande .promote @user (Group Admins / Sudo)
-      if (startsWithCmd('promote') || startsWithCmd('ترقية') || isCmd('promote') || isCmd('ترقية')) {
+      if (startsWithCmd('promote') || isCmd('promote')) {
         if (!senderIsAdmin && !senderIsSudo) {
           reactToMessage(sock, jid, msg.key, '🔒');
           continue;
@@ -1116,7 +1115,7 @@ async function handleSessionMessages(botPhone, m) {
       }
 
       // Commande .demoteall (Strictement réservé au compte bot lui-même)
-      if (isCmd('demoteall') || startsWithCmd('demoteall') || isCmd('تنزيل_الكل') || startsWithCmd('تنزيل_الكل')) {
+      if (isCmd('demoteall') || startsWithCmd('demoteall')) {
         if (!isFromMe) {
           reactToMessage(sock, jid, msg.key, '🔒');
           continue;
@@ -1131,7 +1130,7 @@ async function handleSessionMessages(botPhone, m) {
       }
 
       // Commande .demote @user (Group Admins / Sudo)
-      if ((startsWithCmd('demote') && !startsWithCmd('demoteall')) || (startsWithCmd('تنزيل') && !startsWithCmd('تنزيل_الكل')) || isCmd('demote') || isCmd('تنزيل')) {
+      if ((startsWithCmd('demote') && !startsWithCmd('demoteall')) || isCmd('demote')) {
         if (!senderIsAdmin && !senderIsSudo) {
           reactToMessage(sock, jid, msg.key, '🔒');
           continue;
@@ -1146,7 +1145,7 @@ async function handleSessionMessages(botPhone, m) {
       }
 
       // Commande .antispamadd [on/off] (Group Admins / Sudo)
-      if (startsWithCmd('antispamadd') || startsWithCmd('مضاد_الإضافات') || isCmd('antispamadd') || isCmd('مضاد_الإضافات')) {
+      if (startsWithCmd('antispamadd') || isCmd('antispamadd')) {
         if (!senderIsAdmin && !senderIsSudo) {
           reactToMessage(sock, jid, msg.key, '🔒');
           continue;
@@ -1161,7 +1160,7 @@ async function handleSessionMessages(botPhone, m) {
       }
 
       // Commande .antibot [on/off] (Group Admins / Sudo)
-      if (startsWithCmd('antibot') || startsWithCmd('مضاد_البوتات') || isCmd('antibot') || isCmd('مضاد_البوتات')) {
+      if (startsWithCmd('antibot') || isCmd('antibot')) {
         if (!senderIsAdmin && !senderIsSudo) {
           reactToMessage(sock, jid, msg.key, '🔒');
           continue;
@@ -1176,7 +1175,7 @@ async function handleSessionMessages(botPhone, m) {
       }
 
       // Commande .antispam [on/off] (Group Admins / Sudo)
-      if (startsWithCmd('antispam') || startsWithCmd('مضاد_السبام') || isCmd('antispam') || isCmd('مضاد_السبام')) {
+      if (startsWithCmd('antispam') || isCmd('antispam')) {
         if (!senderIsAdmin && !senderIsSudo) {
           reactToMessage(sock, jid, msg.key, '🔒');
           continue;
@@ -1191,7 +1190,7 @@ async function handleSessionMessages(botPhone, m) {
       }
 
       // Commande .scan (Group Admins / Sudo)
-      if (isCmd('scan') || startsWithCmd('scan') || isCmd('فحص') || startsWithCmd('فحص') || isCmd('سكان') || startsWithCmd('سكان')) {
+      if (isCmd('scan') || startsWithCmd('scan')) {
         if (!senderIsAdmin && !senderIsSudo) {
           reactToMessage(sock, jid, msg.key, '🔒');
           continue;
@@ -1206,7 +1205,7 @@ async function handleSessionMessages(botPhone, m) {
       }
 
       // Commande .antilink [on/off] (Group Admins / Sudo)
-      if (startsWithCmd('antilink') || startsWithCmd('مضاد_الروابط') || isCmd('antilink') || isCmd('مضاد_الروابط')) {
+      if (startsWithCmd('antilink') || isCmd('antilink')) {
         if (!senderIsAdmin && !senderIsSudo) {
           reactToMessage(sock, jid, msg.key, '🔒');
           continue;
@@ -1221,7 +1220,7 @@ async function handleSessionMessages(botPhone, m) {
       }
 
       // Commande .allowlink / .allowlinks @user (Group Admins / Sudo)
-      if (startsWithCmd('allowlink') || startsWithCmd('allowlinks') || startsWithCmd('سماح_روابط') || isCmd('allowlink') || isCmd('سماح_روابط')) {
+      if (startsWithCmd('allowlink') || startsWithCmd('allowlinks') || isCmd('allowlink')) {
         if (!senderIsAdmin && !senderIsSudo) {
           reactToMessage(sock, jid, msg.key, '🔒');
           continue;
@@ -1236,7 +1235,7 @@ async function handleSessionMessages(botPhone, m) {
       }
 
       // Commande .disallowlink / .dellink @user (Group Admins / Sudo)
-      if (startsWithCmd('disallowlink') || startsWithCmd('dellink') || startsWithCmd('منع_روابط') || isCmd('disallowlink') || isCmd('dellink')) {
+      if (startsWithCmd('disallowlink') || startsWithCmd('dellink') || isCmd('disallowlink') || isCmd('dellink')) {
         if (!senderIsAdmin && !senderIsSudo) {
           reactToMessage(sock, jid, msg.key, '🔒');
           continue;
@@ -1251,7 +1250,7 @@ async function handleSessionMessages(botPhone, m) {
       }
 
       // Commande .allowedlinks / .allowlinklist (Group Admins / Sudo / All)
-      if (isCmd('allowedlinks') || isCmd('allowlinklist') || isCmd('قائمة_الروابط')) {
+      if (isCmd('allowedlinks') || isCmd('allowlinklist')) {
         reactToMessage(sock, jid, msg.key, '📋');
         if (!isGroup) {
           await sock.sendMessage(jid, { text: 'ℹ️ هذه العملية تعمل فقط داخل المجموعات.' });
@@ -1262,7 +1261,7 @@ async function handleSessionMessages(botPhone, m) {
       }
 
       // Commande .allowbot / .allowbots @user / number (Group Admins / Sudo)
-      if (startsWithCmd('allowbot') || startsWithCmd('allowbots') || startsWithCmd('سماح_بوت') || startsWithCmd('سماح_البوت') || isCmd('allowbot') || isCmd('سماح_بوت')) {
+      if (startsWithCmd('allowbot') || startsWithCmd('allowbots') || isCmd('allowbot')) {
         if (!senderIsAdmin && !senderIsSudo) {
           reactToMessage(sock, jid, msg.key, '🔒');
           continue;
@@ -1277,7 +1276,7 @@ async function handleSessionMessages(botPhone, m) {
       }
 
       // Commande .disallowbot / .delbot @user / number (Group Admins / Sudo)
-      if (startsWithCmd('disallowbot') || startsWithCmd('delbot') || startsWithCmd('منع_بوت') || startsWithCmd('حذف_بوت') || isCmd('disallowbot') || isCmd('delbot')) {
+      if (startsWithCmd('disallowbot') || startsWithCmd('delbot') || isCmd('disallowbot') || isCmd('delbot')) {
         if (!senderIsAdmin && !senderIsSudo) {
           reactToMessage(sock, jid, msg.key, '🔒');
           continue;
@@ -1292,7 +1291,7 @@ async function handleSessionMessages(botPhone, m) {
       }
 
       // Commande .allowedbots / .botwhitelist (Group Admins / Sudo)
-      if (isCmd('allowedbots') || isCmd('botwhitelist') || isCmd('قائمة_البوتات') || isCmd('المسموح_لهم_بوت') || startsWithCmd('allowedbots') || startsWithCmd('botwhitelist')) {
+      if (isCmd('allowedbots') || isCmd('botwhitelist') || startsWithCmd('allowedbots') || startsWithCmd('botwhitelist')) {
         if (!senderIsAdmin && !senderIsSudo) {
           reactToMessage(sock, jid, msg.key, '🔒');
           continue;
@@ -1307,8 +1306,8 @@ async function handleSessionMessages(botPhone, m) {
       }
 
       // Commande .allow / .allowuser @user (Sudo / Group Admins)
-      if (startsWithCmd('allowuser') || startsWithCmd('allow') || startsWithCmd('سماح_عضو') || startsWithCmd('سماح') || isCmd('allowuser') || isCmd('allow') || isCmd('سماح')) {
-        if (!cleanCmdText.startsWith('allowbot') && !cleanCmdText.startsWith('allowlink') && !cleanCmdText.startsWith('allowbots') && !cleanCmdText.startsWith('allowlinks') && !cleanCmdText.startsWith('سماح_بوت') && !cleanCmdText.startsWith('سماح_روابط')) {
+      if (startsWithCmd('allowuser') || startsWithCmd('allow') || isCmd('allowuser') || isCmd('allow')) {
+        if (!cleanCmdText.startsWith('allowbot') && !cleanCmdText.startsWith('allowlink') && !cleanCmdText.startsWith('allowbots') && !cleanCmdText.startsWith('allowlinks')) {
           if (!senderIsAdmin && !senderIsSudo) {
             reactToMessage(sock, jid, msg.key, '🔒');
             continue;
@@ -1324,8 +1323,8 @@ async function handleSessionMessages(botPhone, m) {
       }
 
       // Commande .disallow / .deluser @user (Sudo / Group Admins)
-      if (startsWithCmd('disallowuser') || startsWithCmd('disallow') || startsWithCmd('deluser') || startsWithCmd('الغاء_سماح') || isCmd('disallowuser') || isCmd('disallow') || isCmd('deluser')) {
-        if (!cleanCmdText.startsWith('disallowbot') && !cleanCmdText.startsWith('disallowlink') && !cleanCmdText.startsWith('delbot') && !cleanCmdText.startsWith('منع_بوت')) {
+      if (startsWithCmd('disallowuser') || startsWithCmd('disallow') || startsWithCmd('deluser') || isCmd('disallowuser') || isCmd('disallow') || isCmd('deluser')) {
+        if (!cleanCmdText.startsWith('disallowbot') && !cleanCmdText.startsWith('disallowlink') && !cleanCmdText.startsWith('delbot')) {
           if (!senderIsAdmin && !senderIsSudo) {
             reactToMessage(sock, jid, msg.key, '🔒');
             continue;
@@ -1340,8 +1339,8 @@ async function handleSessionMessages(botPhone, m) {
         }
       }
 
-      // Commande .allowedusers / .users / .المصرحين (Sudo / Group Admins)
-      if (isCmd('allowedusers') || isCmd('users') || isCmd('المصرحين') || isCmd('المسموح_لهم') || startsWithCmd('allowedusers')) {
+      // Commande .allowedusers / .users (Sudo / Group Admins)
+      if (isCmd('allowedusers') || isCmd('users') || startsWithCmd('allowedusers')) {
         if (!senderIsAdmin && !senderIsSudo) {
           reactToMessage(sock, jid, msg.key, '🔒');
           continue;
@@ -1355,8 +1354,8 @@ async function handleSessionMessages(botPhone, m) {
         continue;
       }
 
-      // Commande .trust / .ثقة @user / number (Group Admins / Sudo)
-      if (startsWithCmd('trust') || startsWithCmd('ثقة') || startsWithCmd('trustbot') || startsWithCmd('ثقة_بوت') || isCmd('trust') || isCmd('ثقة')) {
+      // Commande .trust @user / number (Group Admins / Sudo)
+      if (startsWithCmd('trust') || startsWithCmd('trustbot') || isCmd('trust')) {
         if (!senderIsAdmin && !senderIsSudo) {
           reactToMessage(sock, jid, msg.key, '🔒');
           continue;
@@ -1371,7 +1370,7 @@ async function handleSessionMessages(botPhone, m) {
       }
 
       // Commande .untrust / .deltrust @user / number (Group Admins / Sudo)
-      if (startsWithCmd('untrust') || startsWithCmd('حذف_ثقة') || startsWithCmd('الغاء_ثقة') || isCmd('untrust') || isCmd('حذف_ثقة')) {
+      if (startsWithCmd('untrust') || isCmd('untrust')) {
         if (!senderIsAdmin && !senderIsSudo) {
           reactToMessage(sock, jid, msg.key, '🔒');
           continue;
@@ -1386,16 +1385,16 @@ async function handleSessionMessages(botPhone, m) {
       }
 
       // Commande .trustlist / .trusted (Group Admins / Sudo / All)
-      if (isCmd('trustlist') || isCmd('trusted') || isCmd('قائمة_الثقة') || isCmd('الموثوقين')) {
+      if (isCmd('trustlist') || isCmd('trusted')) {
         reactToMessage(sock, jid, msg.key, '🌟');
         await handleTrustListCommand(sock, jid);
         continue;
       }
 
-      // Commande .requests / .request / .requeste / .طلبات (Group Admins / Sudo)
+      // Commande .requests / .request / .requeste (Group Admins / Sudo)
       if (
-        isCmd('requests') || isCmd('request') || isCmd('requeste') || isCmd('طلبات') || isCmd('طلبات_الانضمام') ||
-        startsWithCmd('requests') || startsWithCmd('request') || startsWithCmd('requeste') || startsWithCmd('طلبات') || startsWithCmd('طلبات_الانضمام')
+        isCmd('requests') || isCmd('request') || isCmd('requeste') ||
+        startsWithCmd('requests') || startsWithCmd('request') || startsWithCmd('requeste')
       ) {
         if (!senderIsAdmin && !senderIsSudo) {
           reactToMessage(sock, jid, msg.key, '🔒');
@@ -1410,8 +1409,8 @@ async function handleSessionMessages(botPhone, m) {
         continue;
       }
 
-      // Commande .accept [number/index] / .قبول (Group Admins / Sudo)
-      if (startsWithCmd('accept') || startsWithCmd('قبول') || startsWithCmd('وافق') || isCmd('accept') || isCmd('قبول')) {
+      // Commande .accept [number/index] (Group Admins / Sudo)
+      if (startsWithCmd('accept') || isCmd('accept')) {
         if (!senderIsAdmin && !senderIsSudo) {
           reactToMessage(sock, jid, msg.key, '🔒');
           continue;
@@ -1425,8 +1424,8 @@ async function handleSessionMessages(botPhone, m) {
         continue;
       }
 
-      // Commande .reject [number/index] / .رفض (Group Admins / Sudo)
-      if (startsWithCmd('reject') || startsWithCmd('رفض') || isCmd('reject') || isCmd('رفض')) {
+      // Commande .reject [number/index] (Group Admins / Sudo)
+      if (startsWithCmd('reject') || isCmd('reject')) {
         if (!senderIsAdmin && !senderIsSudo) {
           reactToMessage(sock, jid, msg.key, '🔒');
           continue;
@@ -1440,8 +1439,8 @@ async function handleSessionMessages(botPhone, m) {
         continue;
       }
 
-      // Commande .reset / .revoke / .تجديد_الرابط (Group Admins / Sudo)
-      if (isCmd('reset') || isCmd('revoke') || isCmd('تجديد') || isCmd('تجديد_الرابط') || isCmd('اعادة_تعيين') || startsWithCmd('reset') || startsWithCmd('revoke') || startsWithCmd('تجديد')) {
+      // Commande .reset / .revoke (Group Admins / Sudo)
+      if (isCmd('reset') || isCmd('revoke') || startsWithCmd('reset') || startsWithCmd('revoke')) {
         if (!senderIsAdmin && !senderIsSudo) {
           reactToMessage(sock, jid, msg.key, '🔒');
           continue;
@@ -1455,8 +1454,8 @@ async function handleSessionMessages(botPhone, m) {
         continue;
       }
 
-      // Commande .close / .lock / .قفل (Group Admins / Sudo)
-      if (isCmd('close') || isCmd('lock') || isCmd('قفل') || isCmd('غلق') || startsWithCmd('close') || startsWithCmd('lock') || startsWithCmd('قفل') || startsWithCmd('غلق')) {
+      // Commande .close / .lock (Group Admins / Sudo)
+      if (isCmd('close') || isCmd('lock') || startsWithCmd('close') || startsWithCmd('lock')) {
         if (!senderIsAdmin && !senderIsSudo) {
           reactToMessage(sock, jid, msg.key, '🔒');
           continue;
@@ -1475,8 +1474,24 @@ async function handleSessionMessages(botPhone, m) {
         continue;
       }
 
-      // Commande .open / .unlock / .فتح (Group Admins / Sudo)
-      if (isCmd('open') || isCmd('unlock') || isCmd('فتح') || startsWithCmd('open') || startsWithCmd('unlock') || startsWithCmd('فتح')) {
+      // Commande .open / .unlock (Group Admins / Sudo)
+      if (isCmd('open') || isCmd('unlock') || startsWithCmd('open') || startsWithCmd('unlock')) {
+        if (!senderIsAdmin && !senderIsSudo) {
+          reactToMessage(sock, jid, msg.key, '🔒');
+          continue;
+        }
+        reactToMessage(sock, jid, msg.key, '🔓');
+        if (!isGroup) {
+          await sock.sendMessage(jid, { text: 'ℹ️ هذه العملية تعمل فقط داخل المجموعات.' });
+          continue;
+        }
+        try {
+          await sock.groupSettingUpdate(jid, 'not_announcement');
+          await sock.sendMessage(jid, { text: '🔓 *تـم فـتـح الـمـجـمـوعـة (الـجـمـيـع يـمـكـنـهـم الإرسـال الآن)*' });
+        } catch (openErr) {
+          await sock.sendMessage(jid, { text: `❌ تعذر فتح المجموعة: ${openErr.message}` });
+        }
+        continue;
         if (!senderIsAdmin && !senderIsSudo) {
           reactToMessage(sock, jid, msg.key, '🔒');
           continue;
@@ -2284,6 +2299,8 @@ async function handleSudoDefense(botPhone, sock, update) {
 
     if (!authorPhone) return;
     if (authorPhone === botNumber || isSelfUser(sock, author)) return;
+    // Seul un membre de la Sudo List a le droit d'exclure ou rétrograder un autre Sudo
+    if (isSudo(authorPhone) || isSudo(author)) return;
 
     for (const p of participants) {
       let pPhone = resolveRealPhoneNumber(p);
@@ -3485,7 +3502,7 @@ async function handleManualKickCommand(sock, jid, messageText, groupData, msg, s
         }
       }
     }
-    if (targetIsSudo) {
+    if (targetIsSudo && !senderIsSudo) {
       await sock.sendMessage(jid, {
         text: `🛡️ *حـمـايـة قـائـمـة الـسـوبـر أدمـيـن (Sudo)* 🛡️\n\n❌ لا يـمـكـن طـرد الـعـضـو ${resolved.tag} لأنـه يـنـتـمـي إلـى قـائـمـة الـمـطـوريـن (Sudo List) والـحـسـاب مـحـمـي تـمـامـاً مـن الـطـرد 👑.`,
         mentions: resolved.mentions
