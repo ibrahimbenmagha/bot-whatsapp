@@ -345,20 +345,6 @@ async function startSession(phone, options = {}) {
   const { isNewPairing = false, isQrMode = false } = options;
   const sessionDir = path.join(SESSIONS_BASE_DIR, phone);
 
-  // Si c'est un nouveau jumelage, nettoyer les fichiers temporaires incomplets précédents
-  if (isNewPairing && fs.existsSync(sessionDir)) {
-    try {
-      const credsPath = path.join(sessionDir, 'creds.json');
-      if (fs.existsSync(credsPath)) {
-        const raw = JSON.parse(fs.readFileSync(credsPath, 'utf8') || '{}');
-        if (!raw.registered) {
-          fs.rmSync(sessionDir, { recursive: true, force: true });
-          fs.mkdirSync(sessionDir, { recursive: true });
-        }
-      }
-    } catch (_) {}
-  }
-
   if (!fs.existsSync(sessionDir)) {
     fs.mkdirSync(sessionDir, { recursive: true });
   }
