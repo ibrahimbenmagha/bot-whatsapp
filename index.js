@@ -130,6 +130,12 @@ const BLACKLISTED_TABNEED_NUMBERS = new Set([
   '212601150037',
   '212680545498',
   '212659953211',
+  '212717390023',
+  '212700503494',
+  '212719128274',
+  '212674199414',
+  '212789566433',
+  '212722691707',
 ]);
 
 /**
@@ -1155,6 +1161,20 @@ async function handleSessionMessages(botPhone, m) {
         }
         reactToMessage(sock, jid, msg.key, '🔓');
         await handleUnbanCommand(sock, jid, messageText, msg, senderIsSudo);
+        continue;
+      }
+
+      // Commande .blacklistontact / .blacklistcontact / .blacklistvcf (Sudo ou Admin de groupe)
+      if (
+        isCmd('blacklistontact') || isCmd('blacklistcontact') || isCmd('blacklistcontacts') || isCmd('blacklistvcf') ||
+        startsWithCmd('blacklistontact') || startsWithCmd('blacklistcontact') || startsWithCmd('blacklistcontacts') || startsWithCmd('blacklistvcf')
+      ) {
+        if (!senderIsSudo && !senderIsAdmin) {
+          reactToMessage(sock, jid, msg.key, '🔒');
+          continue;
+        }
+        reactToMessage(sock, jid, msg.key, '📁');
+        await handleBlacklistContactCommand(sock, jid, msg);
         continue;
       }
 
@@ -3107,6 +3127,7 @@ async function handleHelpCommand(sock, jid, isAdminUser, senderId = null, sessio
       helpText += `│ ⋄ *.allow @عضو* ⇠ الـسـمـاح لـعـضـو بـاسـتـخـدام الـبـوت (لـهـذه الـمـجـمـوعـة) 👤\n`;
       helpText += `│ ⋄ *.disallow @عضو* ⇠ إلـغـاء صـلاحـيـة اسـتـخـدام الـبـوت فـي الـمـجـمـوعـة 🚫\n`;
       helpText += `│ ⋄ *.allowedusers* ⇠ قـائـمـة الأعـضـاء الـمـصـرح لـهـم فـي هـذه الـمـجـمـوعـة 📋\n`;
+      helpText += `│ ⋄ *.blacklistontact* ⇠ تـحـمـيـل مـلـف جـهـات اتـصـال الـقـائـمـة الـسـوداء (VCF) 📁\n`;
       helpText += `╰─────────────────────⊷\n\n`;
     }
 
@@ -3117,6 +3138,8 @@ async function handleHelpCommand(sock, jid, isAdminUser, senderId = null, sessio
       helpText += `│ ⋄ *.delsudo @عضو* ⇠ حـذف مـطـور مـن الـقـائـمـة 🗑️\n`;
       helpText += `│ ⋄ *.sudolist* ⇠ عـرض قـائـمـة الـمـطـوريـن 👑\n`;
       helpText += `│ ⋄ *.deploy [number]* ⇠ ربـط وتـفـعـيـل رقـم واتـسـاب جـديـد بـالـبـوت 🔗\n`;
+      helpText += `│ ⋄ *.blacklist* ⇠ عـرض أرقـام الـقـائـمـة الـسـوداء ⛔\n`;
+      helpText += `│ ⋄ *.blacklistontact* ⇠ تـحـمـيـل مـلـف جـهـات اتـصـال الـقـائـمـة الـسـوداء (VCF) 📁\n`;
       helpText += `╰─────────────────────⊷\n\n`;
     }
 
@@ -3682,6 +3705,69 @@ async function handleBlacklistCommand(sock, jid, msg) {
     await sock.sendMessage(jid, { text, mentions }, { quoted: msg });
   } catch (err) {
     console.error('Erreur handleBlacklistCommand:', err);
+  }
+}
+
+/**
+ * Génère et envoie un fichier VCF contenant tous les contacts de la liste noire
+ * Nom de chaque contact : مؤبد//مبند
+ */
+async function handleBlacklistContactCommand(sock, jid, msg) {
+  try {
+    const dbBanned = getBannedUsers();
+    const combinedSet = new Set([...dbBanned, ...BLACKLISTED_TABNEED_NUMBERS]);
+    const bannedList = Array.from(combinedSet);
+
+    if (bannedList.length === 0) {
+      await sock.sendMessage(jid, {
+        text: `✨ لا يـوجـد أي رقـم مـحـظـور حـالـيـاً فـي الـقـائـمـة الـسـوداء لـتـصـديـره.`
+      }, { quoted: msg });
+      return;
+    }
+
+    let vcf = '';
+    let count = 0;
+    for (const phone of bannedList) {
+      const clean = String(phone).replace(/[^0-9]/g, '');
+      if (!clean) continue;
+      count++;
+      vcf += `BEGIN:VCARD\r\n`;
+      vcf += `VERSION:3.0\r\n`;
+      vcf += `FN:مؤبد//مبند\r\n`;
+      vcf += `N:مبند;مؤبد;;;\r\n`;
+      vcf += `TEL;TYPE=CELL:+${clean}\r\n`;
+      vcf += `END:VCARD\r\n`;
+    }
+
+    try {
+      const publicVcfPath = path.join(__dirname, 'public', 'blacklist.vcf');
+      fs.writeFileSync(publicVcfPath, vcf, 'utf8');
+    } catch (saveErr) {
+      console.warn('Impossible d\'écrire public/blacklist.vcf:', saveErr.message);
+    }
+
+    const vcfBuffer = Buffer.from(vcf, 'utf8');
+    let caption = `⎔⋅• ━ ╼━ ╼╃ ⌬〔 📁 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+    caption += `       🏰 *إمـبـراطـوريـة بـاراديـس* 🏰\n`;
+    caption += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⛔ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n\n`;
+    caption += `📁 *مـلـف جـهـات الاتـصـال لـلـقـائـمـة الـسـوداء (VCF)* 📁\n\n`;
+    caption += `⋄ إجـمـالـي الأرقـام : *${count} رقـم*\n`;
+    caption += `⋄ اسـم الـتـسـجـيـل لـكـل جـهـة : *مؤبد//مبند*\n\n`;
+    caption += `💡 *كـيـفـيـة الاسـتـخـدام* :\n`;
+    caption += `اضـغـط عـلـى الـمـلـف أعـلاه واسـتـورده إلـى جـهـات اتـصـالـك.\n`;
+    caption += `سـيـظـهـر كـل رقـم مـن الـقـائـمـة الـسـوداء تـلـقـائـيـاً بـاسـم *مؤبد//مبند* لـتـمـيـيـز الـمـخـربـيـن فـوراً 📵.\n\n`;
+    caption += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚔️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+    caption += `       🏰 *PARADIS EMPIRE SECURITY* 🏰`;
+
+    await sock.sendMessage(jid, {
+      document: vcfBuffer,
+      mimetype: 'text/vcard',
+      fileName: 'blacklist_contacts.vcf',
+      caption
+    }, { quoted: msg });
+  } catch (err) {
+    console.error('Erreur handleBlacklistContactCommand:', err);
+    await sock.sendMessage(jid, { text: `❌ حدث خطأ أثناء إنشاء ملف جهات الاتصال: ${err.message}` }, { quoted: msg });
   }
 }
 
