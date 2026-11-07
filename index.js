@@ -9,7 +9,14 @@ import path from 'path';
 import fs from 'fs';
 import crypto from 'crypto';
 import { fileURLToPath } from 'url';
-import makeWASocket, { useMultiFileAuthState, DisconnectReason, Browsers, USyncQuery, USyncUser } from '@whiskeysockets/baileys';
+import makeWASocket, { 
+  useMultiFileAuthState, 
+  DisconnectReason, 
+  Browsers, 
+  USyncQuery, 
+  USyncUser,
+  makeCacheableSignalKeyStore 
+} from '@whiskeysockets/baileys';
 import { Boom } from '@hapi/boom';
 import pino from 'pino';
 import QRCode from 'qrcode';
@@ -260,6 +267,77 @@ function migrateLegacySession() {
   }
 }
 
+// ----------------------------------------------------
+// Système de Protection Anti-Ban Haute Performance
+// ----------------------------------------------------
+
+// 1. Cache en mémoire des messages récents pour permettre la renégociation de session et retries
+const recentMessagesStore = new Map(); // key.id -> proto.IMessage (max 3000)
+function storeRecentMessage(msg) {
+  try {
+    if (msg?.key?.id && msg?.message) {
+      recentMessagesStore.set(msg.key.id, msg.message);
+      if (recentMessagesStore.size > 3000) {
+        const firstKey = recentMessagesStore.keys().next().value;
+        recentMessagesStore.delete(firstKey);
+      }
+    }
+  } catch (_) {}
+}
+
+// 2. File d'attente sortante et protection anti-ban pour chaque session de bot
+function wrapSocketForAntiBan(sock, phone) {
+  const originalSendMessage = sock.sendMessage.bind(sock);
+  let queue = Promise.resolve();
+
+  sock.sendMessage = async function (jid, content, options = {}) {
+    try {
+      if (!jid || !content) return await originalSendMessage(jid, content, options);
+
+      // Si c'est une simple réaction emoji, exécuter directement sans présence de saisie
+      if (content.react) {
+        return await originalSendMessage(jid, content, options);
+      }
+
+      // Chaîner l'envoi dans la file d'attente pour éviter les envois simultanés (bursts robotiques)
+      const executeSend = queue.then(async () => {
+        // Simuler la présence humaine 'composing' (en train d'écrire)
+        if (content.text || content.caption || content.image || content.video) {
+          await sock.sendPresenceUpdate('composing', jid).catch(() => {});
+          // Délai humain naturel aléatoire (350ms à 750ms)
+          const typingDelay = Math.floor(Math.random() * 400) + 350;
+          await new Promise((r) => setTimeout(r, typingDelay));
+        }
+
+        // Envoi réel du message
+        const sent = await originalSendMessage(jid, content, options);
+
+        if (sent && sent.key?.id && sent.message) {
+          storeRecentMessage(sent);
+        }
+
+        // Pause 'paused' pour clore l'état de frappe
+        await sock.sendPresenceUpdate('paused', jid).catch(() => {});
+
+        // Délai anti-flood entre messages successifs (300ms à 500ms)
+        const antiFloodDelay = Math.floor(Math.random() * 200) + 300;
+        await new Promise((r) => setTimeout(r, antiFloodDelay));
+
+        return sent;
+      }).catch((err) => {
+        logActivity(`[AntiBanQueue] Échec envoi message (+${phone}): ${err.message}`, 'warn');
+        return null;
+      });
+
+      queue = executeSend.catch(() => {});
+      return await executeSend;
+    } catch (err) {
+      logActivity(`[AntiBanQueue] Erreur wrapper sendMessage: ${err.message}`, 'warn');
+      return null;
+    }
+  };
+}
+
 /**
  * Démarrer ou connecter une session WhatsApp pour un numéro donné (ou session QR temporaire)
  */
@@ -307,15 +385,27 @@ async function startSession(phone, options = {}) {
   logActivity(`[${displayName}] Initialisation de la socket Baileys...`);
 
   const sock = makeWASocket({
-    auth: state,
+    auth: {
+      creds: state.creds,
+      keys: makeCacheableSignalKeyStore(state.keys, logger),
+    },
     logger: logger,
     printQRInTerminal: false,
     mobile: false,
     browser: Browsers.ubuntu('Chrome'),
     syncFullHistory: false,
+    markOnlineOnConnect: true,
     connectTimeoutMs: 60000,
     defaultQueryTimeoutMs: 60000,
+    getMessage: async (key) => {
+      if (key?.id && recentMessagesStore.has(key.id)) {
+        return recentMessagesStore.get(key.id);
+      }
+      return undefined;
+    },
   });
+
+  wrapSocketForAntiBan(sock, phone);
 
   sessionObj.sock = sock;
 
@@ -329,6 +419,11 @@ async function startSession(phone, options = {}) {
 
   // Gestion des messages reçus pour la modération
   sock.ev.on('messages.upsert', async (m) => {
+    if (m?.messages) {
+      for (const msg of m.messages) {
+        storeRecentMessage(msg);
+      }
+    }
     await handleSessionMessages(phone, m);
   });
 
@@ -483,6 +578,15 @@ async function handleSessionConnectionUpdate(phone, update, isNewPairing) {
     logActivity(`✅ [+${currentPhone}] Connecté avec succès (${currentName}) !`, 'system');
     broadcastSSE({ type: 'session_update', phone: currentPhone, status: 'connected', user: session.user });
 
+    // Simulation présence WhatsApp Web : 'available' + heartbeat régulier
+    session.sock.sendPresenceUpdate('available').catch(() => {});
+    if (session.presenceInterval) clearInterval(session.presenceInterval);
+    session.presenceInterval = setInterval(() => {
+      if (session.sock && session.status === 'connected') {
+        session.sock.sendPresenceUpdate('available').catch(() => {});
+      }
+    }, 10 * 60 * 1000);
+
     // Précharger tous les groupes et participants pour indexer immédiatement les LIDs en numéros réels
     setTimeout(async () => {
       try {
@@ -507,6 +611,10 @@ async function handleSessionConnectionUpdate(phone, update, isNewPairing) {
   }
 
   if (connection === 'close') {
+    if (session.presenceInterval) {
+      clearInterval(session.presenceInterval);
+      session.presenceInterval = null;
+    }
     const statusCode = (lastDisconnect?.error instanceof Boom)
       ? lastDisconnect.error.output?.statusCode
       : lastDisconnect?.error?.output?.statusCode;
@@ -726,8 +834,9 @@ async function handleSessionMessages(botPhone, m) {
             mentions: [senderId, senderPhone ? `${senderPhone}@s.whatsapp.net` : null].filter(Boolean)
           }).catch(() => {});
           await safeGroupParticipantsRemove(sock, jid, [senderId]).catch(() => {});
+        } else {
+          await safeBlockUser(sock, senderId).catch(() => {});
         }
-        await safeBlockUser(sock, senderId).catch(() => {});
         continue;
       }
 
@@ -784,8 +893,9 @@ async function handleSessionMessages(botPhone, m) {
             mentions: [senderId, `${realSenderPhone}@s.whatsapp.net`].filter(Boolean)
           }).catch(() => {});
           await safeGroupParticipantsRemove(sock, jid, [senderId]).catch(() => {});
+        } else {
+          await safeBlockUser(sock, senderId).catch(() => {});
         }
-        await safeBlockUser(sock, senderId).catch(() => {});
         continue;
       }
 
@@ -1508,37 +1618,12 @@ async function handleSessionMessages(botPhone, m) {
       }
 
       // 4. Commande inconnue / inexistante (ex: .xyz)
-      // "si quelqu un utilise . avec commnde qui n existe pas ile repond avec (هدشي واللهم كين) avec le audio Shubady"
+      // "si quelqu un utilise . avec commnde qui n existe pas ile repond avec (هدشي واللهم كين)"
       if (isPrefixCommand && trimmedText.length > 1 && !trimmedText.startsWith('..') && !trimmedText.startsWith('...')) {
         reactToMessage(sock, jid, msg.key, '❓');
         await sock.sendMessage(jid, { 
           text: 'هدشي واللهم كين' 
         }, { quoted: msg });
-
-        const opusPath = path.join(__dirname, 'Media', 'Shubady.opus');
-        const mpegPath = path.join(__dirname, 'Media', 'Shubady.mpeg');
-
-        if (fs.existsSync(opusPath)) {
-          try {
-            await sock.sendMessage(jid, {
-              audio: fs.readFileSync(opusPath),
-              mimetype: 'audio/ogg; codecs=opus',
-              ptt: true
-            }, { quoted: msg });
-          } catch (audioErr) {
-            console.error('Erreur envoi audio Shubady opus:', audioErr);
-          }
-        } else if (fs.existsSync(mpegPath)) {
-          try {
-            await sock.sendMessage(jid, {
-              audio: fs.readFileSync(mpegPath),
-              mimetype: 'audio/mp4',
-              ptt: false
-            }, { quoted: msg });
-          } catch (audioErr) {
-            console.error('Erreur envoi audio Shubady mpeg:', audioErr);
-          }
-        }
         continue;
       }
     }
@@ -1621,8 +1706,12 @@ function isSelfUser(sock, targetJid) {
   return false;
 }
 
+// Protection stricte anti-ban sur le blocage WhatsApp
+const lastBlockTimestamps = new Map(); // botPhone -> timestamp
+
 /**
- * Bloquer un utilisateur en toute sécurité en garantissant que le bot ne se bloque jamais lui-même
+ * Bloquer un utilisateur en toute sécurité avec protection anti-ban
+ * (WhatsApp bannit immédiatement les numéros de bot qui bloquent fréquemment)
  */
 async function safeBlockUser(sock, targetJid) {
   try {
@@ -1631,7 +1720,17 @@ async function safeBlockUser(sock, targetJid) {
       logActivity(`[Anti-Ban] Tentative de blocage ignorée pour compte protégé (bot/sudo): ${targetJid}`, 'warn');
       return;
     }
+    const botPhone = (sock.user?.id || '').split('@')[0].split(':')[0];
+    const now = Date.now();
+    const lastBlock = lastBlockTimestamps.get(botPhone) || 0;
+    // Cooldown strict de 10 minutes entre chaque opération de blocage pour protéger le numéro
+    if (now - lastBlock < 10 * 60 * 1000) {
+      logActivity(`[Anti-Ban] Blocage de ${targetJid} différé pour protéger le numéro du bot (cooldown actif).`);
+      return;
+    }
+    lastBlockTimestamps.set(botPhone, now);
     await sock.updateBlockStatus(targetJid, 'block');
+    logActivity(`[Anti-Ban] Utilisateur ${targetJid} bloqué sur WhatsApp.`);
   } catch (err) {
     logActivity(`[Anti-Ban] Échec blocage ${targetJid}: ${err.message}`, 'warn');
   }
@@ -1639,7 +1738,8 @@ async function safeBlockUser(sock, targetJid) {
 
 /**
  * Expulser des participants en toute sécurité en garantissant que le bot ne s'expulse jamais lui-même,
- * ne touche jamais aux sudos, et rétrograde automatiquement les admins avant de les expulser.
+ * ne touche jamais aux sudos, rétrograde les admins avant de les expulser, et applique une temporisation
+ * anti-mass-kick pour éviter que WhatsApp ne bannisse le numéro du bot.
  */
 async function safeGroupParticipantsRemove(sock, jid, participantsList) {
   if (!sock || !jid || !Array.isArray(participantsList)) return;
@@ -1662,25 +1762,26 @@ async function safeGroupParticipantsRemove(sock, jid, participantsList) {
         if (p && (p.admin === 'admin' || p.admin === 'superadmin')) {
           const demoteTarget = p.id || p.jid || target;
           await sock.groupParticipantsUpdate(jid, [demoteTarget], 'demote').catch(() => {});
-          await new Promise(r => setTimeout(r, 300));
+          await new Promise(r => setTimeout(r, 800));
         }
       }
     }
   } catch (_) {}
 
-  // 2. Exécuter l'expulsion (avec fallback individuel si le lot échoue)
-  try {
-    return await sock.groupParticipantsUpdate(jid, safeList, 'remove');
-  } catch (batchErr) {
-    for (const t of safeList) {
-      try {
-        await sock.groupParticipantsUpdate(jid, [t], 'remove');
-      } catch (indErr) {
-        const clean = String(t).split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
-        if (clean && !t.endsWith('@s.whatsapp.net')) {
-          await sock.groupParticipantsUpdate(jid, [`${clean}@s.whatsapp.net`], 'remove').catch(() => {});
-        }
+  // 2. Exécuter l'expulsion avec temporisation anti-ban individuelle
+  for (let i = 0; i < safeList.length; i++) {
+    const t = safeList[i];
+    try {
+      await sock.groupParticipantsUpdate(jid, [t], 'remove');
+    } catch (indErr) {
+      const clean = String(t).split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
+      if (clean && !t.endsWith('@s.whatsapp.net')) {
+        await sock.groupParticipantsUpdate(jid, [`${clean}@s.whatsapp.net`], 'remove').catch(() => {});
       }
+    }
+    // Pause anti-ban de 1.2s à 1.8s entre chaque expulsion successive pour éviter le flag de mass-kick
+    if (i < safeList.length - 1) {
+      await new Promise(r => setTimeout(r, Math.floor(Math.random() * 600) + 1200));
     }
   }
 }
@@ -1767,8 +1868,6 @@ async function checkAndPurgeBlacklistInGroup(sock, jid, initialGroupData = null)
         await safeGroupParticipantsRemove(sock, jid, [item.rawJid]).catch((err) => {
           logActivity(`[BlacklistRadar] Échec expulsion @${item.phone}: ${err.message}`, 'warn');
         });
-
-        await safeBlockUser(sock, item.rawJid).catch(() => {});
         logActivity(`[BlacklistRadar] Membre blacklisté @${item.phone} expulsé avec succès de ${jid}!`);
       }
     } else {
@@ -1811,8 +1910,6 @@ async function checkAndPurgeBlacklistInGroup(sock, jid, initialGroupData = null)
           text: 'هههههه مبند هبط تشم الصبابط',
           mentions: [item.rawJid, `${item.phone}@s.whatsapp.net`].filter(Boolean)
         }).catch(() => {});
-
-        await safeBlockUser(sock, item.rawJid).catch(() => {});
       }
     }
   } catch (err) {
@@ -1905,32 +2002,6 @@ async function handleAntiLink(sock, jid, senderId, messageId, groupData) {
       mentions: Array.from(allMentions).filter(Boolean) 
     });
     logActivity(`[AntiLink] Lien supprimé et warn #${newWarningCount}/${CONFIG.maxWarnings} pour ${senderNumber}`);
-
-    // 2. Envoyer l'audio shadooh
-    const opusPath = path.join(__dirname, 'Media', 'shadooh.opus');
-    const mp3Path = path.join(__dirname, 'Media', 'shadooh.mp3');
-
-    if (fs.existsSync(opusPath)) {
-      try {
-        await sock.sendMessage(jid, {
-          audio: fs.readFileSync(opusPath),
-          mimetype: 'audio/ogg; codecs=opus',
-          ptt: true
-        });
-      } catch (audioErr) {
-        logActivity(`Échec envoi audio anti-link opus: ${audioErr.message}`, 'warn');
-      }
-    } else if (fs.existsSync(mp3Path)) {
-      try {
-        await sock.sendMessage(jid, {
-          audio: fs.readFileSync(mp3Path),
-          mimetype: 'audio/mp4',
-          ptt: false
-        });
-      } catch (audioErr) {
-        logActivity(`Échec envoi audio anti-link mp3: ${audioErr.message}`, 'warn');
-      }
-    }
   } catch (err) {
     console.error('Erreur anti-lien:', err);
   }
@@ -1958,33 +2029,7 @@ async function handleAntiContact(sock, jid, senderId, messageId, groupData) {
     const notificationText = `📵 @${senderNumber}\n*تاشو ههههههه باقي كيباني بجهة الإتصال ههه وااا على قديم ههه انا و كنعرف نباني حسن منك هبط تشم الصبابط* 🥾`;
     await sock.sendMessage(jid, { text: notificationText, mentions: [senderId] });
 
-    // 3. Envoyer l'audio StoneSciecle
-    const opusPath = path.join(__dirname, 'Media', 'StoneSciecle.opus');
-    const mpegPath = path.join(__dirname, 'Media', 'StoneSciecle.mpeg');
-
-    if (fs.existsSync(opusPath)) {
-      try {
-        await sock.sendMessage(jid, {
-          audio: fs.readFileSync(opusPath),
-          mimetype: 'audio/ogg; codecs=opus',
-          ptt: true
-        });
-      } catch (audioErr) {
-        logActivity(`Échec envoi audio anti-contact opus: ${audioErr.message}`, 'warn');
-      }
-    } else if (fs.existsSync(mpegPath)) {
-      try {
-        await sock.sendMessage(jid, {
-          audio: fs.readFileSync(mpegPath),
-          mimetype: 'audio/mp4',
-          ptt: false
-        });
-      } catch (audioErr) {
-        logActivity(`Échec envoi audio anti-contact mpeg: ${audioErr.message}`, 'warn');
-      }
-    }
-
-    // 4. Expulser l'utilisateur directement sans avertissement (Kick direct)
+    // 3. Expulser l'utilisateur directement sans avertissement (Kick direct)
     try {
       await sock.groupParticipantsUpdate(jid, [senderId], 'remove');
       logActivity(`[AntiContact] @${senderNumber} expulsé directement du groupe suite à l'envoi d'un contact.`);
@@ -2081,32 +2126,6 @@ async function handleForwardSpam(sock, jid, spammersInput, groupData) {
       text: spamText,
       mentions: Array.from(allMentions).filter(Boolean)
     });
-
-    // 5. Envoyer l'audio Sktona
-    const opusPath = path.join(__dirname, 'Media', 'Sktona.opus');
-    const mpegPath = path.join(__dirname, 'Media', 'Sktona.mpeg');
-
-    if (fs.existsSync(opusPath)) {
-      try {
-        await sock.sendMessage(jid, {
-          audio: fs.readFileSync(opusPath),
-          mimetype: 'audio/ogg; codecs=opus',
-          ptt: true
-        });
-      } catch (audioErr) {
-        logActivity(`Échec envoi audio anti-spam opus: ${audioErr.message}`, 'warn');
-      }
-    } else if (fs.existsSync(mpegPath)) {
-      try {
-        await sock.sendMessage(jid, {
-          audio: fs.readFileSync(mpegPath),
-          mimetype: 'audio/mp4',
-          ptt: false
-        });
-      } catch (audioErr) {
-        logActivity(`Échec envoi audio anti-spam mpeg: ${audioErr.message}`, 'warn');
-      }
-    }
   } catch (err) {
     console.error('Erreur handleForwardSpam:', err);
   }
@@ -2164,32 +2183,7 @@ async function handleTabneedCommandAttempt(sock, jid, senderId, msg, isGroup, gr
       mentions: resolved.mentions
     });
 
-    // 4. Envoyer l'audio TomLaugh1 (Opus PTT avec fallback MPEG)
-    const laugh1Opus = path.join(__dirname, 'Media', 'TomLaugh1.opus');
-    const laugh1Mpeg = path.join(__dirname, 'Media', 'TomLaugh1.mpeg');
-    if (fs.existsSync(laugh1Opus)) {
-      try {
-        await sock.sendMessage(jid, {
-          audio: fs.readFileSync(laugh1Opus),
-          mimetype: 'audio/ogg; codecs=opus',
-          ptt: true
-        });
-      } catch (aErr) {
-        logActivity(`Échec audio TomLaugh1 opus: ${aErr.message}`, 'warn');
-      }
-    } else if (fs.existsSync(laugh1Mpeg)) {
-      try {
-        await sock.sendMessage(jid, {
-          audio: fs.readFileSync(laugh1Mpeg),
-          mimetype: 'audio/mp4',
-          ptt: false
-        });
-      } catch (aErr) {
-        logActivity(`Échec audio TomLaugh1 mpeg: ${aErr.message}`, 'warn');
-      }
-    }
-
-    // 5. Récupérer les admins pour mention
+    // 4. Récupérer les admins pour mention
     let currentGroupData = groupData;
     if (!currentGroupData || !currentGroupData.participants) {
       currentGroupData = await getGroupDataSafely(sock, jid);
@@ -2600,11 +2594,11 @@ async function checkUserHasLinkedDevices(sock, userJid, forceFresh = false) {
     const cleanJid = `${phone}@s.whatsapp.net`;
     const now = Date.now();
 
-    // Cache intelligent court : si hasLinked est vrai, 1 minute; si faux, seulement 15 secondes
+    // Cache intelligent anti-ban : 15 minutes pour compte normal, 5 minutes pour compte lié
     if (!forceFresh) {
       const cached = botDeviceCheckCache.get(phone) || botDeviceCheckCache.get(cleanJid) || botDeviceCheckCache.get(strJid);
       if (cached) {
-        const maxAge = cached.hasLinked ? 60000 : 15000;
+        const maxAge = cached.hasLinked ? 300000 : 900000;
         if (now - cached.timestamp < maxAge) {
           return cached;
         }
@@ -2648,11 +2642,8 @@ async function checkUserHasLinkedDevices(sock, userJid, forceFresh = false) {
 
 /**
  * Procédure Officielle Anti-Bot (Support d'un ou plusieurs membres en simultané):
- * Si plusieurs membres sont détectés:
  * 1. Tag tous les membres ensemble dans UN SEUL message: (وينو عندو بوت) @user1 @user2 @user3
- * 2. Envoyer l'audio TomLaugh1.opus (PTT) UNE SEULE FOIS 🎙️
- * 3. Kick tous les membres
- * 4. Tag les admins dans un seul message récapitulatif
+ * 2. Kick tous les membres ciblés sans taguer les admins
  */
 async function executeAntiBotBatchProcedure(sock, jid, targetsList, groupData) {
   try {
@@ -2713,35 +2704,7 @@ async function executeAntiBotBatchProcedure(sock, jid, targetsList, groupData) {
       mentions: allUserMentions
     });
 
-    // 2. Envoyer l'audio TomLaugh1.opus (PTT) UNE SEULE FOIS
-    await sock.sendPresenceUpdate('recording', jid).catch(() => {});
-    await sleep(500);
-
-    const laugh1Opus = path.join(__dirname, 'Media', 'TomLaugh1.opus');
-    const laugh1Mpeg = path.join(__dirname, 'Media', 'TomLaugh1.mpeg');
-    if (fs.existsSync(laugh1Opus)) {
-      try {
-        await sock.sendMessage(jid, {
-          audio: fs.readFileSync(laugh1Opus),
-          mimetype: 'audio/ogg; codecs=opus',
-          ptt: true
-        });
-      } catch (aErr) {
-        logActivity(`Échec audio TomLaugh1 opus: ${aErr.message}`, 'warn');
-      }
-    } else if (fs.existsSync(laugh1Mpeg)) {
-      try {
-        await sock.sendMessage(jid, {
-          audio: fs.readFileSync(laugh1Mpeg),
-          mimetype: 'audio/mp4',
-          ptt: false
-        });
-      } catch (aErr) {
-        logActivity(`Échec audio TomLaugh1 mpeg: ${aErr.message}`, 'warn');
-      }
-    }
-
-    // 3. Kick tous les membres ciblés (rétrograder les admins détectés avant l'expulsion)
+    // 2. Kick tous les membres ciblés (rétrograder les admins détectés avant l'expulsion)
     for (const t of validTargets) {
       if (t.participant && (t.participant.admin === 'admin' || t.participant.admin === 'superadmin')) {
         const jidRem = t.participant?.id || t.participant?.jid || `${t.phone}@s.whatsapp.net`;
@@ -2760,44 +2723,6 @@ async function executeAntiBotBatchProcedure(sock, jid, targetsList, groupData) {
         await safeGroupParticipantsRemove(sock, jid, [jidRem]).catch(() => {});
       }
     }
-
-    // 4. Taguer les admins pour les informer en un seul message
-    const kickedPhones = validTargets.map(t => t.phone);
-    const adminParticipants = currentGroupData?.participants?.filter((adm) => {
-      if (adm.admin !== 'admin' && adm.admin !== 'superadmin') return false;
-      const admNum = (adm.id || adm.jid || '').split('@')[0].split(':')[0];
-      return !kickedPhones.includes(admNum) && admNum !== botNumber;
-    }) || [];
-
-    const adminMentions = [];
-    const adminTags = [];
-    for (const adm of adminParticipants) {
-      const rawJid = adm.id || adm.jid;
-      if (rawJid) {
-        adminMentions.push(rawJid);
-        const admNum = (adm.jid || adm.id).split('@')[0].split(':')[0];
-        adminTags.push(`@${admNum}`);
-      }
-    }
-
-    let alertText = `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🤖 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
-    alertText += `       🏰 *إمـبـراطـوريـة بـاراديـس* 🏰\n`;
-    alertText += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🚨 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n\n`;
-    alertText += `🤖 *رادار الـدفـاع: طـرد ${validTargets.length > 1 ? 'جـمـاعـي لـحـسـابـات مـرتـبـطـة' : 'حـسـاب مـرتـبـط'} بـبـوت / ويـب!* 🤖\n\n`;
-    alertText += `تـم رصـد حـسـابـات مـرتـبـطـة بـأجـهـزة خـارجـيـة / واتـسـاب ويـب / بـوت!\n\n`;
-    alertText += `⋄ الـعـدد : *${validTargets.length} حـسـاب*\n`;
-    alertText += `⋄ الـحـسـابـات : ${tagsText}\n`;
-    alertText += `⋄ الإجـراء : تـم الـطـرد الـفـوري مـن الـمـجـمـوعـة 👢\n\n`;
-    if (adminTags.length > 0) {
-      alertText += `👑 *إشـعـار لـلإدارة والـمـشـرفـيـن* :\n${adminTags.join(' ')}\n\n`;
-    }
-    alertText += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚔️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
-    alertText += `       🏰 *PARADIS EMPIRE DEFENSE* 🏰`;
-
-    await sock.sendMessage(jid, {
-      text: alertText,
-      mentions: [...adminMentions, ...allUserMentions]
-    });
 
   } catch (err) {
     console.error('Erreur executeAntiBotBatchProcedure:', err);
@@ -2837,7 +2762,6 @@ async function handleAntiBotParticipantCheck(botPhone, sock, update) {
           mentions: [p, `${cleanPhone}@s.whatsapp.net`].filter(Boolean)
         }).catch(() => {});
         await safeGroupParticipantsRemove(sock, jid, [p]).catch(() => {});
-        await safeBlockUser(sock, p).catch(() => {});
         continue;
       }
     }
@@ -2899,7 +2823,6 @@ async function handleGroupJoinRequestSecurity(botPhone, sock, update) {
       if (typeof sock.groupRequestParticipantsUpdate === 'function') {
         await sock.groupRequestParticipantsUpdate(jid, [participant], 'reject').catch(() => {});
       }
-      await safeBlockUser(sock, participant).catch(() => {});
       return;
     }
 
@@ -3522,30 +3445,6 @@ async function handleManualKickCommand(sock, jid, messageText, groupData, msg, s
         text: `هههه ولد العبد باغي اطرد المؤسس قاري فالزحام`,
         mentions: resolved.mentions
       }, { quoted: msg });
-
-      const laughOpus = path.join(__dirname, 'Media', 'TomLaugh.opus');
-      const laughMpeg = path.join(__dirname, 'Media', 'TomLaugh.mpeg');
-      if (fs.existsSync(laughOpus)) {
-        try {
-          await sock.sendMessage(jid, {
-            audio: fs.readFileSync(laughOpus),
-            mimetype: 'audio/ogg; codecs=opus',
-            ptt: true
-          });
-        } catch (aErr) {
-          logActivity(`Échec envoi audio TomLaugh opus: ${aErr.message}`, 'warn');
-        }
-      } else if (fs.existsSync(laughMpeg)) {
-        try {
-          await sock.sendMessage(jid, {
-            audio: fs.readFileSync(laughMpeg),
-            mimetype: 'audio/mp4',
-            ptt: false
-          });
-        } catch (aErr) {
-          logActivity(`Échec envoi audio TomLaugh mpeg: ${aErr.message}`, 'warn');
-        }
-      }
       return;
     }
 
@@ -4077,32 +3976,6 @@ async function handlePromoteCommand(sock, jid, messageText, msg, groupData) {
     await sock.sendMessage(jid, {
       text: `(ها كيفاش كيحس)`
     });
-
-    // Audio OMGWAW
-    const opusPath = path.join(__dirname, 'Media', 'OMGWAW.opus');
-    const mpegPath = path.join(__dirname, 'Media', 'OMGWAW.mpeg');
-
-    if (fs.existsSync(opusPath)) {
-      try {
-        await sock.sendMessage(jid, {
-          audio: fs.readFileSync(opusPath),
-          mimetype: 'audio/ogg; codecs=opus',
-          ptt: true
-        });
-      } catch (audioErr) {
-        logActivity(`Échec envoi audio promote opus: ${audioErr.message}`, 'warn');
-      }
-    } else if (fs.existsSync(mpegPath)) {
-      try {
-        await sock.sendMessage(jid, {
-          audio: fs.readFileSync(mpegPath),
-          mimetype: 'audio/mp4',
-          ptt: false
-        });
-      } catch (audioErr) {
-        logActivity(`Échec envoi audio promote mpeg: ${audioErr.message}`, 'warn');
-      }
-    }
   } catch (err) {
     console.error('Erreur handlePromoteCommand:', err);
     await sock.sendMessage(jid, { text: `❌ تـعـذر تـرقـيـة الـعـضـو : ${err.message}` });
@@ -4183,32 +4056,6 @@ async function handleDemoteCommand(sock, jid, messageText, msg, groupData) {
     await sock.sendMessage(jid, {
       text: `(خخخ شو كيبكي)`
     });
-
-    // Audio CRY
-    const opusPath = path.join(__dirname, 'Media', 'CRY.opus');
-    const mpegPath = path.join(__dirname, 'Media', 'CRY.mpeg');
-
-    if (fs.existsSync(opusPath)) {
-      try {
-        await sock.sendMessage(jid, {
-          audio: fs.readFileSync(opusPath),
-          mimetype: 'audio/ogg; codecs=opus',
-          ptt: true
-        });
-      } catch (audioErr) {
-        logActivity(`Échec envoi audio demote opus: ${audioErr.message}`, 'warn');
-      }
-    } else if (fs.existsSync(mpegPath)) {
-      try {
-        await sock.sendMessage(jid, {
-          audio: fs.readFileSync(mpegPath),
-          mimetype: 'audio/mp4',
-          ptt: false
-        });
-      } catch (audioErr) {
-        logActivity(`Échec envoi audio demote mpeg: ${audioErr.message}`, 'warn');
-      }
-    }
   } catch (err) {
     console.error('Erreur handleDemoteCommand:', err);
     await sock.sendMessage(jid, { text: `❌ تـعـذر تـنـزيـل الـعـضـو : ${err.message}` });
@@ -4645,12 +4492,9 @@ async function handleScanCommand(sock, jid, groupData, senderIsAdmin, senderIsSu
         mentions: Array.from(new Set(bMentions))
       }).catch(() => {});
       await safeGroupParticipantsRemove(sock, jid, bJids).catch(() => {});
-      for (const b of blacklistedDetected) {
-        await safeBlockUser(sock, b.rawJid).catch(() => {});
-      }
     }
 
-    // Exécuter l'expulsion groupée (un seul message avec tous les tags, et une seule note vocale) si Anti-Bot est activé
+    // Exécuter l'expulsion groupée si Anti-Bot est activé
     if (antibotActive && membersToKick.length > 0) {
       await executeAntiBotBatchProcedure(sock, jid, membersToKick, currentGroupData);
     }
