@@ -1391,11 +1391,8 @@ async function handleSessionMessages(botPhone, m) {
         continue;
       }
 
-      // Commande .requests / .request / .requeste (Group Admins / Sudo)
-      if (
-        isCmd('requests') || isCmd('request') || isCmd('requeste') ||
-        startsWithCmd('requests') || startsWithCmd('request') || startsWithCmd('requeste')
-      ) {
+      // Commande .requests (Group Admins / Sudo)
+      if (isCmd('requests')) {
         if (!senderIsAdmin && !senderIsSudo) {
           reactToMessage(sock, jid, msg.key, '🔒');
           continue;
@@ -1405,7 +1402,7 @@ async function handleSessionMessages(botPhone, m) {
           await sock.sendMessage(jid, { text: 'ℹ️ هذه العملية تعمل فقط داخل المجموعات.' });
           continue;
         }
-        await handleJoinRequestsListCommand(sock, jid, messageText, senderIsAdmin, senderIsSudo);
+        await handleJoinRequestsListCommand(sock, jid, senderIsAdmin, senderIsSudo);
         continue;
       }
 
@@ -5247,15 +5244,11 @@ function parseRequestIndices(argsString, totalRequests) {
 const lastDisplayedRequests = new Map();
 
 /**
- * Commande .requests / .request / .requeste / .طلبات (Group Admins / Sudo)
- * Liste et scanne les demandes d'adhésion en attente
- * Supporte:
- * - .request / .requests (liste complète avec état des appareils)
- * - .request 1 / .request a (scan approfondi du 1er candidat)
- * - .request 2, .request 3... (scan approfondi du candidat N)
- * - .request +212xxxxxxx (scan approfondi d'un numéro spécifique)
+ * Commande .requests (Group Admins / Sudo)
+ * Scanne toutes les demandes d'adhésion en attente et affiche UNIQUEMENT
+ * les comptes ayant des appareils connectés (linked devices / bots).
  */
-async function handleJoinRequestsListCommand(sock, jid, messageText = '', senderIsAdmin = false, senderIsSudo = false) {
+async function handleJoinRequestsListCommand(sock, jid, senderIsAdmin = false, senderIsSudo = false) {
   try {
     if (!senderIsAdmin && !senderIsSudo) {
       return;
@@ -5277,16 +5270,6 @@ async function handleJoinRequestsListCommand(sock, jid, messageText = '', sender
         text: '❌ *فـشـل الإجـراء* : يـجـب تـرقـيـة الـبـوت مـشـرفـاً (Admin) فـي الـمـجـمـوعـة لـعـرض وفـحـص طـلـبـات الانـضـمـام 🛡️' 
       });
       return;
-    }
-
-    const words = String(messageText || '').trim().split(/\s+/);
-    let arg = words.slice(1).join(' ').trim();
-    // Si l'utilisateur a écrit .request+212... sans espace
-    if (!arg && words[0]) {
-      const matchNoSpace = words[0].match(/^[.!/#]?(?:request|requests|requeste|طلبات)\+?([0-9a-zA-Z+]+)$/i);
-      if (matchNoSpace) {
-        arg = matchNoSpace[1];
-      }
     }
 
     const rawRequests = await sock.groupRequestParticipantsList(jid).catch(() => []);
@@ -5334,115 +5317,8 @@ async function handleJoinRequestsListCommand(sock, jid, messageText = '', sender
 
     lastDisplayedRequests.set(jid, allParsedRequests);
 
-    // ========================================================
-    // CAS A : Scan ciblé (.request 1, .request a, .request +212...)
-    // ========================================================
-    if (arg) {
-      let matched = null;
-      let targetIndex = null;
-
-      if (arg.toLowerCase() === 'a') {
-        targetIndex = 1;
-      } else if (/^\d+$/.test(arg) && parseInt(arg, 10) > 0 && parseInt(arg, 10) <= allParsedRequests.length) {
-        targetIndex = parseInt(arg, 10);
-      }
-
-      if (targetIndex !== null) {
-        matched = allParsedRequests[targetIndex - 1];
-      } else {
-        const cleanArgPhone = arg.replace(/[^0-9]/g, '');
-        if (cleanArgPhone) {
-          const last9 = cleanArgPhone.length >= 9 ? cleanArgPhone.slice(-9) : cleanArgPhone;
-          matched = allParsedRequests.find(r => {
-            if (r.phone === cleanArgPhone) return true;
-            if (r.phone && r.phone.endsWith(last9)) return true;
-            if (r.targetJid && r.targetJid.includes(cleanArgPhone)) return true;
-            return false;
-          });
-        }
-      }
-
-      // Si aucun candidat de la liste ne correspond au numéro demandé
-      if (!matched) {
-        const cleanTarget = arg.replace(/[^0-9]/g, '');
-        if (cleanTarget && cleanTarget.length >= 7) {
-          // Scanner quand même ce numéro pour renseigner l'admin
-          const check = await checkUserHasLinkedDevices(sock, `${cleanTarget}@s.whatsapp.net`, true);
-          const isBanned = isBannedUser(cleanTarget);
-          const isWhitelisted = isBotAllowed(jid, cleanTarget) || isPermanentWhitelisted(cleanTarget);
-
-          let text = `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🔍 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
-          text += `       🏰 *إمـبـراطـوريـة بـاراديـس* 🏰\n`;
-          text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🔍 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n\n`;
-          text += `🔍 *فـحـص خـارجـي لـلـرقـم* : +${cleanTarget}\n\n`;
-          text += `ℹ️ *الـحـالـة فـي الـمـجـمـوعـة* : لا يـوجـد لـه طـلـب انـضـمـام مـعـلـق حـالـيـاً.\n\n`;
-          text += `🛡️ *نـتـيـجـة فـحـص الأجـهـزة الـمـرتـبـطـة* :\n`;
-          text += `⋄ الأجـهـزة : ${check.count > 0 ? `⚠️ *مـرتـبـط بـ ${check.count} أجهزة* (واتـسـاب ويـب / بـوت)` : '🟢 *حـسـاب عـادي* (0 جـهـاز)'}\n`;
-          text += `⋄ الـقـائـمـة الـبـيـضـاء : ${isWhitelisted ? '🟢 مـصـرح لـه (Whitelisted)' : '⚪ غـيـر مـدرج'}\n`;
-          text += `⋄ سـجـل الـحـظـر الـعـام : ${isBanned ? '⛔ مـحـظـور (.ban)' : '🟢 نـظـيـف'}\n\n`;
-          text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚔️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
-          text += `       🏰 *PARADIS EMPIRE* 🏰`;
-          await sock.sendMessage(jid, { text });
-          return;
-        }
-
-        await sock.sendMessage(jid, { 
-          text: `❌ لـم يـتـم الـعـثـور عـلـى طـلـب انـضـمـام يـطـابـق : *${arg}*\n\n📋 اكـتـب *.requests* لـعـرض كـافـة الـطـلـبـات الـمـعـلـقـة.` 
-        });
-        return;
-      }
-
-      // Scanner en profondeur le candidat trouvé
-      const check = await checkUserHasLinkedDevices(sock, matched.targetJid || `${matched.phone}@s.whatsapp.net`, true);
-      const isBanned = isBannedUser(matched.phone);
-      const isPermanent = isPermanentWhitelisted(matched.targetJid) || isPermanentWhitelisted(matched.phone);
-      const isWhitelisted = isPermanent || isBotAllowed(jid, matched.phone) || isBotAllowed(jid, matched.targetJid);
-
-      let text = `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🔍 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
-      text += `       🏰 *إمـبـراطـوريـة بـاراديـس* 🏰\n`;
-      text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🔍 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n\n`;
-      text += `🔍 *تـقـريـر فـحـص طـلـب الانـضـمـام* [#${matched.displayIndex}] 🔍\n\n`;
-      text += `📱 *الـحـسـاب* : +${matched.phone} (@${matched.phone})\n`;
-      text += `🔢 *تـرتـيـب الـطـلـب* : [${matched.displayIndex} مـن أصـل ${allParsedRequests.length}]\n\n`;
-      text += `🛡️ *نـتـيـجـة فـحـص الأجـهـزة والـرادار* :\n`;
-      text += `⋄ الأجـهـزة الـمـرتـبـطـة : ${check.count > 0 ? `⚠️ *${check.count} أجهزة مرتبطة* (واتـسـاب ويـب / بـوت)` : '🟢 *0 جهاز* (حـسـاب هـاتـف عـادي)'}\n`;
-      text += `⋄ الـقـائـمـة الـبـيـضـاء : ${isWhitelisted ? '🟢 مـصـرح لـه (Whitelisted)' : '⚪ غـيـر مـدرج'}\n`;
-      text += `⋄ سـجـل الـحـظـر الـعـام : ${isBanned ? '⛔ مـحـظـور عـام (.ban)' : '🟢 نـظـيـف'}\n\n`;
-      text += `⚖️ *الـتـقـيـيـم الأمـنـي* :\n`;
-
-      if (isBanned) {
-        text += `⛔ *حـسـاب مـشـبـوه ومـحـظـور*، يُـنـصـح بـالـرفـض الـفـوري.\n\n`;
-      } else if (check.count > 0 && !isWhitelisted) {
-        text += `⚠️ *تـنـبـيـه* : الـحـسـاب يـسـتـخـدم أجـهـزة خـارجـيـة. إذا تـم قـبـولـه مـبـاشـرة فـسـيـقـوم مـضـاد الـبـوتـات بـطـرده مـا لـم تـقـم بـالـسـمـاح لـه أولاً عبر *.allowbot ${matched.phone}*\n\n`;
-      } else {
-        text += `✅ *حـسـاب آمـن تـمـامـاً*، يـمـكـن قـبـولـه بـأمـان.\n\n`;
-      }
-
-      text += `🔘 *الأوامـر الـتـنـفـيـذيـة* :\n`;
-      text += `⋄ لـلـقـبـول : *.accept ${matched.displayIndex}* أو *.accept +${matched.phone}*\n`;
-      text += `⋄ لـلـرفـض : *.reject ${matched.displayIndex}* أو *.reject +${matched.phone}*\n`;
-      if (check.count > 0 && !isWhitelisted) {
-        text += `⋄ لـلـسـمـاح كـبـوت : *.allowbot ${matched.phone}*\n`;
-      }
-      text += `\n⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚔️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
-      text += `       🏰 *PARADIS EMPIRE SECURITY* 🏰`;
-
-      const mentions = [matched.targetJid];
-      if (matched.phone) mentions.push(`${matched.phone}@s.whatsapp.net`);
-      await sock.sendMessage(jid, { text, mentions });
-      return;
-    }
-
-    // ========================================================
-    // CAS B : Liste complète de toutes les demandes (.request / .requests)
-    // ========================================================
-    let text = `⎔⋅• ━ ╼━ ╼╃ ⌬〔 📥 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
-    text += `       🏰 *إمـبـراطـوريـة بـاراديـس* 🏰\n`;
-    text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 📥 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n\n`;
-    text += `📥 *قـائـمـة طـلـبـات الانـضـمـام الـمـعـلـقـة* (${allParsedRequests.length}) :\n\n`;
-
-    const allMentions = [];
-
+    // Scanner tous les candidats et filtrer UNIQUEMENT ceux ayant des linked devices
+    const linkedDevicesRequests = [];
     for (let i = 0; i < allParsedRequests.length; i++) {
       const item = allParsedRequests[i];
       const check = await checkUserHasLinkedDevices(sock, item.targetJid || `${item.phone}@s.whatsapp.net`);
@@ -5450,22 +5326,59 @@ async function handleJoinRequestsListCommand(sock, jid, messageText = '', sender
       const isPermanent = isPermanentWhitelisted(item.targetJid) || isPermanentWhitelisted(item.phone);
       const isWhitelisted = isPermanent || isBotAllowed(jid, item.targetJid) || isBotAllowed(jid, item.phone);
 
+      const hasLinked = Boolean(check && (check.count > 0 || check.hasLinked));
+      if (hasLinked) {
+        linkedDevicesRequests.push({
+          ...item,
+          check,
+          isBanned,
+          isPermanent,
+          isWhitelisted
+        });
+      }
+    }
+
+    // Si aucun compte avec linked devices n'est détecté
+    if (linkedDevicesRequests.length === 0) {
+      let text = `⎔⋅• ━ ╼━ ╼╃ ⌬〔 📋 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+      text += `       🏰 *إمـبـراطـوريـة بـاراديـس* 🏰\n`;
+      text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 📋 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n\n`;
+      text += `📥 *فـحـص طـلـبـات الانـضـمـام الـمـعـلـقـة* (${allParsedRequests.length}) :\n\n`;
+      text += `✅ *لا يـوجـد أي حـسـاب مـرتـبـط بـأجـهـزة (Linked Devices / Bots) فـي طـلـبـات الانـضـمـام.*\n`;
+      text += `📱 جـمـيـع الـطـلـبـات (${allParsedRequests.length}) هـي لـحـسـابـات هـاتـف عـاديـة (0 جـهـاز).\n\n`;
+      text += `💡 *لـقـبـول كـل الـطـلـبـات* : *.accept all*\n`;
+      text += `💡 *لـرفـض كـل الـطـلـبـات* : *.reject all*\n\n`;
+      text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚔️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+      text += `       🏰 *PARADIS EMPIRE* 🏰`;
+      await sock.sendMessage(jid, { text });
+      return;
+    }
+
+    // Affichage UNIQUEMENT des comptes avec linked devices
+    let text = `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚠️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+    text += `       🏰 *إمـبـراطـوريـة بـاراديـس* 🏰\n`;
+    text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚠️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n\n`;
+    text += `⚠️ *الـحـسـابـات الـمـرتـبـطـة بـأجـهـزة / بـوتـات (Linked Devices)* :\n`;
+    text += `تـم كـشـف *${linkedDevicesRequests.length}* حـسـاب مـرتـبـط مـن أصـل *${allParsedRequests.length}* طـلـب مـعـلـق :\n\n`;
+
+    const allMentions = [];
+
+    for (let i = 0; i < linkedDevicesRequests.length; i++) {
+      const item = linkedDevicesRequests[i];
       let badge = '';
-      if (isBanned) {
+      if (item.isBanned) {
         badge = '⛔ مـحـظـور (.ban)';
-      } else if (isPermanent) {
-        badge = `🤖 مـرتـبـط بـبـوت (${check.count} أجهزة) ↬ 🛡️ [ثقة 100%]`;
-      } else if (isWhitelisted) {
-        badge = `🤖 مـرتـبـط بـبـوت (${check.count} أجهزة) ↬ 🛡️ [مسموح]`;
-      } else if (check.count > 0) {
-        badge = `⚠️ مـرتـبـط بـأجـهـزة (${check.count} أجهزة - بـوت/ويـب)`;
+      } else if (item.isPermanent) {
+        badge = `🤖 مـرتـبـط بـبـوت (${item.check.count} أجهزة) ↬ 🛡️ [ثقة 100%]`;
+      } else if (item.isWhitelisted) {
+        badge = `🤖 مـرتـبـط بـبـوت (${item.check.count} أجهزة) ↬ 🛡️ [مسموح]`;
       } else {
-        badge = '🟢 حـسـاب عـادي (0 جـهـاز)';
+        badge = `⚠️ مـرتـبـط بـأجـهـزة (${item.check.count} أجهزة - بـوت/ويـب)`;
       }
 
       text += `*${item.displayIndex}.* +${item.phone} (@${item.phone})\n`;
       text += `   ⋄ الـحـالـة : ${badge}\n`;
-      text += `   ⋄ فـحـص : *.request ${item.displayIndex}* | قـبـول : *.accept ${item.displayIndex}* | رفـض : *.reject ${item.displayIndex}*\n\n`;
+      text += `   ⋄ قـبـول : *.accept ${item.displayIndex}* | رفـض : *.reject ${item.displayIndex}*\n\n`;
 
       allMentions.push(`${item.phone}@s.whatsapp.net`);
       if (item.targetJid && item.targetJid !== `${item.phone}@s.whatsapp.net`) {
@@ -5474,11 +5387,11 @@ async function handleJoinRequestsListCommand(sock, jid, messageText = '', sender
     }
 
     text += `──────────────────────\n`;
-    text += `💡 *خـيـارات الـمـعـالـجـة الـسـريـعـة* :\n`;
-    text += `⋄ فـحـص طـلـب : *.request 1* أو *.request +212xxxx*\n`;
-    text += `⋄ قـبـول طـلـب : *.accept 1* أو *.accept +212xxxx*\n`;
+    text += `💡 *خـيـارات الـمـعـالـجـة* :\n`;
+    text += `⋄ قـبـول طـلـب : *.accept <الرقم>* أو *.accept +<الهاتف>*\n`;
+    text += `⋄ رفـض طـلـب : *.reject <الرقم>* أو *.reject +<الهاتف>*\n`;
     text += `⋄ قـبـول الـكـل : *.accept all*\n`;
-    text += `⋄ رفـض طـلـب : *.reject 1* أو *.reject +212xxxx*\n\n`;
+    text += `⋄ رفـض الـكـل : *.reject all*\n\n`;
     text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚔️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
     text += `       🏰 *PARADIS EMPIRE SECURITY* 🏰`;
 
