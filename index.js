@@ -392,9 +392,10 @@ async function startSession(phone, options = {}) {
     logger: logger,
     printQRInTerminal: false,
     mobile: false,
-    browser: Browsers.ubuntu('Chrome'),
+    browser: Browsers.macOS('Desktop'),
     syncFullHistory: false,
     markOnlineOnConnect: true,
+    keepAliveIntervalMs: 30000,
     connectTimeoutMs: 60000,
     defaultQueryTimeoutMs: 60000,
     getMessage: async (key) => {
@@ -728,6 +729,8 @@ function resolveRealPhoneNumber(jidOrLid) {
 /**
  * Résoudre un LID vers son numéro de téléphone réel via WhatsApp USync Query
  */
+const failedLidCache = new Map(); // cleanLidUser -> timestamp
+
 async function resolveLidToPhoneViaUSync(sock, lidJid) {
   try {
     if (!sock?.executeUSyncQuery || !USyncQuery || !USyncUser) return null;
@@ -736,6 +739,13 @@ async function resolveLidToPhoneViaUSync(sock, lidJid) {
 
     if (lidToPhoneCache.has(cleanLidUser)) {
       return lidToPhoneCache.get(cleanLidUser);
+    }
+
+    const now = Date.now();
+    const lastFailed = failedLidCache.get(cleanLidUser) || 0;
+    // Si la résolution a déjà échoué récemment (30 min), ne pas relancer de requête USync inutile vers WhatsApp
+    if (now - lastFailed < 30 * 60 * 1000) {
+      return null;
     }
 
     const usync = new USyncQuery().withContactProtocol().withLIDProtocol();
@@ -754,7 +764,10 @@ async function resolveLidToPhoneViaUSync(sock, lidJid) {
         }
       }
     }
-  } catch (_) {}
+    failedLidCache.set(cleanLidUser, now);
+  } catch (_) {
+    failedLidCache.set(cleanLidUser, Date.now());
+  }
   return null;
 }
 
@@ -788,6 +801,37 @@ async function getGroupDataSafely(sock, jid, forceRefresh = false) {
     if (fallback?.data) return fallback.data;
     return null;
   }
+}
+
+// Rate Limiter Anti-Spam pour les commandes
+const userCommandCooldown = new Map(); // senderId -> timestamp
+const groupCommandCooldown = new Map(); // jid -> array of timestamps
+const groupMentionCooldown = new Map(); // jid -> timestamp
+
+function checkCommandRateLimit(senderId, jid, isSudoUser) {
+  if (isSudoUser) return true; // Les SUDOs ont accès illimité sans cooldown
+
+  const now = Date.now();
+
+  // Cooldown par utilisateur : minimum 2.5s entre deux commandes
+  const lastUserCmd = userCommandCooldown.get(senderId) || 0;
+  if (now - lastUserCmd < 2500) {
+    return false;
+  }
+  userCommandCooldown.set(senderId, now);
+
+  // Cooldown par groupe : max 4 commandes toutes les 8 secondes
+  if (jid) {
+    let groupHistory = groupCommandCooldown.get(jid) || [];
+    groupHistory = groupHistory.filter(t => now - t < 8000);
+    if (groupHistory.length >= 4) {
+      return false; // Flood de commandes dans le groupe bloqué
+    }
+    groupHistory.push(now);
+    groupCommandCooldown.set(jid, groupHistory);
+  }
+
+  return true;
 }
 
 /**
@@ -856,8 +900,6 @@ async function handleSessionMessages(botPhone, m) {
         if (!senderIsAdmin && groupData) {
           senderIsAdmin = isAdmin(senderId, groupData);
         }
-        // Vérification et purge en arrière-plan de tout membre blacklisté dans ce groupe
-        checkAndPurgeBlacklistInGroup(sock, jid, groupData).catch(() => {});
       }
 
       let realSenderPhone = senderPhone;
@@ -900,6 +942,13 @@ async function handleSessionMessages(botPhone, m) {
       }
 
       const senderIsSudoEarly = isFromMe || isSudo(senderId) || (senderPhone && isSudo(senderPhone)) || (realSenderPhone && isSudo(realSenderPhone)) || isSelfUser(sock, senderId);
+
+      // Protection Anti-Ban Ultime : Ignorer silencieusement TOUT message privé (DM) venant d'un non-SUDO.
+      // Répondre à des inconnus en privé provoque des signalements "Spam / Bloquer" qui font bannir le numéro par WhatsApp.
+      if (!isGroup && !senderIsSudoEarly) {
+        logActivity(`[Anti-Ban] Message privé ignoré silencieusement pour non-Sudo: @${senderPhone || senderId}`);
+        continue;
+      }
 
       // 0. Protection Anti-Tabneed / Anti-Crash / Anti-Ban / Commandes Malveillantes Non Autorisées
       const isTabneedCmd = (
@@ -1013,6 +1062,11 @@ async function handleSessionMessages(botPhone, m) {
       // 2. En Mode Public: Seuls le Bot Owner et la liste Sudo (ou autorisés du groupe) peuvent utiliser le bot!
       if (isPrefixCommand && botMode === 'public' && !isOwner && !senderIsSudo && !senderIsGroupAllowed) {
         reactToMessage(sock, jid, msg.key, '🔒');
+        continue;
+      }
+
+      // Protection Anti-Flood / Anti-Spam sur les commandes (évite les rafales de commandes qui font bannir le bot)
+      if (isPrefixCommand && !checkCommandRateLimit(senderId, jid, senderIsSudo)) {
         continue;
       }
 
@@ -2948,6 +3002,17 @@ async function handleWarnCommand(sock, jid, messageText, groupData, msg) {
  */
 async function handleMentionCommand(sock, jid, messageText, groupData, senderId) {
   try {
+    const isSudoUser = isSudo(senderId) || isSelfUser(sock, senderId);
+    const lastMention = groupMentionCooldown.get(jid) || 0;
+    const now = Date.now();
+    if (!isSudoUser && now - lastMention < 45000) {
+      await sock.sendMessage(jid, { 
+        text: '⏳ *يـرجـى الانـتـظـار* : تـم اسـتـخـدام أمـر الـمـنـشـن حـديـثـاً فـي الـمـجـمـوعـة، انـتـظـر 45 ثـانـيـة لـحـمـايـة رقـم الـبـوت 🛡️' 
+      });
+      return;
+    }
+    groupMentionCooldown.set(jid, now);
+
     let currentGroupData = groupData;
     if (!currentGroupData || !currentGroupData.participants || currentGroupData.participants.length === 0) {
       try {
@@ -2993,11 +3058,12 @@ async function handleMentionCommand(sock, jid, messageText, groupData, senderId)
         phone = (p.id || p.lid || '').split('@')[0].split(':')[0];
       }
 
-      // Ajouter tous les identifiants possibles au set pour que WhatsApp valide le tag à 100%
-      if (p.id) allMentions.add(p.id);
-      if (p.jid) allMentions.add(p.jid);
-      if (p.lid) allMentions.add(p.lid);
-      if (primaryJid) allMentions.add(primaryJid);
+      // Ajouter uniquement le JID principal pour éviter de gonfler anormalement les stanzas WhatsApp
+      if (primaryJid) {
+        allMentions.add(primaryJid);
+      } else if (p.id) {
+        allMentions.add(p.id);
+      }
 
       const tagText = `@${phone}`;
 
