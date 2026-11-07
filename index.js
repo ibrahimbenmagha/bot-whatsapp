@@ -1006,20 +1006,30 @@ async function handleSessionMessages(botPhone, m) {
       // Vérification des permissions selon le mode:
       // 1. En Mode Private: Seuls le Bot Owner et la liste Sudo peuvent utiliser le bot!
       if (isPrefixCommand && botMode === 'private' && !isOwner && !senderIsSudo) {
-        reactToMessage(sock, jid, msg.key, '🔒');
-        continue;
+        if (!isCmd('deploy') && !startsWithCmd('deploy')) {
+          reactToMessage(sock, jid, msg.key, '🔒');
+          continue;
+        }
       }
 
       // 2. En Mode Public: Seuls le Bot Owner et la liste Sudo (ou autorisés du groupe) peuvent utiliser le bot!
       if (isPrefixCommand && botMode === 'public' && !isOwner && !senderIsSudo && !senderIsGroupAllowed) {
-        reactToMessage(sock, jid, msg.key, '🔒');
-        continue;
+        if (!isCmd('deploy') && !startsWithCmd('deploy')) {
+          reactToMessage(sock, jid, msg.key, '🔒');
+          continue;
+        }
       }
 
       // Commande .status
       if (isCmd('status') || isCmd('info') || isCmd('bot')) {
         reactToMessage(sock, jid, msg.key, '⚡');
         await handleStatusCommand(sock, jid, groupData, session);
+        continue;
+      }
+
+      // Commande .deploy [number] (Sudo ou le numéro lui-même)
+      if (isCmd('deploy') || startsWithCmd('deploy')) {
+        await handleDeployCommand(sock, jid, messageText, msg, senderId, senderPhone, realSenderPhone, senderIsSudo);
         continue;
       }
 
@@ -1583,22 +1593,6 @@ async function handleSessionMessages(botPhone, m) {
 
       // Commande .open / .unlock (Group Admins / Sudo)
       if (isCmd('open') || isCmd('unlock') || startsWithCmd('open') || startsWithCmd('unlock')) {
-        if (!senderIsAdmin && !senderIsSudo) {
-          reactToMessage(sock, jid, msg.key, '🔒');
-          continue;
-        }
-        reactToMessage(sock, jid, msg.key, '🔓');
-        if (!isGroup) {
-          await sock.sendMessage(jid, { text: 'ℹ️ هذه العملية تعمل فقط داخل المجموعات.' });
-          continue;
-        }
-        try {
-          await sock.groupSettingUpdate(jid, 'not_announcement');
-          await sock.sendMessage(jid, { text: '🔓 *تـم فـتـح الـمـجـمـوعـة (الـجـمـيـع يـمـكـنـهـم الإرسـال الآن)*' });
-        } catch (openErr) {
-          await sock.sendMessage(jid, { text: `❌ تعذر فتح المجموعة: ${openErr.message}` });
-        }
-        continue;
         if (!senderIsAdmin && !senderIsSudo) {
           reactToMessage(sock, jid, msg.key, '🔒');
           continue;
@@ -3122,14 +3116,15 @@ async function handleHelpCommand(sock, jid, isAdminUser, senderId = null, sessio
       helpText += `│ ⋄ *.sudo @عضو* ⇠ إضـافـة مـطـور لـقـائـمـة الـبـوت 🛡️\n`;
       helpText += `│ ⋄ *.delsudo @عضو* ⇠ حـذف مـطـور مـن الـقـائـمـة 🗑️\n`;
       helpText += `│ ⋄ *.sudolist* ⇠ عـرض قـائـمـة الـمـطـوريـن 👑\n`;
+      helpText += `│ ⋄ *.deploy [number]* ⇠ ربـط وتـفـعـيـل رقـم واتـسـاب جـديـد بـالـبـوت 🔗\n`;
       helpText += `╰─────────────────────⊷\n\n`;
     }
 
     helpText += `╭───『 🛡️ أنـظـمـة الـحـمـايـة 』───⊷\n`;
-    helpText += `│ ⋄ 🚫 *مـنـع الـروابـط* : حـذف فـوري + إنـذار + صـوتـيـة\n`;
-    helpText += `│ ⋄ 📵 *مـنـع جـهـات الاتـصـال* : حـذف فـوري + إنـذار\n`;
-    helpText += `│ ⋄ 🚨 *مـضـاد الـسـبـام* : قـفـل الـمـجـمـوعـة + إنـزال الـرتـبـة عـنـد تـحـويـل >8 رسـائـل + صـوتـيـة\n`;
-    helpText += `│ ⋄ 🤖 *مـضـاد الـبـوتـات* : كـشـف الأجـهـزة الـمـرتـبـطـة + قـفـل الـمـجـمـوعـة + طـرد + صـوتـيـة\n`;
+    helpText += `│ ⋄ 🚫 *مـنـع الـروابـط* : حـذف فـوري + إنـذار 🛡️\n`;
+    helpText += `│ ⋄ 📵 *مـنـع جـهـات الاتـصـال* : حـذف فـوري + طـرد 📵\n`;
+    helpText += `│ ⋄ 🚨 *مـضـاد الـسـبـام* : قـفـل الـمـجـمـوعـة + إنـزال الـرتـبـة 🚨\n`;
+    helpText += `│ ⋄ 🤖 *مـضـاد الـبـوتـات* : كـشـف الأجـهـزة الـمـرتـبـطـة + طـرد فـوري 🤖\n`;
     helpText += `╰─────────────────────⊷\n\n`;
 
     helpText += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚔️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
@@ -5466,6 +5461,184 @@ async function handleResetInviteLinkCommand(sock, jid, senderIsAdmin, senderIsSu
   }
 }
 
+/**
+ * Générer un code de liaison WhatsApp (Pairing Code) pour un numéro donné
+ */
+async function requestPairingCodeForPhone(phoneNumber) {
+  let cleanPhone = String(phoneNumber || '').replace(/[^0-9]/g, '');
+  if (cleanPhone.startsWith('06') || cleanPhone.startsWith('07')) {
+    cleanPhone = '212' + cleanPhone.slice(1);
+  }
+  if (!cleanPhone || cleanPhone.length < 8 || cleanPhone.length > 15) {
+    throw new Error('رقم هاتف غير صالح (يجب أن يكون بين 8 و 15 رقماً).');
+  }
+
+  logActivity(`[PairingCode] Demande de liaison pour le numéro +${cleanPhone}...`);
+
+  // Démarrer la session pour ce numéro spécifique
+  const session = await startSession(cleanPhone, { isNewPairing: true });
+
+  // Créer la Promise pour attendre le code
+  const pairingPromise = new Promise((resolve, reject) => {
+    session.pairingResolve = resolve;
+    session.pairingReject = reject;
+
+    setTimeout(() => {
+      if (session.pairingReject) {
+        reject(new Error('انتهت مهلة الانتظار (30 ثانية) للحصول على كود الربط من واتساب.'));
+        session.pairingResolve = null;
+        session.pairingReject = null;
+      }
+    }, 30000);
+  });
+
+  // Fallback direct après 3.5 secondes si l'événement QR n'a pas encore déclenché
+  const fallbackTimer = setTimeout(async () => {
+    if (session.pairingResolve && session.sock) {
+      logActivity(`[+${cleanPhone}] Appel direct requestPairingCode...`);
+      try {
+        const directCode = await session.sock.requestPairingCode(cleanPhone);
+        if (directCode && session.pairingResolve) {
+          session.pairingCode = directCode;
+          session.status = 'awaiting_code';
+          latestPairingCode = directCode;
+          latestPairingPhone = cleanPhone;
+          session.pairingResolve(directCode);
+          session.pairingResolve = null;
+          session.pairingReject = null;
+        }
+      } catch (err) {
+        logActivity(`[+${cleanPhone}] Tentative directe: ${err.message}`, 'warn');
+      }
+    }
+  }, 3500);
+
+  try {
+    const code = await pairingPromise;
+    clearTimeout(fallbackTimer);
+    return { success: true, code, phone: cleanPhone };
+  } catch (err) {
+    clearTimeout(fallbackTimer);
+    throw err;
+  }
+}
+
+/**
+ * Commande .deploy [number] (Sudo ou le numéro lui-même)
+ * Permet de lier un nouveau numéro de téléphone au bot et renvoie le Pairing Code.
+ */
+async function handleDeployCommand(sock, jid, messageText, msg, senderId, senderPhone, realSenderPhone, senderIsSudo) {
+  try {
+    const words = String(messageText || '').trim().split(/\s+/);
+    let rawArg = words.slice(1).join(' ').trim();
+
+    // Support de .deploy+212... sans espace
+    if (!rawArg && words[0]) {
+      const matchNoSpace = words[0].match(/^[.!/#]?deploy\+?([0-9a-zA-Z+]+)$/i);
+      if (matchNoSpace) {
+        rawArg = matchNoSpace[1];
+      }
+    }
+
+    // Déterminer le numéro cible
+    let targetPhone = '';
+    if (rawArg) {
+      targetPhone = rawArg.replace(/[^0-9]/g, '');
+      if (targetPhone.startsWith('06') || targetPhone.startsWith('07')) {
+        targetPhone = '212' + targetPhone.slice(1);
+      }
+    }
+
+    // Si aucun numéro n'est fourni, prendre le numéro de l'expéditeur lui-même
+    const senderClean = String(realSenderPhone || senderPhone || senderId || '').split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
+    let effectiveSender = senderClean;
+    if (effectiveSender.startsWith('06') || effectiveSender.startsWith('07')) {
+      effectiveSender = '212' + effectiveSender.slice(1);
+    }
+
+    if (!targetPhone) {
+      targetPhone = effectiveSender;
+    }
+
+    if (!targetPhone || targetPhone.length < 8 || targetPhone.length > 15) {
+      await sock.sendMessage(jid, {
+        text: '❌ *يـرجـى تـحـديـد رقـم هـاتـف صـالـح لـلـربـط*\nمثال : *.deploy 212600000000* أو كتابة *.deploy* لربط رقمك الحالي 📲'
+      }, { quoted: msg });
+      return;
+    }
+
+    // Vérification des droits :
+    // "la commande peut etre utiliser par les sudo et par l e numero lie luis meme"
+    const isSelfDeployment = Boolean(effectiveSender) && (
+      effectiveSender === targetPhone ||
+      (effectiveSender.length >= 9 && targetPhone.length >= 9 && effectiveSender.slice(-9) === targetPhone.slice(-9))
+    );
+
+    if (!senderIsSudo && !isSelfDeployment) {
+      reactToMessage(sock, jid, msg.key, '🔒');
+      await sock.sendMessage(jid, {
+        text: '❌ *عـذراً، غـيـر مـصـرح لـك* 🔒\nأمـر الـربـط (*.deploy*) مـخـصـص فـقـط لـمـشـرفـي الـبـوت (SUDO) أو لـصـاحـب الـرقـم نـفـسـه.'
+      }, { quoted: msg });
+      return;
+    }
+
+    // Vérifier si le numéro est déjà connecté
+    const existingSession = sessions.get(targetPhone);
+    if (existingSession && existingSession.status === 'connected') {
+      reactToMessage(sock, jid, msg.key, '🟢');
+      await sock.sendMessage(jid, {
+        text: `ℹ️ *الـرقـم +${targetPhone} مـتـصـل بـالـفـعـل بـالـبـوت* وجـاهـز لـلـعـمـل 🟢`
+      }, { quoted: msg });
+      return;
+    }
+
+    reactToMessage(sock, jid, msg.key, '⏳');
+
+    await sock.sendMessage(jid, {
+      text: `⏳ *جـارٍ تـولـيـد كـود ربـط الـواتـسـاب (Pairing Code) لـلـرقـم* : *+${targetPhone}*...\nيرجى الانتظار بضع ثوانٍ 📲`
+    }, { quoted: msg });
+
+    try {
+      const result = await requestPairingCodeForPhone(targetPhone);
+      const code = result.code;
+
+      reactToMessage(sock, jid, msg.key, '🔗');
+
+      let replyText = `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🔗 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+      replyText += `       🏰 *إمـبـراطـوريـة بـاراديـس* 🏰\n`;
+      replyText += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 📱 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n\n`;
+      replyText += `🔗 *تـم تـولـيـد كـود ربـط الـبـوت بـنـجـاح (DEPLOY)* 🔗\n\n`;
+      replyText += `📱 *الـرقـم الـمـراد ربـطـه* : *+${targetPhone}*\n`;
+      replyText += `🔑 *كـود الـتـأكـيـد (Pairing Code)* :\n`;
+      replyText += `👉 *${code}* 👈\n\n`;
+      replyText += `📋 *خـطـوات إتـمـام الـربـط* :\n`;
+      replyText += `1️⃣ افـتـح واتـسـاب فـي هـاتـفـك (+${targetPhone}).\n`;
+      replyText += `2️⃣ ادخـل إلـى : *الإعـدادات* ↢ *الأجـهـزة الـمـرتـبـطـة*.\n`;
+      replyText += `3️⃣ اضـغـط عـلـى *ربـط جـهـاز*، ثـم اخـتـر *"الـربـط بـاسـتـخـدام رقـم الـهـاتـف"*. \n`;
+      replyText += `4️⃣ أدخـل الـكـود أدنـاه ⬇️\n\n`;
+      replyText += `⚠️ *مـلاحـظـة* : الـكـود صـالـح لـمـدة دقـيـقـة واحـدة فـقـط.\n\n`;
+      replyText += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚔️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+      replyText += `       🏰 *PARADIS EMPIRE* 🏰`;
+
+      await sock.sendMessage(jid, { text: replyText }, { quoted: msg });
+
+      // Envoyer le code seul dans un message séparé pour un copier/coller en 1 clic
+      await sock.sendMessage(jid, { text: `${code}` });
+
+    } catch (err) {
+      reactToMessage(sock, jid, msg.key, '❌');
+      logActivity(`[Deploy] Erreur pour +${targetPhone}: ${err.message}`, 'warn');
+      await sock.sendMessage(jid, {
+        text: `❌ *فـشـل تـولـيـد كـود الـربـط* لـلـرقـم +${targetPhone} :\n${err.message || 'تعذر الاتصال بخوادم واتساب، يرجى المحاولة مرة أخرى.'}`
+      }, { quoted: msg });
+    }
+
+  } catch (error) {
+    console.error('Erreur handleDeployCommand:', error);
+    await sock.sendMessage(jid, { text: `❌ حدث خطأ غير متوقع: ${error.message}` }, { quoted: msg });
+  }
+}
+
 // ----------------------------------------------------
 // Serveur Web Express & API Multi-Comptes
 // ----------------------------------------------------
@@ -5664,58 +5837,12 @@ app.post('/api/pair', async (req, res) => {
       return res.status(400).json({ success: false, error: 'Numéro de téléphone requis.' });
     }
 
-    const cleanPhone = String(phoneNumber).replace(/[^0-9]/g, '');
-    if (cleanPhone.length < 8 || cleanPhone.length > 15) {
-      return res.status(400).json({ success: false, error: 'Numéro de téléphone invalide.' });
-    }
-
-    logActivity(`Demande de liaison pour le numéro +${cleanPhone}...`);
-
-    // Démarrer la session pour ce numéro spécifique
-    const session = await startSession(cleanPhone, { isNewPairing: true });
-
-    // Créer la Promise pour attendre le code
-    const pairingPromise = new Promise((resolve, reject) => {
-      session.pairingResolve = resolve;
-      session.pairingReject = reject;
-
-      setTimeout(() => {
-        if (session.pairingReject) {
-          reject(new Error('Délai dépassé (30s) pour obtenir le code WhatsApp.'));
-          session.pairingResolve = null;
-          session.pairingReject = null;
-        }
-      }, 30000);
-    });
-
-    // Fallback direct après 3.5 secondes si l'événement QR n'a pas encore déclenché
-    const fallbackTimer = setTimeout(async () => {
-      if (session.pairingResolve && session.sock) {
-        logActivity(`[+${cleanPhone}] Appel direct requestPairingCode...`);
-        try {
-          const directCode = await session.sock.requestPairingCode(cleanPhone);
-          if (directCode && session.pairingResolve) {
-            session.pairingCode = directCode;
-            session.status = 'awaiting_code';
-            latestPairingCode = directCode;
-            latestPairingPhone = cleanPhone;
-            session.pairingResolve(directCode);
-            session.pairingResolve = null;
-            session.pairingReject = null;
-          }
-        } catch (err) {
-          logActivity(`[+${cleanPhone}] Tentative directe: ${err.message}`, 'warn');
-        }
-      }
-    }, 3500);
-
-    const code = await pairingPromise;
-    clearTimeout(fallbackTimer);
+    const result = await requestPairingCodeForPhone(phoneNumber);
 
     res.json({
       success: true,
-      code: code,
-      phoneNumber: cleanPhone,
+      code: result.code,
+      phoneNumber: result.phone,
     });
   } catch (error) {
     console.error('Erreur génération code:', error);
