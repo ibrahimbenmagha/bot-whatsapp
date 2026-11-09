@@ -97,3 +97,4 @@
   - Activation du cache local 15 min sur `checkUserHasLinkedDevices` dans le module Anti-Bot en temps réel.
   - Suppression de l'envoi du message `(وينو عندو بوت)` avant les expulsions Anti-Bot pour supprimer les signalements d'utilisateurs et économiser les messages sortants.
   - Création du fichier de bord architectural `PROJECT_OVERVIEW.md`.
+
