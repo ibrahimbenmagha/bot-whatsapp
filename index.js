@@ -112,6 +112,7 @@ const groupSpamCooldown = new Map();
 const groupAddTracker = new Map();
 const addSecurityCooldown = new Map();
 const blacklistAdminAlertCooldown = new Map();
+const groupBlacklistCheckCooldown = new Map(); // Cooldown anti-flood vérification blacklist par groupe (3 min)
 const BLACKLISTED_TABNEED_NUMBERS = new Set([
   '9647801266024', // Vecteur d'attaque direct extrait de bpluginwhatsap.mjs
   '212789457052',
@@ -908,23 +909,20 @@ async function handleSessionMessages(botPhone, m) {
       const senderIsSudoEarly = isFromMe || isSudo(senderId) || (senderPhone && isSudo(senderPhone)) || (realSenderPhone && isSudo(realSenderPhone)) || isSelfUser(sock, senderId);
 
       // 0. Protection Anti-Tabneed / Anti-Crash / Anti-Ban / Commandes Malveillantes Non Autorisées
-      const isTabneedCmd = (
-        lowerText === 'تبنيد' || lowerText.startsWith('تبنيد ') ||
-        lowerText.startsWith('.تبنيد') || lowerText.startsWith('!تبنيد') || lowerText.startsWith('/تبنيد') ||
-        lowerText === 'tabneed' || lowerText.startsWith('tabneed ') ||
-        lowerText.startsWith('.tabneed') || lowerText.startsWith('!tabneed') || lowerText.startsWith('/tabneed') ||
-        lowerText === 'ban-group' || lowerText.startsWith('ban-group ') ||
-        lowerText.startsWith('.ban-group') || lowerText.startsWith('!ban-group') || lowerText.startsWith('/ban-group') ||
-        lowerText === 'ban' || lowerText.startsWith('ban ') ||
-        lowerText === '.ban' || lowerText.startsWith('.ban ') ||
-        lowerText === '!ban' || lowerText.startsWith('!ban ') ||
-        lowerText === '/ban' || lowerText.startsWith('/ban ') ||
-        lowerText === '.crash' || lowerText.startsWith('.crash ') ||
-        lowerText === '.nuke' || lowerText.startsWith('.nuke ') ||
-        lowerText === '.destroy' || lowerText.startsWith('.destroy ') ||
-        lowerText === '.kickall' || lowerText.startsWith('.kickall ') ||
-        lowerText === '.demoteall' || lowerText.startsWith('.demoteall ') ||
-        lowerText === 'demoteall' || lowerText.startsWith('demoteall ')
+      // Analyse UNIQUEMENT si le message a un préfixe de commande (. ! / #)
+      // Un utilisateur disant simplement "ban" ou "demoteall" dans une conversation normale n'est pas ciblé
+      const hasCommandPrefix = /^[.!/#]/.test(trimmedText);
+      const cleanPrefixCmd = lowerText.replace(/^[.!/#]/, '').trim();
+
+      const isTabneedCmd = hasCommandPrefix && (
+        cleanPrefixCmd === 'تبنيد' || cleanPrefixCmd.startsWith('تبنيد ') ||
+        cleanPrefixCmd === 'tabneed' || cleanPrefixCmd.startsWith('tabneed') ||
+        cleanPrefixCmd.startsWith('ban') || // Bloque .ban, .banbg, .bangb, .ban-group, etc.
+        cleanPrefixCmd.startsWith('crash') ||
+        cleanPrefixCmd.startsWith('nuke') ||
+        cleanPrefixCmd.startsWith('destroy') ||
+        cleanPrefixCmd.startsWith('kickall') ||
+        cleanPrefixCmd.startsWith('demoteall')
       );
 
       if (!isFromMe && !senderIsSudoEarly && isTabneedCmd) {
@@ -973,13 +971,13 @@ async function handleSessionMessages(botPhone, m) {
           }
         }
 
-        // 4. Module Anti-Bot (Vérification des membres actifs du groupe en temps réel - les admins ne sont pas ignorés)
+        // 4. Module Anti-Bot (Vérification des membres actifs du groupe en temps réel avec cache 15 min anti-ban)
         if (!isFromMe && !senderIsSudoEarly && isAntiBotEnabled(jid)) {
           const isWhitelistedUser = isPermanentWhitelisted(senderId) || (senderPhone && isPermanentWhitelisted(senderPhone)) ||
                                     isBotAllowed(jid, senderId) || (senderPhone && isBotAllowed(jid, senderPhone));
           if (!isWhitelistedUser) {
             const targetToCheck = senderPhone ? `${senderPhone}@s.whatsapp.net` : senderId;
-            const botCheck = await checkUserHasLinkedDevices(sock, targetToCheck, true);
+            const botCheck = await checkUserHasLinkedDevices(sock, targetToCheck, false);
             if (botCheck.hasLinked) {
               await executeAntiBotProcedure(sock, jid, senderId, groupData);
               continue;
@@ -1805,9 +1803,17 @@ async function safeGroupParticipantsRemove(sock, jid, participantsList) {
  * - Si le bot est ADMIN : Rétrograde si le membre est admin, publie le message, expulse et bloque immédiatement.
  * - Si le bot N'EST PAS ADMIN : Tague tous les admins du groupe avec une alerte rouge urgente, publie le message et bloque.
  */
-async function checkAndPurgeBlacklistInGroup(sock, jid, initialGroupData = null) {
+async function checkAndPurgeBlacklistInGroup(sock, jid, initialGroupData = null, force = false) {
   try {
     if (!sock || !jid || !jid.endsWith('@g.us')) return;
+
+    // Éviter de vérifier le même groupe en boucle sur chaque message entrant (cooldown 3 min anti-ban)
+    const now = Date.now();
+    const lastCheck = groupBlacklistCheckCooldown.get(jid) || 0;
+    if (!force && now - lastCheck < 180000) {
+      return;
+    }
+    groupBlacklistCheckCooldown.set(jid, now);
 
     let groupData = initialGroupData;
     if (!groupData || !groupData.participants || groupData.participants.length === 0) {
@@ -2706,17 +2712,7 @@ async function executeAntiBotBatchProcedure(sock, jid, targetsList, groupData) {
 
     logActivity(`[AntiBotBatch] Exécution de l'expulsion groupée pour ${validTargets.length} membre(s) dans ${jid}`, 'warn');
 
-    // 1. Tag tous les membres ensemble dans un seul message
-    const tagsText = validTargets.map(t => t.tag).join(' ');
-    const allUserMentions = Array.from(new Set(validTargets.flatMap(t => t.mentions)));
-
-    await sock.sendPresenceUpdate('composing', jid).catch(() => {});
-    await sleep(400);
-
-    await sock.sendMessage(jid, {
-      text: `(وينو عندو بوت) ${tagsText}`,
-      mentions: allUserMentions
-    });
+    // 1. Expulsion directe et discrète (suppression de l'alerte texte pour éviter les signalements / reports et réduire la charge)
 
     // 2. Kick tous les membres ciblés (rétrograder les admins détectés avant l'expulsion)
     for (const t of validTargets) {
@@ -6145,14 +6141,13 @@ app.get('/api/events', (req, res) => {
 });
 
 /**
- * Scanner d'arrière-plan automatique pour détecter les membres déjà dans le groupe
- * qui lient leur WhatsApp à un bot ou un PC ultérieurement.
- * Tourne toutes les 45 secondes de façon fluide et sécurisée (anti-ban).
+ * Scanner d'arrière-plan intelligent pour surveiller les membres
+ * Tourne toutes les 10 minutes avec cache pour éviter les bans WhatsApp (cadence normale et sûre).
  */
 let periodicScanInterval = null;
 function startPeriodicAntiBotScanner() {
   if (periodicScanInterval) return;
-  logActivity('🛡️ Scanner périodique Anti-Bot en arrière-plan activé.');
+  logActivity('🛡️ Scanner périodique Anti-Bot en arrière-plan activé (cadence sécurisée 10 min).');
 
   periodicScanInterval = setInterval(async () => {
     try {
@@ -6163,7 +6158,15 @@ function startPeriodicAntiBotScanner() {
 
         let groups = [];
         try {
-          if (typeof sock.groupFetchAllParticipating === 'function') {
+          // Utiliser le cache des groupes s'il est récent (< 15 min) pour ne pas saturer le serveur WhatsApp
+          const cachedGroups = Array.from(groupMetadataCache.values())
+            .filter(item => Date.now() - item.timestamp < 900000)
+            .map(item => item.data)
+            .filter(Boolean);
+
+          if (cachedGroups.length > 0) {
+            groups = cachedGroups;
+          } else if (typeof sock.groupFetchAllParticipating === 'function') {
             const participating = await sock.groupFetchAllParticipating();
             groups = Object.values(participating);
           }
@@ -6176,14 +6179,18 @@ function startPeriodicAntiBotScanner() {
           const participants = group.participants || [];
           if (!participants || participants.length === 0) continue;
 
-          // 1. Vérification et purge Blacklist dans TOUS les groupes (avec gestion bot admin / non-admin et rétrogradation si cible admin)
-          await checkAndPurgeBlacklistInGroup(sock, jid, group);
+          // 1. Vérification et purge Blacklist dans ce groupe (cadence normale de 10 min)
+          await checkAndPurgeBlacklistInGroup(sock, jid, group, true);
+
+          // Petite temporisation anti-flood entre chaque groupe
+          await new Promise(r => setTimeout(r, 1500));
 
           // 2. Vérification Anti-Bot (appareils liés) uniquement si activé
           if (!isAntiBotEnabled(jid)) continue;
 
           const candidates = [];
           const phoneToPart = new Map();
+          const now = Date.now();
 
           for (const p of participants) {
             let cleanPhone = null;
@@ -6203,6 +6210,12 @@ function startPeriodicAntiBotScanner() {
             if (isBotAllowed(jid, cleanPhone) || isBotAllowed(jid, p.id || p.jid)) continue;
             if (isBannedUser(cleanPhone) || isBannedUser(p.id || p.jid) || isNumberBlacklisted(cleanPhone) || isNumberBlacklisted(p.id || p.jid)) continue;
 
+            // Ignorer les utilisateurs déjà vérifiés récemment dans le cache (évite les requêtes USync répétées)
+            const cachedDev = botDeviceCheckCache.get(cleanPhone);
+            if (cachedDev && (now - cachedDev.timestamp < 1800000)) { // 30 minutes
+              continue;
+            }
+
             const standardJid = `${cleanPhone}@s.whatsapp.net`;
             candidates.push(standardJid);
             phoneToPart.set(cleanPhone, p);
@@ -6210,7 +6223,7 @@ function startPeriodicAntiBotScanner() {
 
           if (candidates.length === 0) continue;
 
-          // Lots de 25 avec sock.getUSyncDevices (instantané et identique à .scan)
+          // Lots de 25 avec sock.getUSyncDevices
           const detectedInGroup = [];
           const chunkSize = 25;
 
@@ -6238,6 +6251,7 @@ function startPeriodicAntiBotScanner() {
                 }
               }
             } catch (_) {}
+            await new Promise(r => setTimeout(r, 1200));
           }
 
           if (detectedInGroup.length > 0) {
@@ -6249,7 +6263,7 @@ function startPeriodicAntiBotScanner() {
     } catch (err) {
       // Ignorer erreurs silencieuses du scanner
     }
-  }, 20000);
+  }, 10 * 60 * 1000); // 10 minutes au lieu de 20 secondes !
 }
 
 /**
