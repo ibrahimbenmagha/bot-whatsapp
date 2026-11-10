@@ -89,6 +89,11 @@
 
 ## 5. Journal des Dernières Modifications
 
+* **2026-11-10 : Mise à jour de la Sudo List & Trust List Permanente**
+  - Ajout des numéros à la Sudo List et Trust List permanente : `+212788991779`, `+212626388283`, `+212709439701`, `+212699917192`, `+212607843575`.
+  - Retrait des numéros révoqués : `+212717716959`, `+212775395922`, `+212701645211`, `+212656476122`.
+  - Confirmation du statut Trust List : tout membre de la Sudo List bénéficie automatiquement de 100% d'immunité et d'autorisation des linked devices.
+
 * **2026-11-09 : Allègement drastique de la pression réseau (Anti-Ban du numéro WhatsApp)**
   - Augmentation de l'intervalle du scanner en arrière-plan de **20 secondes à 10 minutes**.
   - Remplacement des requêtes `groupFetchAllParticipating` systématiques par l'utilisation intelligente de `groupMetadataCache`.
