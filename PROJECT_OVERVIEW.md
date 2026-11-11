@@ -89,6 +89,10 @@
 
 ## 5. Journal des Dernières Modifications
 
+* **2026-11-11 : Harmonisation des messages de détection (WhatsApp Web)**
+  - Remplacement des mentions "Robot / Bot" dans les résultats `.scan`, `.requests` et alertes d'adhésion par la mention explicite : `يستخدم فقط واتساب ويب (WhatsApp Web)`.
+  - Explication des limites protocolaires : WhatsApp ne fournissant aucun tag "Windows/Mac/Linux" aux tiers, la distinction automatique par OS est impossible côté protocole ; la modération s'appuie sur la Trust List et le statut de modération (`.antibot on/off`).
+
 * **2026-11-10 : Mise à jour de la Sudo List & Trust List Permanente**
   - Ajout des numéros à la Sudo List et Trust List permanente : `+212788991779`, `+212626388283`, `+212709439701`, `+212699917192`, `+212607843575`.
   - Retrait des numéros révoqués : `+212717716959`, `+212775395922`, `+212701645211`, `+212656476122`.

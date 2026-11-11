@@ -2875,11 +2875,11 @@ async function handleGroupJoinRequestSecurity(botPhone, sock, update) {
     let alertText = `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚠️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
     alertText += `       🏰 *إمـبـراطـوريـة بـاراديـس* 🏰\n`;
     alertText += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🚨 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n\n`;
-    alertText += `🤖 *رادار الـكـشـف: طـلـب انـضـمـام مـن حـسـاب مـرتـبـط بـبـوت / ويـب!* 🤖\n\n`;
-    alertText += `تـم رصـد طـلـب انـضـمـام جـديـد مـن حـسـاب مـرتـبـط بـأجـهـزة خـارجـيـة قـبـل قـبـولـه:\n\n`;
+    alertText += `💻 *رادار الـكـشـف: طـلـب انـضـمـام مـن حـسـاب يـسـتـخـدم واتـسـاب ويـب* 💻\n\n`;
+    alertText += `تـم رصـد طـلـب انـضـمـام جـديـد مـن حـسـاب يـسـتـخـدم واتـسـاب ويـب / كـمـبـيـوتـر (WhatsApp Web):\n\n`;
     alertText += `⋄ الـحـسـاب : @${applicantPhone}\n`;
-    alertText += `⋄ عـدد الأجـهـزة الـمـرتـبـطـة : *${check.count} أجهزة* 📱\n`;
-    alertText += `⋄ الـحـالـة : *مـعـلـق فـي الانـتـظـار (لـم يـتـم قـبـولـه)* ⏳\n\n`;
+    alertText += `⋄ الـحـالـة : *يـسـتـخـدم فـقـط واتـسـاب ويـب (${check.count} أجهزة)* 💻\n`;
+    alertText += `⋄ الـوضـع : *مـعـلـق فـي الانـتـظـار (لـم يـتـم قـبـولـه بـعـد)* ⏳\n\n`;
 
     if (isWhitelisted) {
       alertText += `🛡️ *حـالـة الـحـسـاب* : هـذا الـحـسـاب مـوجـود بـالـفـعـل فـي الـقـائـمـة الـبـيـضـاء (Whitelisted) لـن يـتـم طـرده عـنـد الـقـبـول ✅.\n\n`;
@@ -4536,7 +4536,7 @@ async function handleScanCommand(sock, jid, groupData, senderIsAdmin, senderIsSu
           statusBadge = '👤 عضو (مـرتـبـط - بـدون طـرد)';
         }
 
-        text += `${idx + 1}️⃣ +${item.phone} (@${item.phone}) (${statusBadge}) ↬ *${item.deviceCount} جهاز مرتبط* 🤖\n`;
+        text += `${idx + 1}️⃣ +${item.phone} (@${item.phone}) (${statusBadge}) ↬ *يـسـتـخـدم فـقـط واتـسـاب ويـب (WhatsApp Web)* 💻\n`;
         allMentions.push(...item.mentions);
       });
       if (!antibotActive) {
@@ -5294,7 +5294,7 @@ async function handleJoinRequestsListCommand(sock, jid, senderIsAdmin = false, s
       } else if (item.isWhitelisted) {
         badge = `🤖 مـرتـبـط بـبـوت (${item.check.count} أجهزة) ↬ 🛡️ [مسموح]`;
       } else {
-        badge = `⚠️ مـرتـبـط بـأجـهـزة (${item.check.count} أجهزة - بـوت/ويـب)`;
+        badge = `💻 يـسـتـخـدم فـقـط واتـسـاب ويـب (WhatsApp Web)`;
       }
 
       text += `*${item.displayIndex}.* +${item.phone} (@${item.phone})\n`;
