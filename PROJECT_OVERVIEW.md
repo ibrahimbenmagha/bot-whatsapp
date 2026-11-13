@@ -89,6 +89,9 @@
 
 ## 5. Journal des Dernières Modifications
 
+* **2026-11-13 : Extension de la Sudo List & Trust List**
+  - Ajout des numéros à la Sudo List & Trust List permanente : `212628174140`, `212626297553` (déjà présent), `212784757103`, `212709126381`, `212778756917`.
+
 * **2026-11-13 : Résolution des doublons, ajout Sudo et commande Admin .del**
   - **Correction des doublons de messages / erreurs multiples :** Intégration d'un cache de déduplication global inter-sessions (`processedMessagesCache`), verrouillage d'exécution anti-concurrence (`activeCommandLocks`) pour `.scan` et `.requests`, et filtrage des messages de synchronisation/historiques (`m.type === 'append'` ou âge > 120s).
   - **Ajout à la Sudo List & Trust List permanente :** Inscription de `+212 730-157150` (`212730157150`) avec tous les privilèges d'immunité et de confiance.
