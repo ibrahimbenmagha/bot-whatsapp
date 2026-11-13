@@ -45,7 +45,7 @@
   - Module Anti-Bot & détection d'appareils liés via USync (`checkUserHasLinkedDevices`, `executeAntiBotBatchProcedure`).
   - Surveillance des entrées de groupe (`handleAntiBotParticipantCheck`).
 * **Lignes 3051 - 4200 :**
-  - Gestionnaires de commandes d'administration et Sudo (`handleHelpCommand`, `handleBlacklistCommand`, `handleBlacklistContactCommand`, `handleBanCommand`, `handleUnbanCommand`, `handleDeployCommand`).
+  - Gestionnaires de commandes d'administration et Sudo (`handleHelpCommand`, `handleDeleteMessageCommand`, `handleBlacklistCommand`, `handleBlacklistContactCommand`, `handleBanCommand`, `handleUnbanCommand`, `handleDeployCommand`).
 * **Lignes 4201 - 5600 :**
   - Scanner manuel (`handleScanCommand`), gestion des requêtes d'adhésion (`handleRequestsCommand`), Anti-Lien, Anti-Contact, Anti-Spam.
 * **Lignes 5601 - 6140 :**
@@ -88,6 +88,11 @@
 ---
 
 ## 5. Journal des Dernières Modifications
+
+* **2026-11-13 : Résolution des doublons, ajout Sudo et commande Admin .del**
+  - **Correction des doublons de messages / erreurs multiples :** Intégration d'un cache de déduplication global inter-sessions (`processedMessagesCache`), verrouillage d'exécution anti-concurrence (`activeCommandLocks`) pour `.scan` et `.requests`, et filtrage des messages de synchronisation/historiques (`m.type === 'append'` ou âge > 120s).
+  - **Ajout à la Sudo List & Trust List permanente :** Inscription de `+212 730-157150` (`212730157150`) avec tous les privilèges d'immunité et de confiance.
+  - **Nouvelle commande Admin `.del` (alias `.delete`, `.suppr`) :** Permet aux admins de groupe et aux sudos de supprimer n'importe quel message indésirable en y répondant par `.del`. Le bot supprime le message cité via révocation administrateur et supprime également la commande `.del`.
 
 * **2026-11-11 : Harmonisation des messages de détection (WhatsApp Web)**
   - Remplacement des mentions "Robot / Bot" dans les résultats `.scan`, `.requests` et alertes d'adhésion par la mention explicite : `يستخدم فقط واتساب ويب (WhatsApp Web)`.

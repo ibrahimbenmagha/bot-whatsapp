@@ -113,6 +113,18 @@ const groupAddTracker = new Map();
 const addSecurityCooldown = new Map();
 const blacklistAdminAlertCooldown = new Map();
 const groupBlacklistCheckCooldown = new Map(); // Cooldown anti-flood vérification blacklist par groupe (3 min)
+const processedMessagesCache = new Map(); // Déduplication globale des messages (msgId -> timestamp)
+const activeCommandLocks = new Set(); // Verrous anti-concurrence des commandes lourdes (`${jid}:${cmd}`)
+
+// Nettoyage périodique du cache de déduplication des messages (toutes les 5 minutes)
+setInterval(() => {
+  const now = Date.now();
+  for (const [id, ts] of processedMessagesCache.entries()) {
+    if (now - ts > 600000) { // Conserver 10 minutes max
+      processedMessagesCache.delete(id);
+    }
+  }
+}, 5 * 60 * 1000);
 const BLACKLISTED_TABNEED_NUMBERS = new Set([
   '9647801266024', // Vecteur d'attaque direct extrait de bpluginwhatsap.mjs
   '212789457052',
@@ -804,6 +816,9 @@ async function handleSessionMessages(botPhone, m) {
   const session = sessions.get(botPhone);
   if (!session || session.status !== 'connected' || !m.messages) return;
 
+  // 1. Ignorer les messages historiques (append / sync) pour éviter de rejouer d'anciennes commandes
+  if (m.type === 'append') return;
+
   const sock = session.sock;
   if (!sock) return;
 
@@ -813,6 +828,20 @@ async function handleSessionMessages(botPhone, m) {
 
       const jid = msg.key.remoteJid;
       if (!jid || jid === 'status@broadcast') continue;
+
+      // 2. Déduplication globale : si le message a déjà été traité (par cette session ou une autre session), ignorer !
+      const msgId = msg.key?.id;
+      if (msgId) {
+        if (processedMessagesCache.has(msgId)) continue;
+        processedMessagesCache.set(msgId, Date.now());
+      }
+
+      // 3. Ignorer les messages trop anciens (plus de 2 minutes) reçus lors d'une reconnexion
+      const msgTimestamp = Number(msg.messageTimestamp || 0);
+      if (msgTimestamp > 0) {
+        const ageSec = Math.floor(Date.now() / 1000) - msgTimestamp;
+        if (ageSec > 120) continue;
+      }
 
       const isGroup = isGroupMessage(jid);
       const isFromMe = Boolean(msg.key.fromMe);
@@ -1140,6 +1169,21 @@ async function handleSessionMessages(botPhone, m) {
         continue;
       }
 
+      // Commande .del / .delete / .suppr (Admin ou Sudo - supprime le message cité en tant qu'admin)
+      if (isCmd('del') || isCmd('delete') || isCmd('suppr') || startsWithCmd('del') || startsWithCmd('delete') || startsWithCmd('suppr')) {
+        if (!senderIsAdmin && !senderIsSudo) {
+          reactToMessage(sock, jid, msg.key, '🔒');
+          continue;
+        }
+        if (!isGroup) {
+          await sock.sendMessage(jid, { text: 'ℹ️ هذه العملية تعمل فقط داخل المجموعات.' });
+          continue;
+        }
+        reactToMessage(sock, jid, msg.key, '🗑️');
+        await handleDeleteMessageCommand(sock, jid, msg, groupData);
+        continue;
+      }
+
       // Commande secrète .ban (Sudo / Owner exclusif - non répertoriée dans les menus)
       if (startsWithCmd('ban') || isCmd('ban')) {
         if (!senderIsSudo) {
@@ -1338,7 +1382,17 @@ async function handleSessionMessages(botPhone, m) {
           await sock.sendMessage(jid, { text: 'ℹ️ هذه العملية تعمل فقط داخل المجموعات.' });
           continue;
         }
-        await handleScanCommand(sock, jid, groupData, senderIsAdmin, senderIsSudo);
+        const lockKey = `${jid}:scan`;
+        if (activeCommandLocks.has(lockKey)) {
+          logActivity(`[Scan] Ignoré : un scan est déjà en cours dans le groupe ${jid}`);
+          continue;
+        }
+        activeCommandLocks.add(lockKey);
+        try {
+          await handleScanCommand(sock, jid, groupData, senderIsAdmin, senderIsSudo);
+        } finally {
+          activeCommandLocks.delete(lockKey);
+        }
         continue;
       }
 
@@ -1540,7 +1594,17 @@ async function handleSessionMessages(botPhone, m) {
           await sock.sendMessage(jid, { text: 'ℹ️ هذه العملية تعمل فقط داخل المجموعات.' });
           continue;
         }
-        await handleJoinRequestsListCommand(sock, jid, senderIsAdmin, senderIsSudo);
+        const lockKey = `${jid}:requests`;
+        if (activeCommandLocks.has(lockKey)) {
+          logActivity(`[Requests] Ignoré : une commande requests est déjà en cours dans le groupe ${jid}`);
+          continue;
+        }
+        activeCommandLocks.add(lockKey);
+        try {
+          await handleJoinRequestsListCommand(sock, jid, senderIsAdmin, senderIsSudo);
+        } finally {
+          activeCommandLocks.delete(lockKey);
+        }
         continue;
       }
 
@@ -3120,6 +3184,7 @@ async function handleHelpCommand(sock, jid, isAdminUser, senderId = null, sessio
       helpText += `│ ⋄ *.warnings @عضو* ⇠ فـحـص إنـذارات عـضـو 📋\n`;
       helpText += `│ ⋄ *.resetwarn @عضو* ⇠ تـصـفـيـر إنـذارات عـضـو 🔄\n`;
       helpText += `│ ⋄ *.kick @عضو* ⇠ طـرد عـضـو مـن الـمـجـمـوعـة 🚪\n`;
+      helpText += `│ ⋄ *.del* ⇠ حـذف الـرسـالـة الـمـردود عـلـيـهـا (لـلـمـشـرفـيـن) 🗑️\n`;
       helpText += `│ ⋄ *.allow @عضو* ⇠ الـسـمـاح لـعـضـو بـاسـتـخـدام الـبـوت (لـهـذه الـمـجـمـوعـة) 👤\n`;
       helpText += `│ ⋄ *.disallow @عضو* ⇠ إلـغـاء صـلاحـيـة اسـتـخـدام الـبـوت فـي الـمـجـمـوعـة 🚫\n`;
       helpText += `│ ⋄ *.allowedusers* ⇠ قـائـمـة الأعـضـاء الـمـصـرح لـهـم فـي هـذه الـمـجـمـوعـة 📋\n`;
@@ -3482,6 +3547,68 @@ async function handleManualKickCommand(sock, jid, messageText, groupData, msg, s
     resetWarnings(jid, resolved.phone, resolved.mentions);
   } catch (err) {
     console.error('Erreur !kick:', err);
+  }
+}
+
+/**
+ * Supprime le message cité en tant qu'administrateur (.del / .delete / .suppr)
+ */
+async function handleDeleteMessageCommand(sock, jid, msg, groupData) {
+  try {
+    const botId = sock.user?.id || '';
+    let currentGroupData = groupData;
+    if (!currentGroupData || !currentGroupData.participants) {
+      try { currentGroupData = await getGroupDataSafely(sock, jid); } catch (_) {}
+    }
+    const botIsAdmin = isAdmin(botId, currentGroupData);
+
+    if (!botIsAdmin) {
+      reactToMessage(sock, jid, msg.key, '⚠️');
+      await sock.sendMessage(jid, {
+        text: '❌ *لا يمكن حذف الرسالة* : يجب ترقية البوت مشرفاً (Admin) في المجموعة ليتمكن من حذف رسائل الأعضاء 🛡️'
+      }, { quoted: msg });
+      return;
+    }
+
+    // Récupérer les informations du message cité
+    const msgObj = msg.message;
+    const contextInfo = msgObj?.extendedTextMessage?.contextInfo
+      || msgObj?.imageMessage?.contextInfo
+      || msgObj?.videoMessage?.contextInfo
+      || msgObj?.documentMessage?.contextInfo
+      || msgObj?.audioMessage?.contextInfo
+      || msgObj?.stickerMessage?.contextInfo
+      || msgObj?.viewOnceMessage?.message?.imageMessage?.contextInfo
+      || msgObj?.viewOnceMessage?.message?.videoMessage?.contextInfo;
+
+    const stanzaId = contextInfo?.stanzaId;
+    const participant = contextInfo?.participant;
+
+    if (!stanzaId) {
+      reactToMessage(sock, jid, msg.key, '❓');
+      await sock.sendMessage(jid, {
+        text: '⚠️ *طريقة الاستخدام* :\nقم بالرد (Reply) على الرسالة المراد حذفها واكتب *.del*'
+      }, { quoted: msg });
+      return;
+    }
+
+    const deleteKey = {
+      remoteJid: jid,
+      fromMe: Boolean(participant ? isSelfUser(sock, participant) : false),
+      id: stanzaId,
+      participant: participant || undefined
+    };
+
+    // 1. Supprimer le message cité pour tout le monde (Admin Revoke)
+    await sock.sendMessage(jid, { delete: deleteKey });
+
+    // 2. Supprimer également le message de commande .del lui-même pour laisser le chat propre
+    await sock.sendMessage(jid, { delete: msg.key }).catch(() => {});
+  } catch (err) {
+    console.error('Erreur handleDeleteMessageCommand:', err);
+    await sock.sendMessage(jid, {
+      text: `❌ حدث خطأ أثناء حذف الرسالة: ${err.message}`
+    }, { quoted: msg }).catch(() => {});
   }
 }
 
