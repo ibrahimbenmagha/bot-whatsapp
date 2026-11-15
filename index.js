@@ -65,7 +65,17 @@ import {
   removeBannedUser,
   getBannedUsers,
   isKickingEnabled,
-  setKickingEnabled
+  setKickingEnabled,
+  isAutoCleanEnabled,
+  setAutoCleanEnabled,
+  getGroupSleepSchedule,
+  setGroupSleepSchedule,
+  getAllSleepSchedules,
+  isUserMuted,
+  muteUser,
+  unmuteUser,
+  isAntiDeleteEnabled,
+  setAntiDeleteEnabled
 } from './db.js';
 import { isAdmin, extractMessage, containsUrl, isGroupMessage, formatMention, normalizeJid } from './utils/helpers.js';
 
@@ -290,12 +300,31 @@ function migrateLegacySession() {
 // Système de Protection Anti-Ban Haute Performance
 // ----------------------------------------------------
 
-// 1. Cache en mémoire des messages récents pour permettre la renégociation de session et retries
-const recentMessagesStore = new Map(); // key.id -> proto.IMessage (max 3000)
+// 1. Cache en mémoire des messages récents pour renégociation de session, retries et Anti-Delete
+const recentMessagesStore = new Map(); // key.id -> { message, rawMsg, sender, senderPhone, pushName, jid, timestamp } (max 3000)
 function storeRecentMessage(msg) {
   try {
     if (msg?.key?.id && msg?.message) {
-      recentMessagesStore.set(msg.key.id, msg.message);
+      // Ne pas écraser les messages normaux par un protocole de type suppression
+      if (msg.message.protocolMessage) return;
+
+      const rawSender = msg.key?.participant || msg.participant || (msg.key?.fromMe ? 'bot' : null) || msg.key?.remoteJid;
+      const cleanSender = rawSender ? normalizeJid(rawSender) : null;
+      let senderPhone = '';
+      if (cleanSender) {
+        senderPhone = cleanSender.split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
+      }
+
+      recentMessagesStore.set(msg.key.id, {
+        message: msg.message,
+        rawMsg: msg,
+        sender: cleanSender,
+        senderPhone: senderPhone,
+        pushName: msg.pushName || '',
+        jid: msg.key.remoteJid,
+        timestamp: Number(msg.messageTimestamp || Math.floor(Date.now() / 1000)),
+      });
+
       if (recentMessagesStore.size > 3000) {
         const firstKey = recentMessagesStore.keys().next().value;
         recentMessagesStore.delete(firstKey);
@@ -418,7 +447,8 @@ async function startSession(phone, options = {}) {
     defaultQueryTimeoutMs: 60000,
     getMessage: async (key) => {
       if (key?.id && recentMessagesStore.has(key.id)) {
-        return recentMessagesStore.get(key.id);
+        const stored = recentMessagesStore.get(key.id);
+        return stored?.message || stored;
       }
       return undefined;
     },
@@ -671,6 +701,7 @@ async function handleSessionConnectionUpdate(phone, update, isNewPairing) {
       sessions.delete(phone);
       logActivity(`[+${phone}] Session supprimée suite à déconnexion sur le téléphone.`, 'warn');
       broadcastSSE({ type: 'session_deleted', phone });
+      notifySudoDisconnect(phone, 'تم تسجيل الخروج من الهاتف (Logged Out) ❌').catch(() => {});
     } else if (statusCode === DisconnectReason.restartRequired || statusCode === 515) {
       // Code 515: WhatsApp a validé le jumelage sur le téléphone et demande le redémarrage
       logActivity(`[+${phone}] 🎉 Validé sur le téléphone ! Redémarrage immédiat (code 515)...`, 'system');
@@ -683,6 +714,9 @@ async function handleSessionConnectionUpdate(phone, update, isNewPairing) {
     } else if (session.authState?.creds?.registered) {
       // Reconnexion automatique pour compte déjà enregistré
       session.connectionAttempts++;
+      if (session.connectionAttempts === 5) {
+        notifySudoDisconnect(phone, 'فشل الاتصال المتكرر بالسيرفر (Connection Drops) ⚠️').catch(() => {});
+      }
       const delay = Math.min(session.connectionAttempts * 3000, 15000);
       logActivity(`[+${phone}] Reconnexion dans ${delay / 1000}s... (tentative ${session.connectionAttempts})`);
       setTimeout(() => {
@@ -824,10 +858,30 @@ async function handleSessionMessages(botPhone, m) {
 
   try {
     for (const msg of m.messages) {
-      if (!msg.message) continue;
+      if (!msg.message && !msg.messageStubType) continue;
 
       const jid = msg.key.remoteJid;
       if (!jid || jid === 'status@broadcast') continue;
+
+      // 1.5 Nettoyage automatique des messages système (.autoclean)
+      if (isGroupMessage(jid) && msg.messageStubType) {
+        if (isAutoCleanEnabled(jid)) {
+          await sock.sendMessage(jid, { delete: msg.key }).catch(() => {});
+        }
+        continue;
+      }
+
+      if (!msg.message) continue;
+
+      // 1.6 Anti-Suppression pour Admins (Anti-Delete / Logs vers le numéro connecté du bot)
+      const protoMsg = msg.message?.protocolMessage || msg.message?.ephemeralMessage?.message?.protocolMessage || msg.message?.viewOnceMessage?.message?.protocolMessage;
+      if (protoMsg && (protoMsg.type === 0 || protoMsg.type === 'REVOKE' || String(protoMsg.type) === '0')) {
+        const deletedKey = protoMsg.key;
+        if (deletedKey?.id) {
+          await handleAntiDeleteRevocation(sock, botPhone, jid, deletedKey, msg);
+        }
+        continue;
+      }
 
       // 2. Déduplication globale : si le message a déjà été traité (par cette session ou une autre session), ignorer !
       const msgId = msg.key?.id;
@@ -936,6 +990,33 @@ async function handleSessionMessages(botPhone, m) {
       }
 
       const senderIsSudoEarly = isFromMe || isSudo(senderId) || (senderPhone && isSudo(senderPhone)) || (realSenderPhone && isSudo(realSenderPhone)) || isSelfUser(sock, senderId);
+
+      // 0.A Vérification si l'utilisateur est Mute (.mute) dans ce groupe
+      if (isGroup && !isFromMe && !senderIsSudoEarly) {
+        const userIsMuted = isUserMuted(jid, senderId) || (senderPhone && isUserMuted(jid, senderPhone)) || (realSenderPhone && isUserMuted(jid, realSenderPhone));
+        if (userIsMuted) {
+          await sock.sendMessage(jid, { delete: msg.key }).catch(() => {});
+          continue;
+        }
+      }
+
+      // 0.B Détection des attaques et scripts anormaux (Counter-Strike & Neutralisation)
+      if (!isFromMe && !senderIsSudoEarly) {
+        const attackDetected = detectAbnormalAttack(trimmedText, msg);
+        if (attackDetected) {
+          await executeCounterAttack(sock, jid, senderId, realSenderPhone || senderPhone, trimmedText, attackDetected, isGroup, groupData, msg);
+          continue;
+        }
+      }
+
+      // 0.C Détection des requêtes anormales en rafale sur le groupe (Flood Protection)
+      if (isGroup && !isFromMe && !senderIsAdmin && !senderIsSudoEarly) {
+        const isFlooding = checkGroupRequestFlood(jid, realSenderPhone || senderPhone || senderId);
+        if (isFlooding) {
+          await sock.sendMessage(jid, { delete: msg.key }).catch(() => {});
+          continue;
+        }
+      }
 
       // 0. Protection Anti-Tabneed / Anti-Crash / Anti-Ban / Commandes Malveillantes Non Autorisées
       // Analyse UNIQUEMENT si le message a un préfixe de commande (. ! / #)
@@ -1231,6 +1312,125 @@ async function handleSessionMessages(botPhone, m) {
         }
         reactToMessage(sock, jid, msg.key, '📋');
         await handleBlacklistCommand(sock, jid, msg);
+        continue;
+      }
+
+      // Commande .mute @user [temps] (Group Admins / Sudo)
+      if (startsWithCmd('mute') || isCmd('mute')) {
+        if (!senderIsAdmin && !senderIsSudo) {
+          reactToMessage(sock, jid, msg.key, '🔒');
+          continue;
+        }
+        reactToMessage(sock, jid, msg.key, '🔇');
+        if (!isGroup) {
+          await sock.sendMessage(jid, { text: 'ℹ️ هذه العملية تعمل فقط داخل المجموعات.' });
+          continue;
+        }
+        await handleMuteCommand(sock, jid, messageText, groupData, msg, senderIsSudo);
+        continue;
+      }
+
+      // Commande .unmute @user (Group Admins / Sudo)
+      if (startsWithCmd('unmute') || isCmd('unmute')) {
+        if (!senderIsAdmin && !senderIsSudo) {
+          reactToMessage(sock, jid, msg.key, '🔒');
+          continue;
+        }
+        reactToMessage(sock, jid, msg.key, '🔊');
+        if (!isGroup) {
+          await sock.sendMessage(jid, { text: 'ℹ️ هذه العملية تعمل فقط داخل المجموعات.' });
+          continue;
+        }
+        await handleUnmuteCommand(sock, jid, messageText, groupData, msg);
+        continue;
+      }
+
+      // Commande .sleep [HH:MM-HH:MM / off / status] (Group Admins / Sudo)
+      if (startsWithCmd('sleep') || isCmd('sleep')) {
+        if (!senderIsAdmin && !senderIsSudo) {
+          reactToMessage(sock, jid, msg.key, '🔒');
+          continue;
+        }
+        reactToMessage(sock, jid, msg.key, '🌙');
+        if (!isGroup) {
+          await sock.sendMessage(jid, { text: 'ℹ️ هذه العملية تعمل فقط داخل المجموعات.' });
+          continue;
+        }
+        await handleSleepScheduleCommand(sock, jid, messageText, msg);
+        continue;
+      }
+
+      // Commande .autoclean [on/off] (Group Admins / Sudo)
+      if (startsWithCmd('autoclean') || isCmd('autoclean')) {
+        if (!senderIsAdmin && !senderIsSudo) {
+          reactToMessage(sock, jid, msg.key, '🔒');
+          continue;
+        }
+        reactToMessage(sock, jid, msg.key, '🧹');
+        if (!isGroup) {
+          await sock.sendMessage(jid, { text: 'ℹ️ هذه العملية تعمل فقط داخل المجموعات.' });
+          continue;
+        }
+        await handleAutoCleanToggleCommand(sock, jid, messageText, msg);
+        continue;
+      }
+
+      // Commande .lockdown / .urgence (Group Admins / Sudo)
+      if (isCmd('lockdown') || isCmd('urgence') || startsWithCmd('lockdown') || startsWithCmd('urgence')) {
+        if (!senderIsAdmin && !senderIsSudo) {
+          reactToMessage(sock, jid, msg.key, '🔒');
+          continue;
+        }
+        reactToMessage(sock, jid, msg.key, '🚨');
+        if (!isGroup) {
+          await sock.sendMessage(jid, { text: 'ℹ️ هذه العملية تعمل فقط داخل المجموعات.' });
+          continue;
+        }
+        await handleLockdownCommand(sock, jid, msg, groupData);
+        continue;
+      }
+
+      // Commande .unlockdown / .reopen (Group Admins / Sudo)
+      if (isCmd('unlockdown') || isCmd('reopen') || startsWithCmd('unlockdown') || startsWithCmd('reopen')) {
+        if (!senderIsAdmin && !senderIsSudo) {
+          reactToMessage(sock, jid, msg.key, '🔒');
+          continue;
+        }
+        reactToMessage(sock, jid, msg.key, '🛡️');
+        if (!isGroup) {
+          await sock.sendMessage(jid, { text: 'ℹ️ هذه العملية تعمل فقط داخل المجموعات.' });
+          continue;
+        }
+        await handleUnlockdownCommand(sock, jid, msg, groupData);
+        continue;
+      }
+
+      // Commande .ping / .health (Vérification de l'état du bot et latence)
+      if (isCmd('ping') || isCmd('health') || isCmd('speed')) {
+        reactToMessage(sock, jid, msg.key, '⚡');
+        await handlePingCommand(sock, jid, msg);
+        continue;
+      }
+
+      // Commande .broadcast / .bc [texte] (Sudo uniquement)
+      if (startsWithCmd('broadcast') || isCmd('broadcast') || startsWithCmd('bc') || isCmd('bc')) {
+        if (!senderIsSudo) {
+          reactToMessage(sock, jid, msg.key, '🔒');
+          continue;
+        }
+        reactToMessage(sock, jid, msg.key, '📢');
+        await handleBroadcastCommand(sock, jid, messageText, msg);
+        continue;
+      }
+
+      // Commande .antidelete [on/off] (Group Admins / Sudo)
+      if (startsWithCmd('antidelete') || isCmd('antidelete')) {
+        if (!senderIsAdmin && !senderIsSudo) {
+          reactToMessage(sock, jid, msg.key, '🔒');
+          continue;
+        }
+        reactToMessage(sock, jid, msg.key, '🗑️');
+        await handleAntiDeleteToggleCommand(sock, jid, messageText, msg);
         continue;
       }
 
@@ -3150,6 +3350,7 @@ async function handleHelpCommand(sock, jid, isAdminUser, senderId = null, sessio
     helpText += `╭───『 📜 أوامـر الأعـضـاء 』───⊷\n`;
     helpText += `│ ⋄ *.menu* ⇠ عـرض قـائـمـة الأوامـر 🤖\n`;
     helpText += `│ ⋄ *.status* ⇠ مـعـلـومـات وحـالـة الـبـوت ⚡\n`;
+    helpText += `│ ⋄ *.ping* / *.health* ⇠ فـحـص سـرعـة الاسـتـجـابـة وصـحـة الـنـظـام ⚡\n`;
     helpText += `│ ⋄ *.rulls* ⇠ قـوانـيـن الـمـجـمـوعـة 📜\n`;
     helpText += `│ ⋄ *.warnings* ⇠ فـحـص الإنـذارات 📋\n`;
     helpText += `╰─────────────────────⊷\n\n`;
@@ -3159,6 +3360,12 @@ async function handleHelpCommand(sock, jid, isAdminUser, senderId = null, sessio
       helpText += `│ ⋄ *.mention* ⇠ نـداء ومـنـشـن شـامـل لـكـافـة الأعـضـاء 📢\n`;
       helpText += `│ ⋄ *.open* ⇠ فـتـح الـمـجـمـوعـة (الـكـل يـرسـل) 🔓\n`;
       helpText += `│ ⋄ *.close* ⇠ قـفـل الـمـجـمـوعـة (الـمـشـرفـيـن فـقـط) 🔒\n`;
+      helpText += `│ ⋄ *.lockdown* / *.urgence* ⇠ قـفـل طـوارئ فـوري وتـجـديـد الـرابـط 🚨\n`;
+      helpText += `│ ⋄ *.unlockdown* / *.reopen* ⇠ إنـهـاء الـطـوارئ وإعـادة فـتـح الـمـجـمـوعـة 🛡️\n`;
+      helpText += `│ ⋄ *.mute @عضو [10m/2h]* ⇠ كـتـم مـؤقـت لـعـضـو داخـل الـمـجـمـوعـة 🔇\n`;
+      helpText += `│ ⋄ *.unmute @عضو* ⇠ إلـغـاء كـتـم الـعـضـو 🔊\n`;
+      helpText += `│ ⋄ *.sleep [23:00-07:00 / off]* ⇠ جـدولـة إغـلاق وفـتـح الـمـجـمـوعـة تـلـقـائـيـاً 🌙\n`;
+      helpText += `│ ⋄ *.autoclean [on/off]* ⇠ تـنـظـيـف تـلـقـائـي لـرسـائـل الـنـظـام 🧹\n`;
       helpText += `│ ⋄ *.promote @عضو* ⇠ تـرقـيـة عـضـو إلـى مـشـرف 🎖️\n`;
       helpText += `│ ⋄ *.demote @عضو* ⇠ تـنـزيـل مـشـرف إلـى عـضـو ⬇️\n`;
       helpText += `│ ⋄ *.demoteall* ⇠ تـنـزيـل كـافـة الـمـشـرفـيـن (حـصـري لـلـبـوت) 🧹\n`;
@@ -3194,6 +3401,8 @@ async function handleHelpCommand(sock, jid, isAdminUser, senderId = null, sessio
 
     if (senderIsSudo) {
       helpText += `╭───『 👑 أوامـر الـمـطـوريـن والـمـالـك (Sudo) 』───⊷\n`;
+      helpText += `│ ⋄ *.broadcast [نص]* / *.bc* ⇠ إذاعـة ونـشـر رسـالـة لـكـافـة مـجـمـوعـات الـبـوت 📢\n`;
+      helpText += `│ ⋄ *.antidelete [on/off]* ⇠ كـشـف الـرسـائـل الـمـحـذوفـة وإرسـالـهـا لـرقـم الـبـوت 🗑️\n`;
       helpText += `│ ⋄ *.mode [public/private]* ⇠ تـحـويـل وضـع الـبـوت لـلـمـجـمـوعـة ⚙️\n`;
       helpText += `│ ⋄ *.sudo @عضو* ⇠ إضـافـة مـطـور لـقـائـمـة الـبـوت 🛡️\n`;
       helpText += `│ ⋄ *.delsudo @عضو* ⇠ حـذف مـطـور مـن الـقـائـمـة 🗑️\n`;
@@ -3209,6 +3418,9 @@ async function handleHelpCommand(sock, jid, isAdminUser, senderId = null, sessio
     helpText += `│ ⋄ 📵 *مـنـع جـهـات الاتـصـال* : حـذف فـوري + طـرد 📵\n`;
     helpText += `│ ⋄ 🚨 *مـضـاد الـسـبـام* : قـفـل الـمـجـمـوعـة + إنـزال الـرتـبـة 🚨\n`;
     helpText += `│ ⋄ 🤖 *مـضـاد الـبـوتـات* : كـشـف الأجـهـزة الـمـرتـبـطـة + طـرد فـوري 🤖\n`;
+    helpText += `│ ⋄ 🔇 *الـكـتـم الـمـؤقـت* : حـذف رسـائـل الـمـكـتـوم فـوراً 🔇\n`;
+    helpText += `│ ⋄ 🗑️ *كـاشـف الـمـحـذوفـات* : إرسـال الـرسـائـل الـمـحـذوفـة لـرقـم الـبـوت الـخـاص 🗑️\n`;
+    helpText += `│ ⋄ ⚔️ *الـردع والـرد الـمـضـاد* : تـحـيـيـد سـكـريـبـتـات الـهـجـوم وعـكـسـهـا لـلـمـهـاجـم ⚔️\n`;
     helpText += `╰─────────────────────⊷\n\n`;
 
     helpText += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚔️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
@@ -3892,6 +4104,763 @@ async function handleBlacklistContactCommand(sock, jid, msg) {
     console.error('Erreur handleBlacklistContactCommand:', err);
     await sock.sendMessage(jid, { text: `❌ حدث خطأ أثناء إنشاء ملف جهات الاتصال: ${err.message}` }, { quoted: msg });
   }
+}
+
+// ============================================================================
+// NOUVEAUX MODULES ET COMMANDES AVANCÉS (Paradis Empire v2)
+// ============================================================================
+
+/**
+ * Parsage et formatage de la durée pour .mute (supporte m pour minutes, h pour heures, d pour jours)
+ */
+function parseMuteDuration(str) {
+  if (!str) return 30 * 60 * 1000; // 30 minutes par défaut
+  const match = str.trim().toLowerCase().match(/^(\d+)\s*([mhd]?)$/);
+  if (!match) return null;
+  const val = parseInt(match[1], 10);
+  if (isNaN(val) || val <= 0) return null;
+  const unit = match[2] || 'm';
+  if (unit === 'm') return val * 60 * 1000;
+  if (unit === 'h') return val * 60 * 60 * 1000;
+  if (unit === 'd') return val * 24 * 60 * 60 * 1000;
+  return val * 60 * 1000;
+}
+
+function formatDuration(ms) {
+  const totalMinutes = Math.round(ms / 60000);
+  if (totalMinutes < 60) return `${totalMinutes} دقيقة`;
+  const hours = Math.floor(totalMinutes / 60);
+  const mins = totalMinutes % 60;
+  return mins > 0 ? `${hours} ساعة و ${mins} دقيقة` : `${hours} ساعة`;
+}
+
+/**
+ * Détection des rafales de requêtes anormales sur le groupe (Flood Protection)
+ */
+const groupRequestFloodMap = new Map(); // key: `${jid}:${cleanSenderPhone}` -> array of timestamps
+function checkGroupRequestFlood(jid, cleanSender) {
+  const key = `${jid}:${cleanSender}`;
+  const now = Date.now();
+  let timestamps = groupRequestFloodMap.get(key) || [];
+  timestamps = timestamps.filter(t => now - t <= 3000);
+  timestamps.push(now);
+  groupRequestFloodMap.set(key, timestamps);
+  return timestamps.length > 5;
+}
+
+/**
+ * Détection des attaques et scripts anormaux (Counter-Attack / Crash Bugs / Unicode Floods)
+ */
+function detectAbnormalAttack(rawText, msg) {
+  if (!rawText && !msg) return null;
+  const text = rawText || '';
+
+  // 1. Détection de flood de caractères invisibles / crash unicode
+  // Caractères zero-width, LTR/RTL overrides, combining marks (> 1500 chars)
+  const invisibleMatches = text.match(/[\u200B-\u200F\u2028-\u202F\uFEFF\u0300-\u036F\u180E\u2060-\u206F]/g);
+  const invisibleCount = invisibleMatches ? invisibleMatches.length : 0;
+  if (invisibleCount > 1500) {
+    return {
+      type: 'invisible_unicode_flood',
+      description: `طوفان أحرف غير مرئية لتجميد الشات (${invisibleCount} حرف خبيث)`,
+      severity: 'critical'
+    };
+  }
+
+  // 2. Texte démesuré sans espaces (Buffer overflow / Crash app)
+  const hasExtremeWord = text.split(/\s+/).some(w => w.length > 5000);
+  if (hasExtremeWord || text.length > 25000) {
+    return {
+      type: 'overflow_crash_string',
+      description: `حمولة نصية مفرطة لمحاولة إسقاط الذاكرة (${text.length} حرف)`,
+      severity: 'critical'
+    };
+  }
+
+  // 3. Exploit wa.me/settings ou crash vcard
+  if (text.includes('wa.me/settings') || text.includes('wa.me/crash')) {
+    return {
+      type: 'known_crash_link',
+      description: `رابط استغلال ثغرة لتجميد تطبيق واتساب (Crash Bug)`,
+      severity: 'critical'
+    };
+  }
+
+  return null;
+}
+
+/**
+ * Riposte Miroir & Contre-Attaque (Counter-Strike)
+ * Supprime l'attaque, expulse l'attaquant, renvoie le même script à l'attaquant en privé, et le bloque.
+ */
+async function executeCounterAttack(sock, jid, senderId, senderPhone, rawText, attackInfo, isGroup, groupData, msg) {
+  try {
+    logActivity(`🚨 [COUNTER-STRIKE] Attaque anormale interceptée de @${senderPhone || senderId}: ${attackInfo.description}`, 'warn');
+
+    // 1. Supprimer immédiatement le message de l'attaque
+    await sock.sendMessage(jid, { delete: msg.key }).catch(() => {});
+
+    // 2. Si c'est dans un groupe, expulser immédiatement l'attaquant
+    if (isGroup) {
+      await safeGroupParticipantsRemove(sock, jid, [senderId]).catch(() => {});
+    }
+
+    // 3. Ajouter l'attaquant à la liste noire globale (Blacklist / Banned)
+    addBannedUser(senderId);
+    if (senderPhone) addBannedUser(senderPhone);
+
+    // 4. RIPOSTE MIROIR (Counter-Strike) : Envoyer le même script/attaque vers le chat privé de l'attaquant
+    const targetPrivateJid = senderPhone ? `${senderPhone}@s.whatsapp.net` : senderId;
+    const payloadSnippet = rawText.length > 3500 ? rawText.slice(0, 3500) : rawText;
+
+    let counterMessage = `⚔️ *[تـم رصـد هـجـومـك وتـحـيـيـده بـنـجـاح - إعـادة الـضـربـة إلـيـك (COUNTER-STRIKE)]* ⚔️\n\n`;
+    counterMessage += `🚨 *نوع الهجوم المرصود:* ${attackInfo.description}\n`;
+    counterMessage += `⚠️ لقد حاولت إرسال سكريبت خبيث أو حمولة غير طبيعية لاستهداف البوت أو المجموعة.\n`;
+    counterMessage += `نظام الردع الإلكتروني لإمبراطورية باراديس قام بعكس هجومك عليك فوراً، وإليك حمولتك:\n\n`;
+    counterMessage += `────────────\n`;
+    counterMessage += `${payloadSnippet}\n`;
+    counterMessage += `────────────\n\n`;
+    counterMessage += `⛔ تم حظرك وطريدك نهائياً من كافة المجموعات والأنظمة.`;
+
+    await sock.sendMessage(targetPrivateJid, { text: counterMessage }).catch(() => {});
+
+    // Pause de 500ms puis bloquer l'attaquant
+    await new Promise(r => setTimeout(r, 500));
+    await safeBlockUser(sock, senderId).catch(() => {});
+
+    // 5. Si c'était dans un groupe, afficher une notification de neutralisation
+    if (isGroup) {
+      const empireAlert = `🛡️ *[تـم تـحـيـيـد هـجـوم خـبـيـث وتـفـعـيـل الـردع الـمـضـاد - COUNTER-STRIKE]* 🛡️\n\n` +
+        `👤 *الـمـهـاجـم:* @${senderPhone || senderId.split('@')[0]}\n` +
+        `🚨 *نـوع الـهـجـوم:* ${attackInfo.description}\n` +
+        `⚡ *الإجـراء الـفـوري:* تم حذف الهجوم، طرد المهاجم، وعكس نفس السكريبت إلى حسابه الخاص مع الحظر التام ⚔️\n\n` +
+        `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚔️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n` +
+        `       🏰 *PARADIS EMPIRE* 🏰`;
+
+      await sock.sendMessage(jid, {
+        text: empireAlert,
+        mentions: [senderId, senderPhone ? `${senderPhone}@s.whatsapp.net` : null].filter(Boolean)
+      }).catch(() => {});
+    }
+  } catch (err) {
+    console.error('Erreur executeCounterAttack:', err);
+  }
+}
+
+/**
+ * Système Anti-Suppression pour Admins (Anti-Delete / Logs)
+ * Envoie le contenu du message supprimé directement vers le numéro connecté du bot (self chat)
+ */
+async function handleAntiDeleteRevocation(sock, botPhone, jid, deletedKey, revokeMsg) {
+  try {
+    const isGroup = isGroupMessage(jid);
+    if (isGroup && !isAntiDeleteEnabled(jid)) return;
+    if (!isGroup && !isAntiDeleteEnabled(null)) return;
+
+    const stored = recentMessagesStore.get(deletedKey.id);
+    if (!stored || !stored.message) return;
+
+    // Ne pas notifier si c'est le bot lui-même qui a supprimé un message
+    if (stored.rawMsg?.key?.fromMe || isSelfUser(sock, stored.sender)) return;
+
+    // Récupérer le numéro connecté du bot pour y envoyer les logs
+    const selfPhone = (sock.user?.id || botPhone).split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
+    const selfJid = `${selfPhone}@s.whatsapp.net`;
+
+    let groupName = 'محادثة خاصة';
+    if (isGroup) {
+      try {
+        const gData = await getGroupDataSafely(sock, jid);
+        groupName = gData?.subject || jid;
+      } catch (_) {
+        groupName = jid;
+      }
+    }
+
+    const senderDisplay = stored.senderPhone ? `+${stored.senderPhone}` : (stored.sender ? stored.sender.split('@')[0] : 'غير معروف');
+    const senderMention = stored.senderPhone ? `${stored.senderPhone}@s.whatsapp.net` : stored.sender;
+    const senderPush = stored.pushName || 'بدون اسم';
+
+    const date = new Date(stored.timestamp * 1000);
+    const timeStr = date.toLocaleTimeString('fr-FR', { timeZone: 'Africa/Casablanca' });
+
+    const deletedText = extractMessage(stored.rawMsg || { message: stored.message }) || '';
+
+    const m = stored.message;
+    const hasImage = Boolean(m.imageMessage || m.viewOnceMessage?.message?.imageMessage);
+    const hasVideo = Boolean(m.videoMessage || m.viewOnceMessage?.message?.videoMessage);
+    const hasAudio = Boolean(m.audioMessage);
+    const hasSticker = Boolean(m.stickerMessage);
+    const hasDoc = Boolean(m.documentMessage);
+
+    let mediaTypeLabel = '';
+    if (hasImage) mediaTypeLabel = '📷 صورة';
+    else if (hasVideo) mediaTypeLabel = '🎥 فيديو';
+    else if (hasAudio) mediaTypeLabel = '🎙️ رسالة صوتية';
+    else if (hasSticker) mediaTypeLabel = '✨ ملصق';
+    else if (hasDoc) mediaTypeLabel = '📄 مستند/ملف';
+
+    let report = `🗑️ *[تـقـريـر كـشـف الـرسـائـل الـمـحـذوفـة - ANTI-DELETE]* 🗑️\n\n`;
+    report += `👥 *الـمـجـمـوعـة:* ${groupName}\n`;
+    report += `👤 *الـمـرسـل:* @${senderDisplay.replace('+', '')} (${senderPush})\n`;
+    report += `⏰ *وقت الإرسال:* ${timeStr}\n`;
+    if (mediaTypeLabel) {
+      report += `📦 *نوع الوسائط:* ${mediaTypeLabel}\n`;
+    }
+    report += `\n💬 *الـمـحـتـوى الـمـحـذوف:*\n`;
+    report += deletedText ? `${deletedText}\n\n` : `[وسائط ميديا مرفقة أسفله]\n\n`;
+    report += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚔️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+    report += `       🏰 *PARADIS EMPIRE* 🏰`;
+
+    await sock.sendMessage(selfJid, {
+      text: report,
+      mentions: [senderMention].filter(Boolean)
+    }).catch(() => {});
+
+    // Transférer la copie originale des médias si existants
+    if (hasImage || hasVideo || hasAudio || hasSticker || hasDoc) {
+      try {
+        if (typeof sock.copyNForward === 'function') {
+          await sock.copyNForward(selfJid, stored.rawMsg, false);
+        } else {
+          await sock.sendMessage(selfJid, { forward: stored.rawMsg });
+        }
+      } catch (_) {}
+    }
+
+    logActivity(`[Anti-Delete] Message supprimé intercepté de @${senderDisplay} dans ${groupName} et consigné dans le chat privé du bot.`);
+  } catch (err) {
+    console.error('Erreur handleAntiDeleteRevocation:', err);
+  }
+}
+
+/**
+ * Commande .mute @user [temps]
+ */
+async function handleMuteCommand(sock, jid, messageText, groupData, msg, senderIsSudo) {
+  try {
+    const botId = sock.user?.id || '';
+    let currentGroupData = groupData;
+    if (!currentGroupData || !currentGroupData.participants) {
+      try { currentGroupData = await getGroupDataSafely(sock, jid); } catch (_) {}
+    }
+    const botIsAdmin = isAdmin(botId, currentGroupData);
+    if (!botIsAdmin) {
+      reactToMessage(sock, jid, msg.key, '⚠️');
+      await sock.sendMessage(jid, {
+        text: '❌ *لا يمكن كتم العضو* : يجب ترقية البوت مشرفاً (Admin) في المجموعة ليتمكن من حذف رسائل الأعضاء المكتومين 🛡️'
+      }, { quoted: msg });
+      return;
+    }
+
+    const words = messageText.trim().split(/\s+/);
+    const contextInfo = msg.message?.extendedTextMessage?.contextInfo
+      || msg.message?.imageMessage?.contextInfo
+      || msg.message?.videoMessage?.contextInfo;
+    const quotedParticipant = contextInfo?.participant;
+
+    let targetUserId = null;
+    let durationArg = null;
+
+    if (quotedParticipant) {
+      targetUserId = quotedParticipant;
+      durationArg = words[1];
+    } else if (msg.message?.extendedTextMessage?.contextInfo?.mentionedJid?.length > 0) {
+      targetUserId = msg.message.extendedTextMessage.contextInfo.mentionedJid[0];
+      durationArg = words[2] || words[1];
+      if (durationArg && durationArg.includes('@')) durationArg = words[2];
+    } else if (words[1] && words[1].replace(/[^0-9]/g, '').length >= 6) {
+      targetUserId = words[1].replace(/[^0-9]/g, '') + '@s.whatsapp.net';
+      durationArg = words[2];
+    }
+
+    if (!targetUserId) {
+      reactToMessage(sock, jid, msg.key, '❓');
+      const help = `🔇 *طـريـقـة اسـتـخـدام أمـر الـكـتـم الـمـؤقـت (.mute)* 🔇\n\n` +
+        `⋄ بالرد على رسالة العضو: *.mute 10m* أو *.mute 2h*\n` +
+        `⋄ بالمنشن: *.mute @عضو 30m* أو *.mute @عضو 1h*\n\n` +
+        `⏰ *الوحدات المدعومة:* \n` +
+        `• *m* : دقائق (مثال: 15m)\n` +
+        `• *h* : ساعات (مثال: 2h)\n` +
+        `• *افتراضياً:* 30 دقيقة في حال عدم كتابة الوقت.`;
+      await sock.sendMessage(jid, { text: help }, { quoted: msg });
+      return;
+    }
+
+    const resolved = await resolveGroupParticipant(sock, jid, targetUserId, currentGroupData);
+    const targetPhone = resolved.phone;
+
+    if (isSudo(targetUserId) || (targetPhone && isSudo(targetPhone)) || isPermanentWhitelisted(targetUserId) || (targetPhone && isPermanentWhitelisted(targetPhone))) {
+      await sock.sendMessage(jid, {
+        text: `🛡️ *حـمـايـة مـطـوريـن و Sudo* 🛡️\n\n❌ لا يـمـكـن كـتـم الـعـضـو ${resolved.tag} لأن حسابه محمي بنظام القيادة العليا 👑.`,
+        mentions: resolved.mentions
+      }, { quoted: msg });
+      return;
+    }
+
+    const ownerJid = currentGroupData?.owner || currentGroupData?.subjectOwner || '';
+    const ownerNumber = ownerJid ? ownerJid.split('@')[0].split(':')[0] : null;
+    if ((ownerNumber && targetPhone === ownerNumber) || (resolved.participant && resolved.participant.admin === 'superadmin')) {
+      await sock.sendMessage(jid, {
+        text: `❌ لا يـمـكـن كـتـم مـؤسـس ومـنـشـئ الـمـجـمـوعـة 👑`,
+        mentions: resolved.mentions
+      }, { quoted: msg });
+      return;
+    }
+
+    const durationMs = parseMuteDuration(durationArg) || (30 * 60 * 1000);
+    const durationLabel = formatDuration(durationMs);
+
+    const expiry = muteUser(jid, targetUserId, durationMs);
+    if (targetPhone) muteUser(jid, targetPhone, durationMs);
+
+    const expiryTime = new Date(expiry).toLocaleTimeString('fr-FR', { timeZone: 'Africa/Casablanca' });
+
+    let text = `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🔇 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+    text += `       🏰 *إمـبـراطـوريـة بـاراديـس* 🏰\n`;
+    text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🔇 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n\n`;
+    text += `🔇 *تـم كـتـم الـعـضـو مـؤقـتـاً* :\n`;
+    text += `⋄ الـعـضـو : ${resolved.tag}\n`;
+    text += `⋄ مـدة الـكـتـم : *${durationLabel}*\n`;
+    text += `⋄ يـنـتـهـي فـي : *${expiryTime}*\n\n`;
+    text += `⚠️ *ملاحظة:* سيتم حذف أي رسالة يرسلها هذا العضو داخل المجموعة تلقائياً طيلة فترة الكتم.\n\n`;
+    text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚔️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+    text += `       🏰 *PARADIS EMPIRE* 🏰`;
+
+    await sock.sendMessage(jid, { text, mentions: resolved.mentions }, { quoted: msg });
+    logActivity(`[Mute] Utilisateur @${targetPhone} muté pour ${durationLabel} dans ${jid}.`);
+  } catch (err) {
+    console.error('Erreur handleMuteCommand:', err);
+  }
+}
+
+/**
+ * Commande .unmute @user
+ */
+async function handleUnmuteCommand(sock, jid, messageText, groupData, msg) {
+  try {
+    const words = messageText.trim().split(/\s+/);
+    const contextInfo = msg.message?.extendedTextMessage?.contextInfo
+      || msg.message?.imageMessage?.contextInfo
+      || msg.message?.videoMessage?.contextInfo;
+    const quotedParticipant = contextInfo?.participant;
+
+    let targetUserId = null;
+    if (quotedParticipant) {
+      targetUserId = quotedParticipant;
+    } else if (msg.message?.extendedTextMessage?.contextInfo?.mentionedJid?.length > 0) {
+      targetUserId = msg.message.extendedTextMessage.contextInfo.mentionedJid[0];
+    } else if (words[1] && words[1].replace(/[^0-9]/g, '').length >= 6) {
+      targetUserId = words[1].replace(/[^0-9]/g, '') + '@s.whatsapp.net';
+    }
+
+    if (!targetUserId) {
+      reactToMessage(sock, jid, msg.key, '❓');
+      await sock.sendMessage(jid, {
+        text: '⚠️ *طريقة الاستخدام* : قم بالرد على رسالة العضو واكتب *.unmute* أو اكتب *.unmute @عضو*'
+      }, { quoted: msg });
+      return;
+    }
+
+    let currentGroupData = groupData;
+    if (!currentGroupData || !currentGroupData.participants) {
+      try { currentGroupData = await getGroupDataSafely(sock, jid); } catch (_) {}
+    }
+    const resolved = await resolveGroupParticipant(sock, jid, targetUserId, currentGroupData);
+    const targetPhone = resolved.phone;
+
+    unmuteUser(jid, targetUserId);
+    if (targetPhone) unmuteUser(jid, targetPhone);
+
+    let text = `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🔊 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+    text += `       🏰 *إمـبـراطـوريـة بـاراديـس* 🏰\n`;
+    text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🔊 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n\n`;
+    text += `🔊 *تـم إلـغـاء الـكـتـم عـن الـعـضـو* :\n`;
+    text += `⋄ الـعـضـو : ${resolved.tag}\n`;
+    text += `⋄ أصـبـح بـإمـكـانـه الـمـشـاركـة فـي الـدردشـة مـجـدداً ✅.\n\n`;
+    text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚔️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+    text += `       🏰 *PARADIS EMPIRE* 🏰`;
+
+    await sock.sendMessage(jid, { text, mentions: resolved.mentions }, { quoted: msg });
+    logActivity(`[Unmute] Utilisateur @${targetPhone} unmuté dans ${jid}.`);
+  } catch (err) {
+    console.error('Erreur handleUnmuteCommand:', err);
+  }
+}
+
+/**
+ * Commande .sleep [HH:MM-HH:MM / off / status]
+ */
+async function handleSleepScheduleCommand(sock, jid, messageText, msg) {
+  try {
+    const words = messageText.trim().split(/\s+/);
+    let arg = words[1] || '';
+    if (arg.toLowerCase() === 'on' && words[2]) {
+      arg = words[2];
+    }
+
+    if (!arg || arg.toLowerCase() === 'status') {
+      const current = getGroupSleepSchedule(jid);
+      let statusText = `🌙 *[جـدولـة نـوم الـمـجـمـوعـة - SLEEP SCHEDULE]* 🌙\n\n`;
+      if (current && current !== 'off') {
+        const [s, e] = current.split('-');
+        statusText += `🟢 *الحالة:* مفعلة\n`;
+        statusText += `🔒 *وقت الإغلاق:* ${s}\n`;
+        statusText += `🔓 *وقت الفتح:* ${e}\n`;
+        statusText += `⏰ *المنطقة الزمنية:* توقيت المغرب (Africa/Casablanca)\n\n`;
+        statusText += `لتغيير الجدول: *.sleep 00:00-08:00*\n`;
+        statusText += `لإلغاء الجدول: *.sleep off*`;
+      } else {
+        statusText += `🔴 *الحالة:* معطلة (OFF)\n\n`;
+        statusText += `لتفعيل جدول نوم تلقائي:\n`;
+        statusText += `اكتب: *.sleep 23:00-07:00* (مثال: إغلاق الساعة 23:00 وفتح الساعة 07:00)`;
+      }
+      await sock.sendMessage(jid, { text: statusText }, { quoted: msg });
+      return;
+    }
+
+    if (arg.toLowerCase() === 'off' || arg === 'تعطيل' || arg === 'إيقاف') {
+      setGroupSleepSchedule(jid, 'off');
+      let text = `🌙 *تـم تـعـطـيـل جـدول الـنـوم الـتـلـقـائـي لـلـمـجـمـوعـة* ⛔\n`;
+      text += `لن يتم إغلاق أو فتح المجموعة تلقائياً بعد الآن.`;
+      await sock.sendMessage(jid, { text }, { quoted: msg });
+      logActivity(`[SleepSchedule] Désactivé pour ${jid}`);
+      return;
+    }
+
+    const match = arg.match(/^([01]?[0-9]|2[0-3]):([0-5][0-9])\s*-\s*([01]?[0-9]|2[0-3]):([0-5][0-9])$/);
+    if (!match) {
+      reactToMessage(sock, jid, msg.key, '❓');
+      const errText = `❌ *صيغة التوقيت غير صحيحة* !\n\n` +
+        `الصيغة المعتمدة هي: *HH:MM-HH:MM*\n` +
+        `مثال: *.sleep 23:00-07:00* أو *.sleep 01:00-08:30*\n` +
+        `للإلغاء: *.sleep off*`;
+      await sock.sendMessage(jid, { text: errText }, { quoted: msg });
+      return;
+    }
+
+    const startH = match[1].padStart(2, '0');
+    const startM = match[2];
+    const endH = match[3].padStart(2, '0');
+    const endM = match[4];
+    const formattedSchedule = `${startH}:${startM}-${endH}:${endM}`;
+
+    setGroupSleepSchedule(jid, formattedSchedule);
+
+    let text = `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🌙 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+    text += `       🏰 *إمـبـراطـوريـة بـاراديـس* 🏰\n`;
+    text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🌙 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n\n`;
+    text += `✅ *تـم تـفـعـيـل جـدول نـوم الـمـجـمـوعـة بـنـجـاح* :\n\n`;
+    text += `🔒 *مـوعـد الإغـلاق الـتـلـقـائـي:* ${startH}:${startM}\n`;
+    text += `🔓 *مـوعـد الـفـتـح الـتـلـقـائـي:* ${endH}:${endM}\n`;
+    text += `⏰ *الـتـوقـيـت:* توقيت الدار البيضاء / المغرب\n\n`;
+    text += `سيقوم البوت بإغلاق المجموعة تلقائياً على المشرفين في الموعد المحدد، وإعادة فتحها في الصباح الباكر ✨.\n\n`;
+    text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚔️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+    text += `       🏰 *PARADIS EMPIRE* 🏰`;
+
+    await sock.sendMessage(jid, { text }, { quoted: msg });
+    logActivity(`[SleepSchedule] Programmé pour ${jid} (${formattedSchedule})`);
+  } catch (err) {
+    console.error('Erreur handleSleepScheduleCommand:', err);
+  }
+}
+
+/**
+ * Commande .autoclean [on/off]
+ */
+async function handleAutoCleanToggleCommand(sock, jid, messageText, msg) {
+  try {
+    const words = messageText.trim().split(/\s+/);
+    const arg = (words[1] || '').toLowerCase();
+
+    if (arg === 'on' || arg === 'تشغيل' || arg === 'مفعل') {
+      setAutoCleanEnabled(jid, true);
+      let text = `🧹 *تـم تـفـعـيـل الـتـنـظـيـف الـتـلـقـائـي (.autoclean on)* ✅\n\n` +
+        `سيقوم البوت تلقائياً بحذف جميع رسائل النظام المزعجة (انضمام، مغادرة، تغيير الصورة، تغيير الوصف، إلخ) للحفاظ على نظافة الدردشة ✨.`;
+      await sock.sendMessage(jid, { text }, { quoted: msg });
+      logActivity(`[AutoClean] Activé pour ${jid}`);
+      return;
+    }
+
+    if (arg === 'off' || arg === 'تعطيل' || arg === 'معطل') {
+      setAutoCleanEnabled(jid, false);
+      let text = `🧹 *تـم تـعـطـيـل الـتـنـظـيـف الـتـلـقـائـي (.autoclean off)* ⛔\n\n` +
+        `ستظهر رسائل النظام الخاصة بالواتساب بشكل طبيعي في المجموعة.`;
+      await sock.sendMessage(jid, { text }, { quoted: msg });
+      logActivity(`[AutoClean] Désactivé pour ${jid}`);
+      return;
+    }
+
+    const currentStatus = isAutoCleanEnabled(jid);
+    let text = `🧹 *[نـظـام الـتـنـظـيـف الـتـلـقـائـي - AUTOCLEAN]* 🧹\n\n` +
+      `الحالة الحالية: ${currentStatus ? '🟢 مـفـعـل (ON)' : '🔴 مـعـطـل (OFF)'}\n\n` +
+      `يقوم بحذف رسائل الواتساب النظامية تلقائياً (دخول، خروج، تغييرات الإدارة).\n\n` +
+      `للتفعيل: *.autoclean on*\n` +
+      `للتعطيل: *.autoclean off*`;
+    await sock.sendMessage(jid, { text }, { quoted: msg });
+  } catch (err) {
+    console.error('Erreur handleAutoCleanToggleCommand:', err);
+  }
+}
+
+/**
+ * Commande .lockdown / .urgence
+ */
+async function handleLockdownCommand(sock, jid, msg, groupData) {
+  try {
+    const botId = sock.user?.id || '';
+    let currentGroupData = groupData;
+    if (!currentGroupData || !currentGroupData.participants) {
+      try { currentGroupData = await getGroupDataSafely(sock, jid); } catch (_) {}
+    }
+    const botIsAdmin = isAdmin(botId, currentGroupData);
+    if (!botIsAdmin) {
+      reactToMessage(sock, jid, msg.key, '⚠️');
+      await sock.sendMessage(jid, {
+        text: '❌ *لا يمكن تفعيل حالة الطوارئ* : يجب ترقية البوت مشرفاً (Admin) للتحكم في المجموعة وتأمينها 🛡️'
+      }, { quoted: msg });
+      return;
+    }
+
+    await sock.groupSettingUpdate(jid, 'announcement');
+
+    try {
+      if (typeof sock.groupRevokeInvite === 'function') {
+        await sock.groupRevokeInvite(jid);
+      }
+    } catch (_) {}
+
+    setAntiLinkEnabled(jid, true);
+    setAntiSpamEnabled(jid, true);
+
+    let text = `🚨 *[تـفـعـيـل حـالـة الـطـوارئ والـحـظـر الـشـامـل - EMERGENCY LOCKDOWN]* 🚨\n\n`;
+    text += `بأمر من القيادة العليا للإمبراطورية، تم فرض حالة الطوارئ القصوى وتأمين المجموعة:\n\n`;
+    text += `🔒 *إغـلاق الـدردشـة:* تم قفل المجموعة على المشرفين فقط لمنع أي هجمات أو فوضى.\n`;
+    text += `🔗 *إبـطـال الـروابـط:* تم إلغاء رابط الدعوة القديم وإبطاله لحماية المجموعة من الانضمامات العشوائية.\n`;
+    text += `🛡️ *الـدفـاع الإلـكـتـرونـي:* تم رفع مضاد الروابط ومضاد السبام إلى أعلى مستوى استنفار.\n\n`;
+    text += `⚠️ *يـرجـى مـن الـجـمـيـع الـهـدوء حـتـى انـتـهـاء حـالـة الـطـوارئ.* \n\n`;
+    text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚔️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+    text += `       🏰 *PARADIS EMPIRE* 🏰`;
+
+    await sock.sendMessage(jid, { text }, { quoted: msg });
+    logActivity(`[Lockdown] Mode d'urgence activé dans ${jid}.`);
+  } catch (err) {
+    console.error('Erreur handleLockdownCommand:', err);
+  }
+}
+
+/**
+ * Commande .unlockdown / .reopen
+ */
+async function handleUnlockdownCommand(sock, jid, msg, groupData) {
+  try {
+    const botId = sock.user?.id || '';
+    let currentGroupData = groupData;
+    if (!currentGroupData || !currentGroupData.participants) {
+      try { currentGroupData = await getGroupDataSafely(sock, jid); } catch (_) {}
+    }
+    const botIsAdmin = isAdmin(botId, currentGroupData);
+    if (!botIsAdmin) {
+      reactToMessage(sock, jid, msg.key, '⚠️');
+      await sock.sendMessage(jid, {
+        text: '❌ *خطأ* : يجب ترقية البوت مشرفاً (Admin) للتحكم في إعدادات المجموعة 🛡️'
+      }, { quoted: msg });
+      return;
+    }
+
+    await sock.groupSettingUpdate(jid, 'not_announcement');
+
+    let text = `🛡️ *[انـتـهـاء حـالـة الـطـوارئ - إعـادة فـتـح الـمـجـمـوعـة]* 🛡️\n\n`;
+    text += `أعلنت القيادة العليا انتهاء حالة الطوارئ بنجاح واستقرار الوضع الأمني ✨.\n\n`;
+    text += `🔓 *الـدردشـة:* تم فتح المجموعة لكافة الأعضاء للمشاركة والحديث بحرية.\n`;
+    text += `⚖️ نرجو من جميع الأعضاء الالتزام بالقوانين واحترام النظام العام للمجموعة.\n\n`;
+    text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚔️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+    text += `       🏰 *PARADIS EMPIRE* 🏰`;
+
+    await sock.sendMessage(jid, { text }, { quoted: msg });
+    logActivity(`[Lockdown] Fin du mode d'urgence dans ${jid}.`);
+  } catch (err) {
+    console.error('Erreur handleUnlockdownCommand:', err);
+  }
+}
+
+/**
+ * Commande .ping / .health
+ */
+async function handlePingCommand(sock, jid, msg) {
+  try {
+    const start = Date.now();
+    const uptimeSec = Math.floor(process.uptime());
+    const hours = Math.floor(uptimeSec / 3600);
+    const minutes = Math.floor((uptimeSec % 3600) / 60);
+    const seconds = uptimeSec % 60;
+    const uptimeStr = `${hours}h ${minutes}m ${seconds}s`;
+
+    const mem = process.memoryUsage();
+    const rssMB = (mem.rss / 1024 / 1024).toFixed(1);
+    const heapMB = (mem.heapUsed / 1024 / 1024).toFixed(1);
+
+    const activeSessionsCount = Array.from(sessions.values()).filter(s => s.status === 'connected').length;
+    const totalSessionsCount = sessions.size;
+
+    const pingMs = Math.abs(Date.now() - start);
+
+    const text = `⚡ *[حـالـة الـنـظـام والأداء - HEALTH CHECK]* ⚡\n\n` +
+      `📶 *سرعة الاستجابة (Ping):* ${pingMs}ms\n` +
+      `⏱️ *مدة تشغيل السيرفر (Uptime):* ${uptimeStr}\n` +
+      `🤖 *الجلسات النشطة:* ${activeSessionsCount}/${totalSessionsCount} جلسة\n` +
+      `💾 *استهلاك الذاكرة RAM:* ${heapMB} MB (Heap) / ${rssMB} MB (RSS)\n` +
+      `🗄️ *قاعدة البيانات SQLite:* متصلة ونشطة ✅\n` +
+      `🛡️ *أنظمة الحماية:* المراقبة التلقائية تعمل بنسبة 100% 🟢\n\n` +
+      `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚔️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n` +
+      `       🏰 *PARADIS EMPIRE* 🏰`;
+
+    await sock.sendMessage(jid, { text }, { quoted: msg });
+  } catch (err) {
+    console.error('Erreur handlePingCommand:', err);
+  }
+}
+
+/**
+ * Commande .broadcast / .bc [texte]
+ */
+async function handleBroadcastCommand(sock, jid, messageText, msg) {
+  try {
+    const words = messageText.trim().split(/\s+/);
+    let broadcastContentText = words.slice(1).join(' ').trim();
+
+    const contextInfo = msg.message?.extendedTextMessage?.contextInfo
+      || msg.message?.imageMessage?.contextInfo
+      || msg.message?.videoMessage?.contextInfo;
+    const quotedMsg = contextInfo?.quotedMessage;
+
+    if (!broadcastContentText && !quotedMsg) {
+      reactToMessage(sock, jid, msg.key, '❓');
+      const help = `📢 *طـريـقـة اسـتـخـدام الإذاعـة الـعـامـة (.broadcast / .bc)* 📢\n\n` +
+        `⋄ إرسال نص: *.broadcast [نص الرسالة المراد نشرها]*\n` +
+        `⋄ إرسال صورة أو فيديو: قم بالرد على الوسائط واكتب *.broadcast [نص اختياري]*\n\n` +
+        `⚠️ *ملاحظة:* يتم الإرسال لكافة المجموعات التي يتواجد بها البوت مع فاصل زمني آمن لتجنب حظر الرقم.`;
+      await sock.sendMessage(jid, { text: help }, { quoted: msg });
+      return;
+    }
+
+    let groups = {};
+    if (typeof sock.groupFetchAllParticipating === 'function') {
+      groups = await sock.groupFetchAllParticipating();
+    }
+    const groupJids = Object.keys(groups);
+
+    if (groupJids.length === 0) {
+      await sock.sendMessage(jid, { text: '❌ البوت غير متواجد في أي مجموعة حالياً لإجراء الإذاعة.' }, { quoted: msg });
+      return;
+    }
+
+    reactToMessage(sock, jid, msg.key, '📡');
+    await sock.sendMessage(jid, {
+      text: `📡 *جـاري بـدء الإذاعـة الـعـامـة فـي ${groupJids.length} مـجـمـوعـة...*\nيرجى الانتظار، سيتم الإرسال بفاصل أمان 1.5 ثانية لحماية الرقم.`
+    }, { quoted: msg });
+
+    let sentCount = 0;
+    let failedCount = 0;
+
+    const empireHeader = `📢 *[إذاعـة عـامـة مـن قـيـادة الإمـبـراطـوريـة - BROADCAST]* 📢\n\n`;
+    const empireFooter = `\n\n⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚔️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n       🏰 *PARADIS EMPIRE* 🏰`;
+
+    for (const targetGid of groupJids) {
+      try {
+        if (quotedMsg) {
+          if (typeof sock.copyNForward === 'function') {
+            await sock.copyNForward(targetGid, { key: { remoteJid: jid, id: contextInfo.stanzaId }, message: quotedMsg }, false);
+          } else {
+            const fullText = empireHeader + (broadcastContentText || '') + empireFooter;
+            await sock.sendMessage(targetGid, { text: fullText });
+          }
+        } else {
+          const fullText = empireHeader + broadcastContentText + empireFooter;
+          await sock.sendMessage(targetGid, { text: fullText });
+        }
+        sentCount++;
+      } catch (err) {
+        failedCount++;
+      }
+      await new Promise(r => setTimeout(r, 1500));
+    }
+
+    const report = `✅ *تـم إنـهـاء الإذاعـة الـعـامـة بـنـجـاح* :\n\n` +
+      `📊 *إجمالي المجموعات المستهدفة:* ${groupJids.length}\n` +
+      `🟢 *تم الإرسال بنجاح:* ${sentCount}\n` +
+      (failedCount > 0 ? `🔴 *فشل في:* ${failedCount}\n\n` : `\n`) +
+      `✨ تم البث وفق بروتوكول الأمان المضاد للحظر.`;
+
+    await sock.sendMessage(jid, { text: report }, { quoted: msg });
+    logActivity(`[Broadcast] Terminé: ${sentCount}/${groupJids.length} envoyés.`);
+  } catch (err) {
+    console.error('Erreur handleBroadcastCommand:', err);
+  }
+}
+
+/**
+ * Commande .antidelete [on/off]
+ */
+async function handleAntiDeleteToggleCommand(sock, jid, messageText, msg) {
+  try {
+    const words = messageText.trim().split(/\s+/);
+    const arg = (words[1] || '').toLowerCase();
+    const isGroup = isGroupMessage(jid);
+
+    if (arg === 'on' || arg === 'تشغيل' || arg === 'مفعل') {
+      setAntiDeleteEnabled(isGroup ? jid : null, true);
+      let text = `🗑️ *تـم تـفـعـيـل كـاشـف الـرسـائـل الـمـحـذوفـة (.antidelete on)* ✅\n\n` +
+        `سيتم رصد وحفظ أي رسالة يتم حذفها في المجموعة، وإرسال تفاصيلها والوسائط الخاصة بها مباشرة إلى رقم البوت الخاص 🔒.`;
+      await sock.sendMessage(jid, { text }, { quoted: msg });
+      return;
+    }
+
+    if (arg === 'off' || arg === 'تعطيل' || arg === 'معطل') {
+      setAntiDeleteEnabled(isGroup ? jid : null, false);
+      let text = `🗑️ *تـم تـعـطـيـل كـاشـف الـرسـائـل الـمـحـذوفـة (.antidelete off)* ⛔`;
+      await sock.sendMessage(jid, { text }, { quoted: msg });
+      return;
+    }
+
+    const currentStatus = isAntiDeleteEnabled(isGroup ? jid : null);
+    let text = `🗑️ *[كـاشـف الـرسـائـل الـمـحـذوفـة - ANTI-DELETE]* 🗑️\n\n` +
+      `الحالة: ${currentStatus ? '🟢 مـفـعـل (ON)' : '🔴 مـعـطـل (OFF)'}\n\n` +
+      `عند حذف أي رسالة أو وسائط، يقوم البوت بإرسالها فوراً إلى الرقم المتصل بالبوت دون تشويش المجموعة.\n\n` +
+      `للتفعيل: *.antidelete on*\n` +
+      `للتعطيل: *.antidelete off*`;
+    await sock.sendMessage(jid, { text }, { quoted: msg });
+  } catch (err) {
+    console.error('Erreur handleAntiDeleteToggleCommand:', err);
+  }
+}
+
+/**
+ * Alerte en cas de déconnexion / déconnexion de compte vers la liste Sudo
+ */
+async function notifySudoDisconnect(disconnectedPhone, reason) {
+  try {
+    const activeSession = Array.from(sessions.values()).find(s => s.status === 'connected' && s.sock && s.phone !== disconnectedPhone);
+    if (!activeSession) return;
+    const sudos = getPermanentWhitelist();
+    const alertMsg = `⚠️ *[تـنـبـيـه نـظـام - انـقـطـاع اتـصـال الـبـوت]* ⚠️\n\n` +
+      `🚨 *الرقم المتأثر:* +${disconnectedPhone}\n` +
+      `📌 *الحالة/السبب:* ${reason}\n` +
+      `⏰ *التوقيت:* ${new Date().toLocaleTimeString('fr-FR', { timeZone: 'Africa/Casablanca' })}\n\n` +
+      `يرجى التحقق من لوحة التحكم أو إعادة ربط الحساب إذا لزم الأمر.\n\n` +
+      `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚔️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n` +
+      `       🏰 *PARADIS EMPIRE* 🏰`;
+
+    const notified = new Set();
+    for (const sudo of sudos.slice(0, 3)) {
+      const cleanPhone = String(sudo).split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
+      if (cleanPhone && cleanPhone !== disconnectedPhone && !notified.has(cleanPhone)) {
+        notified.add(cleanPhone);
+        await activeSession.sock.sendMessage(`${cleanPhone}@s.whatsapp.net`, { text: alertMsg }).catch(() => {});
+        await new Promise(r => setTimeout(r, 1000));
+      }
+    }
+  } catch (_) {}
 }
 
 /**
@@ -6394,6 +7363,93 @@ function startPeriodicAntiBotScanner() {
 }
 
 /**
+ * Planificateur de fermeture et d'ouverture automatique des groupes (.sleep)
+ * Vérifie toutes les 30 secondes selon l'heure locale de Casablanca (Africa/Casablanca, UTC+1).
+ */
+let sleepSchedulerInterval = null;
+const sleepExecutedActions = new Map(); // key: `${groupId}:${action}:${dateMinute}` -> boolean
+
+function startPeriodicSleepScheduler() {
+  if (sleepSchedulerInterval) return;
+  logActivity('🌙 Planificateur de sommeil des groupes (.sleep) activé.');
+
+  sleepSchedulerInterval = setInterval(async () => {
+    try {
+      const activeSessions = Array.from(sessions.values()).filter(s => s.status === 'connected' && s.sock);
+      if (activeSessions.length === 0) return;
+      const sock = activeSessions[0].sock;
+
+      const schedules = getAllSleepSchedules();
+      if (!schedules || schedules.length === 0) return;
+
+      const now = new Date();
+      const timeStr = now.toLocaleTimeString('en-GB', {
+        timeZone: 'Africa/Casablanca',
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: false
+      });
+      const dateStr = now.toLocaleDateString('en-CA', { timeZone: 'Africa/Casablanca' });
+      const currentMinuteKey = `${dateStr}_${timeStr}`;
+
+      for (const item of schedules) {
+        const { groupId, schedule } = item;
+        if (!schedule || schedule === 'off') continue;
+
+        const parts = schedule.split('-');
+        if (parts.length !== 2) continue;
+        const [startTime, endTime] = parts.map(s => s.trim());
+
+        // Heure de fermeture
+        if (timeStr === startTime) {
+          const actionKey = `${groupId}:close:${currentMinuteKey}`;
+          if (!sleepExecutedActions.has(actionKey)) {
+            sleepExecutedActions.set(actionKey, true);
+            try {
+              await sock.groupSettingUpdate(groupId, 'announcement');
+              const banner = `🌙 *[إغـلاق مـجـدول لـلـمـجـمـوعـة - SLEEP MODE]* 🌙\n\n` +
+                `حسب الجدول الزمني المعتمد لراحة الأعضاء (${schedule})، تقرر إغلاق المجموعة للنوم 💤.\n` +
+                `تصبحون على خير، وسيتم إعادة فتح المجموعة تلقائياً في تمام الساعة *${endTime}* ☀️.\n\n` +
+                `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚔️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n` +
+                `       🏰 *PARADIS EMPIRE* 🏰`;
+              await sock.sendMessage(groupId, { text: banner });
+              logActivity(`[SleepSchedule] Groupe ${groupId} fermé selon l'horaire (${startTime}).`);
+            } catch (err) {
+              logActivity(`[SleepSchedule] Erreur fermeture groupe ${groupId}: ${err.message}`, 'warn');
+            }
+          }
+        }
+
+        // Heure d'ouverture
+        if (timeStr === endTime) {
+          const actionKey = `${groupId}:open:${currentMinuteKey}`;
+          if (!sleepExecutedActions.has(actionKey)) {
+            sleepExecutedActions.set(actionKey, true);
+            try {
+              await sock.groupSettingUpdate(groupId, 'not_announcement');
+              const banner = `☀️ *[فـتـح مـجـدول لـلـمـجـمـوعـة - MORNING WAKE]* ☀️\n\n` +
+                `صباح الخير والبركة لجميع الأعضاء! ✨\n` +
+                `حسب الجدول الزمني المعتمد (${schedule})، تم إعادة فتح المجموعة للدردشة والمشاركات.\n` +
+                `نتمنى لكم يوماً سعيداً وموفقاً 🌺.\n\n` +
+                `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚔️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n` +
+                `       🏰 *PARADIS EMPIRE* 🏰`;
+              await sock.sendMessage(groupId, { text: banner });
+              logActivity(`[SleepSchedule] Groupe ${groupId} rouvert selon l'horaire (${endTime}).`);
+            } catch (err) {
+              logActivity(`[SleepSchedule] Erreur ouverture groupe ${groupId}: ${err.message}`, 'warn');
+            }
+          }
+        }
+      }
+
+      if (sleepExecutedActions.size > 500) {
+        sleepExecutedActions.clear();
+      }
+    } catch (_) {}
+  }, 30000);
+}
+
+/**
  * Démarrage du serveur et reconnexion automatique de toutes les sessions enregistrées
  */
 async function startServer() {
@@ -6404,8 +7460,9 @@ async function startServer() {
     // 2. Migrer l'ancienne session si elle existe
     migrateLegacySession();
 
-    // 2.5 Lancer le scanner automatique d'arrière-plan
+    // 2.5 Lancer le scanner automatique d'arrière-plan et le planificateur de sommeil
     startPeriodicAntiBotScanner();
+    startPeriodicSleepScheduler();
 
     // 3. Lancer le serveur HTTP
     app.listen(CONFIG.port, () => {

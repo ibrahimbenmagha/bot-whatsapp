@@ -988,3 +988,175 @@ export function isKickingEnabled() {
 export function setKickingEnabled(enabled) {
   return setSetting('kicking_enabled', enabled ? 'on' : 'off');
 }
+
+// ----------------------------------------------------
+// 1. Système de Nettoyage Automatique des Messages Système (.autoclean)
+// ----------------------------------------------------
+export function isAutoCleanEnabled(groupId) {
+  try {
+    if (!groupId) return false;
+    const cleanId = cleanGroupId(groupId);
+    return getSetting(`autoclean_${cleanId}`, 'off') === 'on';
+  } catch (error) {
+    return false;
+  }
+}
+
+export function setAutoCleanEnabled(groupId, enabled) {
+  try {
+    if (!groupId) return false;
+    const cleanId = cleanGroupId(groupId);
+    return setSetting(`autoclean_${cleanId}`, enabled ? 'on' : 'off');
+  } catch (error) {
+    return false;
+  }
+}
+
+// ----------------------------------------------------
+// 2. Fermeture / Ouverture Programmée du Groupe (.sleep)
+// ----------------------------------------------------
+export function getGroupSleepSchedule(groupId) {
+  try {
+    if (!groupId) return 'off';
+    const cleanId = cleanGroupId(groupId);
+    return getSetting(`sleep_${cleanId}`, 'off');
+  } catch (error) {
+    return 'off';
+  }
+}
+
+export function setGroupSleepSchedule(groupId, schedule) {
+  try {
+    if (!groupId) return false;
+    const cleanId = cleanGroupId(groupId);
+    return setSetting(`sleep_${cleanId}`, schedule || 'off');
+  } catch (error) {
+    return false;
+  }
+}
+
+export function getAllSleepSchedules() {
+  try {
+    const list = [];
+    if (!db) return list;
+    const res = db.exec("SELECT key, value FROM settings WHERE key LIKE 'sleep_%' AND value != 'off'");
+    if (res.length > 0 && res[0].values.length > 0) {
+      for (const [key, value] of res[0].values) {
+        const groupId = key.replace('sleep_', '');
+        list.push({ groupId, schedule: value });
+      }
+    }
+    return list;
+  } catch (e) {
+    return [];
+  }
+}
+
+// ----------------------------------------------------
+// 3. Système de Mute Temporaire (.mute / .unmute)
+// ----------------------------------------------------
+const mutedUsersMemory = new Map(); // key: `${cleanId}:${cleanPhone}` -> expiryTimestamp (ms)
+
+export function isUserMuted(groupId, userId) {
+  try {
+    if (!groupId || !userId) return false;
+    const cleanPhone = String(userId).split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
+    if (!cleanPhone) return false;
+
+    // Sudo et Whitelist permanente sont 100% protégés contre le mute
+    if (isPermanentWhitelisted(cleanPhone) || isSudo(cleanPhone)) return false;
+
+    const cleanId = cleanGroupId(groupId);
+    const key = `${cleanId}:${cleanPhone}`;
+    const now = Date.now();
+
+    // Vérifier la mémoire
+    if (mutedUsersMemory.has(key)) {
+      const expiry = mutedUsersMemory.get(key);
+      if (now < expiry) return true;
+      // Expiré
+      mutedUsersMemory.delete(key);
+      setSetting(`mute_${key}`, '0');
+      return false;
+    }
+
+    // Vérifier les settings DB
+    const saved = getSetting(`mute_${key}`, null);
+    if (saved) {
+      const expiry = parseInt(saved, 10);
+      if (expiry && now < expiry) {
+        mutedUsersMemory.set(key, expiry);
+        return true;
+      } else {
+        setSetting(`mute_${key}`, '0');
+      }
+    }
+
+    return false;
+  } catch (error) {
+    return false;
+  }
+}
+
+export function muteUser(groupId, userId, durationMs = 30 * 60 * 1000) {
+  try {
+    if (!groupId || !userId) return null;
+    const cleanPhone = String(userId).split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
+    if (!cleanPhone) return null;
+
+    // Protéger Sudo et Whitelist permanente
+    if (isPermanentWhitelisted(cleanPhone) || isSudo(cleanPhone)) return false;
+
+    const cleanId = cleanGroupId(groupId);
+    const key = `${cleanId}:${cleanPhone}`;
+    const expiry = Date.now() + durationMs;
+
+    mutedUsersMemory.set(key, expiry);
+    setSetting(`mute_${key}`, String(expiry));
+    return expiry;
+  } catch (error) {
+    console.error('❌ Erreur muteUser:', error);
+    return null;
+  }
+}
+
+export function unmuteUser(groupId, userId) {
+  try {
+    if (!groupId || !userId) return false;
+    const cleanPhone = String(userId).split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
+    if (!cleanPhone) return false;
+
+    const cleanId = cleanGroupId(groupId);
+    const key = `${cleanId}:${cleanPhone}`;
+
+    mutedUsersMemory.delete(key);
+    setSetting(`mute_${key}`, '0');
+    return true;
+  } catch (error) {
+    console.error('❌ Erreur unmuteUser:', error);
+    return false;
+  }
+}
+
+// ----------------------------------------------------
+// 4. Système Anti-Suppression (.antidelete)
+// ----------------------------------------------------
+export function isAntiDeleteEnabled(groupId = null) {
+  try {
+    if (!groupId) return getSetting('antidelete_global', 'on') !== 'off';
+    const cleanId = cleanGroupId(groupId);
+    return getSetting(`antidelete_${cleanId}`, 'on') !== 'off';
+  } catch (error) {
+    return true;
+  }
+}
+
+export function setAntiDeleteEnabled(groupId, enabled) {
+  try {
+    if (!groupId) return setSetting('antidelete_global', enabled ? 'on' : 'off');
+    const cleanId = cleanGroupId(groupId);
+    return setSetting(`antidelete_${cleanId}`, enabled ? 'on' : 'off');
+  } catch (error) {
+    return false;
+  }
+}

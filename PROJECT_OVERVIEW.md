@@ -89,6 +89,36 @@
 
 ## 5. Journal des Dernières Modifications
 
+* **2026-11-15 : Déploiement des 9 Fonctionnalités Majeures de Sécurité & Modération Avancée (Paradis Empire v2)**
+  - **1. Système de Mute Temporaire (.mute / .unmute) :**
+    - Commandes `.mute @user [temps]` (ex: `.mute 10m`, `.mute 2h`, ou en réponse à un message) et `.unmute @user`.
+    - Suppression automatique et silencieuse de tous les messages envoyés par les membres sous le coup d'un mute dans le groupe.
+    - Sudo, Bot Owner et Whitelist permanente immunisés à 100%. Persistance SQLite et cache mémoire pour vérification à latence nulle.
+  - **2. Fermeture / Ouverture Programmée du Groupe (.sleep) :**
+    - Commandes `.sleep [HH:MM-HH:MM]` (ex: `.sleep 23:00-07:00`), `.sleep off` et `.sleep status`.
+    - Planificateur d'arrière-plan intelligent vérifiant toutes les 30 secondes l'heure locale de Casablanca (`Africa/Casablanca`, UTC+1).
+    - Bascule automatique en mode annonce (`announcement`) à l'heure d'extinction avec message d'empire, et réouverture en mode normal (`not_announcement`) à l'heure de réveil avec salutation matinale.
+  - **3. Notification de Déconnexion & Contrôle de Santé (.ping / .health) :**
+    - Alerte automatique envoyée aux numéros Sudo via une session active si un compte bot est déconnecté (`DisconnectReason.loggedOut`) ou subit 5 échecs de reconnexion consécutifs.
+    - Commande `.ping` / `.health` affichant la latence (ms), l'uptime du serveur, le nombre de sessions actives, l'utilisation RAM (Heap/RSS) et le statut SQLite.
+  - **4. Diffusion Générale Multi-Groupes (.broadcast / .bc) :**
+    - Réservé aux Sudo : diffuse un texte ou transfère un média (image, vidéo, sticker) avec légende dans toutes les groupes où le bot est présent.
+    - Temporisation anti-ban de 1.5 seconde entre chaque groupe pour préserver le score de réputation WhatsApp.
+  - **5. Nettoyage Automatique des Messages Système (.autoclean on/off) :**
+    - Suppression automatique et instantanée des messages système WhatsApp (`messageStubType`) : arrivées, départs, changements de photo/sujet/description, codes de sécurité.
+  - **6. Mode Verrouillage d'Urgence (.lockdown / .urgence & .unlockdown / .reopen) :**
+    - `.lockdown` : Ferme instantanément le groupe aux admins, révoque et régénère le lien d'invitation pour couper l'accès aux assaillants, active Anti-Link et Anti-Spam au maximum, et publie la bannière d'alerte rouge.
+    - `.unlockdown` : Rétablit le groupe en mode ouvert pour tous les membres dans l'ordre et le respect.
+  - **7. Anti-Suppression Confidentiel vers le Numéro du Bot (Anti-Delete) :**
+    - Intercepte les messages révoqués (`protocolMessage.type === 0`).
+    - Récupère le message d'origine, l'expéditeur, l'heure et les médias associés dans `recentMessagesStore`.
+    - Envoie le rapport détaillé **exclusivement dans la discussion privée du propre numéro connecté au bot** (`sock.user.id`), garantissant 0% de spam dans les groupes et une confidentialité totale pour l'administrateur.
+  - **8. Riposte Miroir & Contre-Attaque (Counter-Strike) :**
+    - Détecte les charges malveillantes (flood unicode invisible >1500 caractères, payloads géants >25000 chars, crash links `wa.me/settings`).
+    - Supprime l'attaque du groupe, expulse l'attaquant, l'inscrit dans la Blacklist globale, lui renvoie son propre script dans son chat privé avec le message de riposte miroir d'avertissement, puis le bloque.
+  - **9. Neutralisation des Actions & Requêtes Anormales sur les Groupes :**
+    - Détection de burst flooding (>5 requêtes en 3 secondes par un membre non-admin) : suppression immédiate et mute temporaire automatique de 5 minutes en cas de récidive.
+
 * **2026-11-13 : Extension de la Sudo List & Trust List**
   - Ajout des numéros à la Sudo List & Trust List permanente : `212628174140`, `212626297553` (déjà présent), `212784757103`, `212709126381`, `212778756917`.
 
