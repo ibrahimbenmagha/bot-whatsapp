@@ -15,8 +15,15 @@ import makeWASocket, {
   Browsers, 
   USyncQuery, 
   USyncUser,
-  makeCacheableSignalKeyStore 
+  makeCacheableSignalKeyStore,
+  downloadContentFromMessage 
 } from '@whiskeysockets/baileys';
+import { exec } from 'child_process';
+import util from 'util';
+import { Sticker, StickerTypes } from 'wa-sticker-formatter';
+import yts from 'yt-search';
+
+const execAsync = util.promisify(exec);
 import { Boom } from '@hapi/boom';
 import pino from 'pino';
 import QRCode from 'qrcode';
@@ -1431,6 +1438,24 @@ async function handleSessionMessages(botPhone, m) {
         }
         reactToMessage(sock, jid, msg.key, '🗑️');
         await handleAntiDeleteToggleCommand(sock, jid, messageText, msg);
+        continue;
+      }
+
+      // Commande .song / .play / .audio (Téléchargement audio YouTube / Musique)
+      if (startsWithCmd('song') || isCmd('song') || startsWithCmd('play') || isCmd('play') || startsWithCmd('audio') || isCmd('audio')) {
+        await handleSongCommand(sock, jid, messageText, msg);
+        continue;
+      }
+
+      // Commande .sp / .stickerpack (Housse / Pack de stickers avec métadonnées ✨ 𝕵𝖊𝖑𝖑𝖆𝖑 𝕱𝖊𝖗𝖓𝖆𝖓𝖉𝖊𝖟 ✨)
+      if (startsWithCmd('sp') || isCmd('sp') || startsWithCmd('stickerpack') || isCmd('stickerpack')) {
+        await handleStickerPackCommand(sock, jid, messageText, msg);
+        continue;
+      }
+
+      // Commande .s / .sticker (Création de sticker à partir d'une photo ou gif/vidéo avec description)
+      if (startsWithCmd('s') || isCmd('s') || startsWithCmd('sticker') || isCmd('sticker')) {
+        await handleStickerCommand(sock, jid, messageText, msg);
         continue;
       }
 
@@ -3350,6 +3375,9 @@ async function handleHelpCommand(sock, jid, isAdminUser, senderId = null, sessio
     helpText += `╭───『 📜 أوامـر الأعـضـاء 』───⊷\n`;
     helpText += `│ ⋄ *.menu* ⇠ عـرض قـائـمـة الأوامـر 🤖\n`;
     helpText += `│ ⋄ *.status* ⇠ مـعـلـومـات وحـالـة الـبـوت ⚡\n`;
+    helpText += `│ ⋄ *.s [وصف]* ⇠ تـحـويـل صـورة أو فـيـديـو/GIF إلـى مـلـصـق 🎨\n`;
+    helpText += `│ ⋄ *.sp [اسم]* ⇠ جـلـب حـزمـة مـلـصـقـات كـامـلـة (✨ 𝕵𝖊𝖑𝖑𝖆𝖑 𝕱𝖊𝖗𝖓𝖆𝖓𝖉𝖊𝖟 ✨) ✨\n`;
+    helpText += `│ ⋄ *.song [اسم/رابط]* ⇠ تـحـمـيـل أي أغـنـيـة مـن يـوتـيـوب صـوتـيـاً (MP3) 🎵\n`;
     helpText += `│ ⋄ *.ping* / *.health* ⇠ فـحـص سـرعـة الاسـتـجـابـة وصـحـة الـنـظـام ⚡\n`;
     helpText += `│ ⋄ *.rulls* ⇠ قـوانـيـن الـمـجـمـوعـة 📜\n`;
     helpText += `│ ⋄ *.warnings* ⇠ فـحـص الإنـذارات 📋\n`;
@@ -4861,6 +4889,350 @@ async function notifySudoDisconnect(disconnectedPhone, reason) {
       }
     }
   } catch (_) {}
+}
+
+/**
+ * Commande .s / .sticker [description]
+ * Convertit une image ou vidéo/GIF (<= 10s) en sticker WhatsApp avec description personnalisée
+ */
+async function handleStickerCommand(sock, jid, messageText, msg) {
+  try {
+    const words = messageText.trim().split(/\s+/);
+    let desc = words.slice(1).join(' ').trim();
+    let packName = 'Paradis Empire';
+    let authorName = '✨ 𝕵𝖊𝖑𝖑𝖆𝖑 𝕱𝖊𝖗𝖓𝖆𝖓𝖉𝖊𝖟 ✨';
+
+    if (desc) {
+      if (desc.includes('|')) {
+        const parts = desc.split('|').map(s => s.trim());
+        packName = parts[0] || packName;
+        authorName = parts[1] || authorName;
+      } else {
+        packName = desc;
+      }
+    }
+
+    const contextInfo = msg.message?.extendedTextMessage?.contextInfo
+      || msg.message?.imageMessage?.contextInfo
+      || msg.message?.videoMessage?.contextInfo;
+    const quotedMsg = contextInfo?.quotedMessage;
+
+    let mediaObj = null;
+    let mediaType = null;
+
+    if (quotedMsg) {
+      let q = quotedMsg;
+      if (q.ephemeralMessage?.message) q = q.ephemeralMessage.message;
+      if (q.viewOnceMessage?.message) q = q.viewOnceMessage.message;
+      if (q.viewOnceMessageV2?.message) q = q.viewOnceMessageV2.message;
+
+      if (q.imageMessage) {
+        mediaObj = q.imageMessage;
+        mediaType = 'image';
+      } else if (q.videoMessage) {
+        mediaObj = q.videoMessage;
+        mediaType = 'video';
+      } else if (q.stickerMessage) {
+        mediaObj = q.stickerMessage;
+        mediaType = 'sticker';
+      }
+    } else {
+      let m = msg.message;
+      if (m?.ephemeralMessage?.message) m = m.ephemeralMessage.message;
+      if (m?.viewOnceMessage?.message) m = m.viewOnceMessage.message;
+      if (m?.viewOnceMessageV2?.message) m = m.viewOnceMessageV2.message;
+
+      if (m?.imageMessage) {
+        mediaObj = m.imageMessage;
+        mediaType = 'image';
+      } else if (m?.videoMessage) {
+        mediaObj = m.videoMessage;
+        mediaType = 'video';
+      }
+    }
+
+    if (!mediaObj || !mediaType) {
+      reactToMessage(sock, jid, msg.key, '❓');
+      const help = `🎨 *طـريـقـة اسـتـخـدام صـانـع الـمـلـصـقـات (.s)* 🎨\n\n` +
+        `⋄ قـم بـالـرد (Reply) عـلـى صـورة أو فـيـديـو/GIF واكـتـب:\n` +
+        `  *.s [الـوصـف]*\n\n` +
+        `⋄ *أمـثـلـة :*\n` +
+        `  • *.s* (ملصق بالحقوق الافتراضية للإمبراطورية)\n` +
+        `  • *.s إمبراطورية باراديس*\n` +
+        `  • *.s اسم الحزمة | اسم الصانع*\n\n` +
+        `⋄ يـمـكـنـك أيـضـاً إرسـال صـورة مـبـاشـرة مـع كـتـابـة *.s* فـي الـشـرح (Caption).`;
+      await sock.sendMessage(jid, { text: help }, { quoted: msg });
+      return;
+    }
+
+    if (mediaType === 'video' && mediaObj.seconds > 10) {
+      reactToMessage(sock, jid, msg.key, '⚠️');
+      await sock.sendMessage(jid, {
+        text: '⚠️ *تنبيه:* الفيديو طويل جداً. يرجى إرسال مقطع فيديو أو GIF مدته 10 ثواني أو أقل لإنشاء ملصق متحرك.'
+      }, { quoted: msg });
+      return;
+    }
+
+    reactToMessage(sock, jid, msg.key, '🎨');
+
+    const stream = await downloadContentFromMessage(mediaObj, mediaType);
+    let buffer = Buffer.from([]);
+    for await (const chunk of stream) {
+      buffer = Buffer.concat([buffer, chunk]);
+    }
+
+    if (!buffer || buffer.length === 0) {
+      await sock.sendMessage(jid, { text: '❌ تعذر تحميل الميديا، يرجى المحاولة مرة أخرى.' }, { quoted: msg });
+      return;
+    }
+
+    const sticker = new Sticker(buffer, {
+      pack: packName,
+      author: authorName,
+      type: StickerTypes.FULL,
+      quality: 70
+    });
+
+    const webpBuffer = await sticker.toBuffer();
+
+    await sock.sendMessage(jid, { sticker: webpBuffer }, { quoted: msg });
+    reactToMessage(sock, jid, msg.key, '✨');
+    logActivity(`[Sticker] Sticker créé avec succès pour ${jid} (Pack: ${packName})`);
+  } catch (err) {
+    console.error('Erreur handleStickerCommand:', err);
+    reactToMessage(sock, jid, msg.key, '❌');
+    await sock.sendMessage(jid, { text: `❌ حدث خطأ أثناء إنشاء الملصق: ${err.message}` }, { quoted: msg });
+  }
+}
+
+/**
+ * Commande .sp <nom / thème>
+ * Recherche et envoie une collection (pack) de 5 stickers avec description ✨ 𝕵𝖊𝖑𝖑𝖆𝖑 𝕱𝖊𝖗𝖓𝖆𝖓𝖉𝖊𝖟 ✨
+ */
+async function handleStickerPackCommand(sock, jid, messageText, msg) {
+  try {
+    const words = messageText.trim().split(/\s+/);
+    const query = words.slice(1).join(' ').trim();
+
+    if (!query) {
+      reactToMessage(sock, jid, msg.key, '❓');
+      const help = `✨ *طـريـقـة اسـتـخـدام حـزم الـمـلـصـقـات (.sp)* ✨\n\n` +
+        `اكتب: *.sp [اسم الشخصية أو الموضوع]*\n\n` +
+        `⋄ *أمـثـلـة :*\n` +
+        `  • *.sp Shisui*\n` +
+        `  • *.sp Itachi*\n` +
+        `  • *.sp Luffy*\n` +
+        `  • *.sp Cat*\n\n` +
+        `سيقوم البوت بجلب حزمة ملصقات كاملة (5 ملصقات) مخصصة باسم ✨ 𝕵𝖊𝖑𝖑𝖆𝖑 𝕱𝖊𝖗𝖓𝖆𝖓𝖉𝖊𝖟 ✨.`;
+      await sock.sendMessage(jid, { text: help }, { quoted: msg });
+      return;
+    }
+
+    reactToMessage(sock, jid, msg.key, '⏳');
+
+    await sock.sendMessage(jid, {
+      text: `⏳ *جـاري الـبـحـث وتـجـهـيـز حـزمـة مـلـصـقـات لـ "${query}"...*\n✨ الحزمة مخصصة باسم: *✨ 𝕵𝖊𝖑𝖑𝖆𝖑 𝕱𝖊𝖗𝖓𝖆𝖓𝖉𝖊𝖟 ✨*`
+    }, { quoted: msg });
+
+    const searchUrl = 'https://duckduckgo.com/?q=' + encodeURIComponent(query + ' anime sticker png') + '&t=h_&iax=images&ia=images';
+    const res = await fetch(searchUrl, {
+      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
+      signal: AbortSignal.timeout(10000)
+    });
+    const html = await res.text();
+    const vqdMatch = html.match(/vqd=([^&'"]+)/) || html.match(/vqd="([^"]+)"/);
+
+    if (!vqdMatch) {
+      await sock.sendMessage(jid, { text: `❌ لم يتم العثور على ملصقات تطابق "${query}". جرب اسماً آخر.` }, { quoted: msg });
+      return;
+    }
+
+    const imgUrl = 'https://duckduckgo.com/i.js?l=us-en&o=json&q=' + encodeURIComponent(query + ' sticker png') + '&vqd=' + vqdMatch[1] + '&f=,,,type:transparent,,&p=1';
+    const imgRes = await fetch(imgUrl, {
+      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
+      signal: AbortSignal.timeout(10000)
+    });
+    const imgData = await imgRes.json();
+    const items = (imgData.results || []).slice(0, 10);
+
+    if (items.length === 0) {
+      await sock.sendMessage(jid, { text: `❌ لم يتم العثور على أي ملصقات متوفرة لـ "${query}".` }, { quoted: msg });
+      return;
+    }
+
+    let sent = 0;
+    const targetCount = 5;
+
+    for (const item of items) {
+      if (sent >= targetCount) break;
+      try {
+        const r = await fetch(item.image, {
+          headers: { 'User-Agent': 'Mozilla/5.0' },
+          signal: AbortSignal.timeout(7000)
+        });
+        if (!r.ok) continue;
+
+        const arrayBuf = await r.arrayBuffer();
+        const buf = Buffer.from(arrayBuf);
+        if (buf.length < 1000) continue;
+
+        const sticker = new Sticker(buf, {
+          pack: '✨ 𝕵𝖊𝖑𝖑𝖆𝖑 𝕱𝖊𝖗𝖓𝖆𝖓𝖉𝖊𝖟 ✨',
+          author: '✨ 𝕵𝖊𝖑𝖑𝖆𝖑 𝕱𝖊𝖗𝖓𝖆𝖓𝖉𝖊𝖟 ✨',
+          type: StickerTypes.FULL,
+          quality: 70
+        });
+
+        const webp = await sticker.toBuffer();
+        await sock.sendMessage(jid, { sticker: webp });
+        sent++;
+
+        await new Promise(res => setTimeout(res, 800));
+      } catch (_) {}
+    }
+
+    if (sent === 0) {
+      await sock.sendMessage(jid, { text: `❌ تعذر تحميل ملصقات "${query}" حالياً، يرجى المحاولة لاحقاً.` }, { quoted: msg });
+    } else {
+      reactToMessage(sock, jid, msg.key, '✨');
+      logActivity(`[StickerPack] ${sent} stickers envoyés pour query "${query}"`);
+    }
+  } catch (err) {
+    console.error('Erreur handleStickerPackCommand:', err);
+    reactToMessage(sock, jid, msg.key, '❌');
+    await sock.sendMessage(jid, { text: `❌ حدث خطأ أثناء تجهيز الحزمة: ${err.message}` }, { quoted: msg });
+  }
+}
+
+/**
+ * Commande .song [nom / lien YouTube]
+ * Recherche ou utilise le lien YouTube pour télécharger et envoyer l'audio MP3
+ */
+async function handleSongCommand(sock, jid, messageText, msg) {
+  try {
+    const words = messageText.trim().split(/\s+/);
+    const query = words.slice(1).join(' ').trim();
+
+    if (!query) {
+      reactToMessage(sock, jid, msg.key, '❓');
+      const help = `🎵 *طـريـقـة تـحـمـيـل الـمـوسـيـقـى والأغـانـي (.song)* 🎵\n\n` +
+        `اكتب: *.song [اسم الأغنية أو رابط يوتيوب]*\n\n` +
+        `⋄ *أمـثـلـة :*\n` +
+        `  • *.song ignite alan walker*\n` +
+        `  • *.song faded alan walker*\n` +
+        `  • *.song https://youtu.be/Az-mGR-CehY*\n\n` +
+        `سيقوم البوت بجلب تفاصيل الأغنية وتحميلها وإرسال ملف MP3 الصوتي مباشرة 🎧.`;
+      await sock.sendMessage(jid, { text: help }, { quoted: msg });
+      return;
+    }
+
+    reactToMessage(sock, jid, msg.key, '🎧');
+
+    let video = null;
+    try {
+      const searchRes = await yts(query);
+      if (searchRes?.videos?.length > 0) {
+        video = searchRes.videos[0];
+      }
+    } catch (sErr) {
+      console.warn('Erreur recherche yts:', sErr.message);
+    }
+
+    if (!video) {
+      reactToMessage(sock, jid, msg.key, '❌');
+      await sock.sendMessage(jid, { text: `❌ لم يتم العثور على أي مقطع مطابق لـ "${query}" على يوتيوب.` }, { quoted: msg });
+      return;
+    }
+
+    if (video.seconds > 600) {
+      reactToMessage(sock, jid, msg.key, '⚠️');
+      await sock.sendMessage(jid, {
+        text: `⚠️ *المقطع طويل جداً* (${video.timestamp}) !\nالحد الأقصى المسموح به هو 10 دقائق لضمان سرعة التحميل وعدم استهلاك السيرفر.`
+      }, { quoted: msg });
+      return;
+    }
+
+    const songCard = `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🎵 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n` +
+      `       🏰 *إمـبـراطـوريـة بـاراديـس الـصـوتـيـة* 🏰\n` +
+      `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🎵 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n\n` +
+      `🎶 *الـعـنـوان :* ${video.title}\n` +
+      `👤 *الـفـنـان / الـقـنـاة :* ${video.author?.name || 'غير معروف'}\n` +
+      `⏱️ *الـمـدة :* ${video.timestamp}\n` +
+      `👁️ *الـمـشـاهـدات :* ${Number(video.views || 0).toLocaleString()}\n` +
+      `🔗 *الـرابـط :* ${video.url}\n\n` +
+      `⏳ *جـاري تـحـمـيـل الـمـلـف الـصـوتـي (MP3)... يـرجـى الانـتـظـار* 🎧\n\n` +
+      `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚔️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n` +
+      `       🏰 *PARADIS EMPIRE* 🏰`;
+
+    if (video.thumbnail) {
+      try {
+        const thumbRes = await fetch(video.thumbnail);
+        if (thumbRes.ok) {
+          const thumbBuf = Buffer.from(await thumbRes.arrayBuffer());
+          await sock.sendMessage(jid, { image: thumbBuf, caption: songCard }, { quoted: msg });
+        } else {
+          await sock.sendMessage(jid, { text: songCard }, { quoted: msg });
+        }
+      } catch (_) {
+        await sock.sendMessage(jid, { text: songCard }, { quoted: msg });
+      }
+    } else {
+      await sock.sendMessage(jid, { text: songCard }, { quoted: msg });
+    }
+
+    const tempDir = path.join(process.cwd(), 'temp_audio');
+    if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
+
+    const safeId = `${Date.now()}_${Math.random().toString(36).substring(7)}`;
+    const outputPattern = path.join(tempDir, `${safeId}.%(ext)s`);
+    const expectedMp3 = path.join(tempDir, `${safeId}.mp3`);
+
+    const ytdlpCmd = `yt-dlp -x --audio-format mp3 --audio-quality 5 --max-filesize 50M -o "${outputPattern}" "${video.url}"`;
+
+    let downloadedPath = null;
+
+    try {
+      await execAsync(ytdlpCmd, { timeout: 60000 });
+      if (fs.existsSync(expectedMp3)) {
+        downloadedPath = expectedMp3;
+      } else {
+        const files = fs.readdirSync(tempDir);
+        const match = files.find(f => f.startsWith(safeId));
+        if (match) downloadedPath = path.join(tempDir, match);
+      }
+    } catch (ytErr) {
+      console.warn('yt-dlp warning:', ytErr.message);
+    }
+
+    if (!downloadedPath || !fs.existsSync(downloadedPath)) {
+      reactToMessage(sock, jid, msg.key, '❌');
+      await sock.sendMessage(jid, {
+        text: '❌ تعذر تنزيل الأغنية من يوتيوب حالياً. قد يكون المقطع محمي بحقوق النشر أو غير متاح.'
+      }, { quoted: msg });
+      return;
+    }
+
+    const audioBuffer = fs.readFileSync(downloadedPath);
+    const safeTitle = (video.title || 'song').replace(/[^\w\s\u0600-\u06FF-]/g, '').trim().substring(0, 60);
+
+    await sock.sendMessage(jid, {
+      audio: audioBuffer,
+      mimetype: 'audio/mp4',
+      ptt: false,
+      fileName: `${safeTitle}.mp3`
+    }, { quoted: msg });
+
+    reactToMessage(sock, jid, msg.key, '✅');
+    logActivity(`[Song] "${video.title}" envoyé avec succès dans ${jid} (${audioBuffer.length} bytes)`);
+
+    try {
+      if (fs.existsSync(downloadedPath)) fs.unlinkSync(downloadedPath);
+    } catch (_) {}
+  } catch (err) {
+    console.error('Erreur handleSongCommand:', err);
+    reactToMessage(sock, jid, msg.key, '❌');
+    await sock.sendMessage(jid, { text: `❌ حدث خطأ أثناء جلب الأغنية: ${err.message}` }, { quoted: msg });
+  }
 }
 
 /**

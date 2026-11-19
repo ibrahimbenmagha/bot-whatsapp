@@ -89,6 +89,21 @@
 
 ## 5. Journal des Dernières Modifications
 
+* **2026-11-19 : Intégration Multimédia Avancée (Stickers & Musique YouTube)**
+  - **1. Créateur de Sticker avec Description (.s / .sticker) :**
+    - Permet de créer un sticker WhatsApp directement en répondant à une image, une vidéo courte (<= 10s) ou un GIF, ou en l'envoyant directement avec caption.
+    - Supporte une description personnalisée pour le nom du pack et de l'auteur (ex: `.s Mon Sticker` ou `.s Pack | Auteur`), avec métadonnées par défaut de l'Empire.
+  - **2. Générateur de Packs de Stickers Thématiques (.sp <nom>) :**
+    - Recherche et génère instantanément une collection de 5 stickers au format WebP transparents pour n'importe quelle requête (ex: `.sp Shisui`, `.sp Luffy`, `.sp Cat`).
+    - Tous les stickers générés via `.sp` portent obligatoirement la signature / description : **`✨ 𝕵𝖊𝖑𝖑𝖆𝖑 𝕱𝖊𝖗𝖓𝖆𝖓𝖉𝖊𝖟 ✨`**.
+    - Espacement de 800ms entre les envois pour éviter tout blocage ou détection de flood.
+  - **3. Téléchargeur de Musique YouTube (.song <nom ou lien>) :**
+    - Permet de télécharger et d'envoyer n'importe quelle musique ou chanson en MP3 sur WhatsApp (ex: `.song ignite alan walker` ou lien YouTube direct `https://youtu.be/...`).
+    - Affiche une fiche de présentation détaillée avec la miniature originale de la vidéo, le titre, la chaîne, la durée et les vues.
+    - Utilise `yt-search` pour la recherche et `yt-dlp` pour un encodage MP3 haute fidélité. Limite de sécurité fixée à 10 minutes pour préserver les performances du serveur.
+  - **4. Optimisation Docker :**
+    - Mise à jour de `Dockerfile` avec installation native de `ffmpeg`, `python3` et `yt-dlp` pour supporter ces fonctionnalités en environnement conteneurisé/Render.
+
 * **2026-11-15 : Déploiement des 9 Fonctionnalités Majeures de Sécurité & Modération Avancée (Paradis Empire v2)**
   - **1. Système de Mute Temporaire (.mute / .unmute) :**
     - Commandes `.mute @user [temps]` (ex: `.mute 10m`, `.mute 2h`, ou en réponse à un message) et `.unmute @user`.

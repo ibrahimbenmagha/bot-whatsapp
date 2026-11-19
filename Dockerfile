@@ -4,6 +4,15 @@ FROM node:20-slim
 # Définir le répertoire de travail
 WORKDIR /app
 
+# Installer ffmpeg, python3 et yt-dlp pour les fonctionnalités multimédia (stickers et musiques)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ffmpeg \
+    python3 \
+    python3-pip \
+    curl \
+    && pip3 install yt-dlp --break-system-packages \
+    && rm -rf /var/lib/apt/lists/*
+
 # Copier les fichiers de dépendances
 COPY package*.json ./
 
@@ -14,7 +23,7 @@ RUN npm install --omit=dev
 COPY . .
 
 # Créer les dossiers de persistance
-RUN mkdir -p auth_info_multi logs
+RUN mkdir -p auth_info_multi logs temp_audio
 
 # Variables d'environnement par défaut
 ENV NODE_ENV=production
