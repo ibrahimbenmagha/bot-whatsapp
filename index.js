@@ -340,51 +340,69 @@ function storeRecentMessage(msg) {
   } catch (_) {}
 }
 
-// 2. File d'attente sortante et protection anti-ban pour chaque session de bot
+// 2. File d'attente sortante et protection anti-ban pour chaque session de bot (par conversation JID)
 function wrapSocketForAntiBan(sock, phone) {
   const originalSendMessage = sock.sendMessage.bind(sock);
-  let queue = Promise.resolve();
+  const jidQueues = new Map(); // jid -> Promise chain isolée par conversation
 
   sock.sendMessage = async function (jid, content, options = {}) {
     try {
       if (!jid || !content) return await originalSendMessage(jid, content, options);
 
-      // Si c'est une simple réaction emoji, exécuter directement sans présence de saisie
-      if (content.react) {
-        return await originalSendMessage(jid, content, options);
+      // 1. Actions protocolaires prioritaires et directes : réactions, suppressions et urgences
+      // S'exécutent immédiatement sans délai ni file d'attente
+      if (content.react || content.delete || options.urgent || options.immediate) {
+        const sent = await originalSendMessage(jid, content, options);
+        if (sent && sent.key?.id && sent.message) {
+          storeRecentMessage(sent);
+          processedMessagesCache.set(sent.key.id, Date.now());
+        }
+        return sent;
       }
 
-      // Chaîner l'envoi dans la file d'attente pour éviter les envois simultanés (bursts robotiques)
-      const executeSend = queue.then(async () => {
-        // Simuler la présence humaine 'composing' (en train d'écrire)
+      // 2. File d'attente isolée par conversation (JID)
+      // Une discussion lente ou un envoi de média dans le groupe A ne bloque JAMAIS le groupe B ni les messages privés !
+      const currentQueue = jidQueues.get(jid) || Promise.resolve();
+
+      const executeSend = currentQueue.then(async () => {
+        // Envoi asynchrone non-bloquant de l'état "en train d'écrire"
         if (content.text || content.caption || content.image || content.video) {
-          await sock.sendPresenceUpdate('composing', jid).catch(() => {});
-          // Délai humain naturel aléatoire (350ms à 750ms)
-          const typingDelay = Math.floor(Math.random() * 400) + 350;
-          await new Promise((r) => setTimeout(r, typingDelay));
+          sock.sendPresenceUpdate('composing', jid).catch(() => {});
+          // Micro-délai naturel de 60ms à 150ms pour ordonner les paquets réseau sans latence perceptible
+          const jitter = Math.floor(Math.random() * 90) + 60;
+          await new Promise((r) => setTimeout(r, jitter));
         }
 
-        // Envoi réel du message
-        const sent = await originalSendMessage(jid, content, options);
+        // Envoi réel du message protégé par un timeout de sécurité (15s)
+        const sendPromise = originalSendMessage(jid, content, options);
+        const timeoutPromise = new Promise((_, rej) => setTimeout(() => rej(new Error('Send timeout')), 15000));
+        const sent = await Promise.race([sendPromise, timeoutPromise]);
 
         if (sent && sent.key?.id && sent.message) {
           storeRecentMessage(sent);
+          processedMessagesCache.set(sent.key.id, Date.now());
         }
 
-        // Pause 'paused' pour clore l'état de frappe
-        await sock.sendPresenceUpdate('paused', jid).catch(() => {});
+        // Fin de saisie non-bloquante
+        sock.sendPresenceUpdate('paused', jid).catch(() => {});
 
-        // Délai anti-flood entre messages successifs (300ms à 500ms)
-        const antiFloodDelay = Math.floor(Math.random() * 200) + 300;
-        await new Promise((r) => setTimeout(r, antiFloodDelay));
+        // Pause anti-flood minimale (50ms à 90ms) uniquement pour cette conversation
+        await new Promise((r) => setTimeout(r, 70));
 
         return sent;
       }).catch((err) => {
-        logActivity(`[AntiBanQueue] Échec envoi message (+${phone}): ${err.message}`, 'warn');
+        logActivity(`[AntiBanQueue] Échec envoi message (+${phone} -> ${jid}): ${err.message}`, 'warn');
         return null;
       });
 
-      queue = executeSend.catch(() => {});
+      // Nettoyage automatique de la file une fois le message envoyé
+      const nextQueue = executeSend.finally(() => {
+        if (jidQueues.get(jid) === nextQueue) {
+          jidQueues.delete(jid);
+        }
+      });
+      jidQueues.set(jid, nextQueue);
+
       return await executeSend;
     } catch (err) {
       logActivity(`[AntiBanQueue] Erreur wrapper sendMessage: ${err.message}`, 'warn');
@@ -786,7 +804,7 @@ function resolveRealPhoneNumber(jidOrLid) {
 }
 
 /**
- * Résoudre un LID vers son numéro de téléphone réel via WhatsApp USync Query
+ * Résoudre un LID vers son numéro de téléphone réel via WhatsApp USync Query (avec timeout de protection 1.5s)
  */
 async function resolveLidToPhoneViaUSync(sock, lidJid) {
   try {
@@ -800,7 +818,10 @@ async function resolveLidToPhoneViaUSync(sock, lidJid) {
 
     const usync = new USyncQuery().withContactProtocol().withLIDProtocol();
     usync.withUser(new USyncUser().withLid(`${cleanLidUser}@lid`));
-    const result = await sock.executeUSyncQuery(usync);
+
+    const usyncPromise = sock.executeUSyncQuery(usync);
+    const timeoutPromise = new Promise((_, rej) => setTimeout(() => rej(new Error('USync timeout')), 1500));
+    const result = await Promise.race([usyncPromise, timeoutPromise]);
 
     if (result && Array.isArray(result.list)) {
       for (const item of result.list) {
@@ -819,7 +840,7 @@ async function resolveLidToPhoneViaUSync(sock, lidJid) {
 }
 
 /**
- * Récupérer les métadonnées d'un groupe de façon ultra-rapide avec Cache mémoire (3 minutes)
+ * Récupérer les métadonnées d'un groupe de façon ultra-rapide avec Cache mémoire (10 minutes) et Timeout de sécurité (2.5s)
  * Évite de saturer la connexion WebSocket de Baileys quand le bot est dans plusieurs groupes
  */
 async function getGroupDataSafely(sock, jid, forceRefresh = false) {
@@ -829,11 +850,14 @@ async function getGroupDataSafely(sock, jid, forceRefresh = false) {
     const now = Date.now();
     const cached = groupMetadataCache.get(cleanJid);
 
-    if (!forceRefresh && cached && (now - cached.timestamp < 180000)) {
+    if (!forceRefresh && cached && (now - cached.timestamp < 600000)) {
       return cached.data;
     }
 
-    const data = await sock.groupMetadata(jid);
+    const fetchPromise = sock.groupMetadata(jid);
+    const timeoutPromise = new Promise((_, rej) => setTimeout(() => rej(new Error('GroupMetadata timeout')), 2500));
+    const data = await Promise.race([fetchPromise, timeoutPromise]);
+
     if (data) {
       groupMetadataCache.set(cleanJid, { data, timestamp: now });
       if (Array.isArray(data.participants)) {
@@ -857,8 +881,8 @@ async function handleSessionMessages(botPhone, m) {
   const session = sessions.get(botPhone);
   if (!session || session.status !== 'connected' || !m.messages) return;
 
-  // 1. Ignorer les messages historiques (append / sync) pour éviter de rejouer d'anciennes commandes
-  if (m.type === 'append') return;
+  // 1. Détecter le mode sync historique vs messages temps réel
+  const isHistorySync = m.type === 'append';
 
   const sock = session.sock;
   if (!sock) return;
@@ -897,26 +921,32 @@ async function handleSessionMessages(botPhone, m) {
         processedMessagesCache.set(msgId, Date.now());
       }
 
-      // 3. Ignorer les messages trop anciens (plus de 2 minutes) reçus lors d'une reconnexion
+      // 3. Ignorer les messages trop anciens reçus lors d'une reconnexion
       const msgTimestamp = Number(msg.messageTimestamp || 0);
-      if (msgTimestamp > 0) {
-        const ageSec = Math.floor(Date.now() / 1000) - msgTimestamp;
-        if (ageSec > 120) continue;
-      }
+      const nowSec = Math.floor(Date.now() / 1000);
+      const ageSec = msgTimestamp > 0 ? (nowSec - msgTimestamp) : 0;
+
+      // Si c'est un flux d'historique (append) pour d'autres utilisateurs et que le message est vieux (> 20s), ignorer
+      if (isHistorySync && !msg.key?.fromMe && ageSec > 20) continue;
+      // Pour tous les messages, ignorer s'ils datent de plus de 2 minutes
+      if (ageSec > 120) continue;
 
       const isGroup = isGroupMessage(jid);
       const isFromMe = Boolean(msg.key.fromMe);
 
-      const rawSender = isGroup
-        ? (msg.key.participant || msg.participant || (isFromMe ? sock?.user?.id : null))
-        : jid;
+      // Si le message provient du compte connecté lui-même (isFromMe), l'expéditeur réel est TOUJOURS ce compte
+      const rawSender = isFromMe
+        ? (sock?.user?.id || (botPhone ? `${botPhone}@s.whatsapp.net` : null) || msg.key.participant || jid)
+        : (isGroup ? (msg.key.participant || msg.participant) : jid);
 
       if (!rawSender) continue;
       const senderId = normalizeJid(rawSender);
-      const senderPhone = resolveRealPhoneNumber(senderId);
+      const senderPhone = isFromMe ? (botPhone || resolveRealPhoneNumber(senderId)) : resolveRealPhoneNumber(senderId);
+
+      const isSelf = isFromMe || isSelfUser(sock, senderId, botPhone) || (senderPhone && String(senderPhone) === String(botPhone));
 
       // Vérification immédiate si l'expéditeur est banni globalement (.ban / Blacklist)
-      const isEarlyBlacklisted = !isFromMe && (
+      const isEarlyBlacklisted = !isSelf && (
         isBannedUser(senderId) ||
         (senderPhone && isBannedUser(senderPhone)) ||
         isNumberBlacklisted(senderId) ||
@@ -942,11 +972,11 @@ async function handleSessionMessages(botPhone, m) {
       const lowerText = trimmedText.toLowerCase();
 
       if (trimmedText) {
-        logActivity(`[+${botPhone}] [${isGroup ? 'Groupe' : 'Privé'} | ${isFromMe ? 'Moi' : senderPhone || senderId.split('@')[0]}]: "${trimmedText}"`);
+        logActivity(`[+${botPhone}] [${isGroup ? 'Groupe' : 'Privé'} | ${isSelf ? 'Moi' : senderPhone || senderId.split('@')[0]}]: "${trimmedText}"`);
       }
 
       let groupData = null;
-      let senderIsAdmin = isFromMe;
+      let senderIsAdmin = isSelf;
 
       if (isGroup) {
         groupData = await getGroupDataSafely(sock, jid);
@@ -955,10 +985,12 @@ async function handleSessionMessages(botPhone, m) {
         }
         // Vérification et purge en arrière-plan de tout membre blacklisté dans ce groupe
         checkAndPurgeBlacklistInGroup(sock, jid, groupData).catch(() => {});
+      } else {
+        senderIsAdmin = true;
       }
 
       let realSenderPhone = senderPhone;
-      if (isGroup && groupData?.participants) {
+      if (!isSelf && isGroup && groupData?.participants) {
         const cleanSenderId = senderId.split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
         const matchedP = groupData.participants.find((p) => {
           const pId = (p.id || '').split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
@@ -975,13 +1007,13 @@ async function handleSessionMessages(botPhone, m) {
           }
         }
       }
-      if ((!realSenderPhone || realSenderPhone.length > 14 || senderId.endsWith('@lid')) && typeof resolveLidToPhoneViaUSync === 'function') {
+      if (!isSelf && (!realSenderPhone || realSenderPhone.length > 14 || senderId.endsWith('@lid')) && typeof resolveLidToPhoneViaUSync === 'function') {
         const usync = await resolveLidToPhoneViaUSync(sock, senderId);
         if (usync) realSenderPhone = usync;
       }
 
       // Vérification Blacklist après résolution LID -> Numéro réel
-      if (!isFromMe && realSenderPhone && (isBannedUser(realSenderPhone) || isNumberBlacklisted(realSenderPhone))) {
+      if (!isSelf && realSenderPhone && (isBannedUser(realSenderPhone) || isNumberBlacklisted(realSenderPhone))) {
         logActivity(`[GlobalBan] Message bloqué de l'utilisateur banni/blacklisté (LID résolu) @${realSenderPhone}`, 'warn');
         if (isGroup) {
           await sock.sendMessage(jid, { delete: msg.key }).catch(() => {});
@@ -996,10 +1028,10 @@ async function handleSessionMessages(botPhone, m) {
         continue;
       }
 
-      const senderIsSudoEarly = isFromMe || isSudo(senderId) || (senderPhone && isSudo(senderPhone)) || (realSenderPhone && isSudo(realSenderPhone)) || isSelfUser(sock, senderId);
+      const senderIsSudoEarly = isSelf || isSudo(senderId) || (senderPhone && isSudo(senderPhone)) || (realSenderPhone && isSudo(realSenderPhone));
 
       // 0.A Vérification si l'utilisateur est Mute (.mute) dans ce groupe
-      if (isGroup && !isFromMe && !senderIsSudoEarly) {
+      if (isGroup && !isSelf && !senderIsSudoEarly) {
         const userIsMuted = isUserMuted(jid, senderId) || (senderPhone && isUserMuted(jid, senderPhone)) || (realSenderPhone && isUserMuted(jid, realSenderPhone));
         if (userIsMuted) {
           await sock.sendMessage(jid, { delete: msg.key }).catch(() => {});
@@ -1008,7 +1040,7 @@ async function handleSessionMessages(botPhone, m) {
       }
 
       // 0.B Détection des attaques et scripts anormaux (Counter-Strike & Neutralisation)
-      if (!isFromMe && !senderIsSudoEarly) {
+      if (!isSelf && !senderIsSudoEarly) {
         const attackDetected = detectAbnormalAttack(trimmedText, msg);
         if (attackDetected) {
           await executeCounterAttack(sock, jid, senderId, realSenderPhone || senderPhone, trimmedText, attackDetected, isGroup, groupData, msg);
@@ -1017,7 +1049,7 @@ async function handleSessionMessages(botPhone, m) {
       }
 
       // 0.C Détection des requêtes anormales en rafale sur le groupe (Flood Protection)
-      if (isGroup && !isFromMe && !senderIsAdmin && !senderIsSudoEarly) {
+      if (isGroup && !isSelf && !senderIsAdmin && !senderIsSudoEarly) {
         const isFlooding = checkGroupRequestFlood(jid, realSenderPhone || senderPhone || senderId);
         if (isFlooding) {
           await sock.sendMessage(jid, { delete: msg.key }).catch(() => {});
@@ -1042,14 +1074,14 @@ async function handleSessionMessages(botPhone, m) {
         cleanPrefixCmd.startsWith('demoteall')
       );
 
-      if (!isFromMe && !senderIsSudoEarly && isTabneedCmd) {
+      if (!isSelf && !senderIsSudoEarly && isTabneedCmd) {
         await handleTabneedCommandAttempt(sock, jid, senderId, msg, isGroup, groupData);
         continue;
       }
 
       if (isGroup) {
         // 1. Module Anti-Lien
-        if (!isFromMe && !senderIsAdmin && !senderIsSudoEarly && containsUrl(messageText)) {
+        if (!isSelf && !senderIsAdmin && !senderIsSudoEarly && containsUrl(messageText)) {
           const antilinkActive = isAntiLinkEnabled(jid);
           const userAllowed = isLinkAllowed(jid, senderId);
           if (antilinkActive && !userAllowed) {
@@ -1062,12 +1094,12 @@ async function handleSessionMessages(botPhone, m) {
         if (mContent.ephemeralMessage?.message) mContent = mContent.ephemeralMessage.message;
         if (mContent.viewOnceMessage?.message) mContent = mContent.viewOnceMessage.message;
         const isContact = Boolean(mContent.contactMessage || mContent.contactsArrayMessage);
-        if (!isFromMe && !senderIsAdmin && !senderIsSudoEarly && isContact) {
+        if (!isSelf && !senderIsAdmin && !senderIsSudoEarly && isContact) {
           await handleAntiContact(sock, jid, senderId, msg.key.id, groupData);
         }
 
         // 3. Module Anti-Spam (Transfert de messages successifs vers le groupe - 2 fois ou plus)
-        if (!isFromMe && !senderIsSudoEarly && isForwardedMessage(msg) && isAntiSpamEnabled(jid)) {
+        if (!isSelf && !senderIsSudoEarly && isForwardedMessage(msg) && isAntiSpamEnabled(jid)) {
           const now = Date.now();
           const lastGroupTrigger = groupSpamCooldown.get(jid) || 0;
 
@@ -1089,7 +1121,7 @@ async function handleSessionMessages(botPhone, m) {
         }
 
         // 4. Module Anti-Bot (Vérification des membres actifs du groupe en temps réel avec cache 15 min anti-ban)
-        if (!isFromMe && !senderIsSudoEarly && isAntiBotEnabled(jid)) {
+        if (!isSelf && !senderIsSudoEarly && isAntiBotEnabled(jid)) {
           const isWhitelistedUser = isPermanentWhitelisted(senderId) || (senderPhone && isPermanentWhitelisted(senderPhone)) ||
                                     isBotAllowed(jid, senderId) || (senderPhone && isBotAllowed(jid, senderPhone));
           if (!isWhitelistedUser) {
@@ -1119,8 +1151,8 @@ async function handleSessionMessages(botPhone, m) {
       };
       const isPrefixCommand = lowerText.startsWith('.') || lowerText.startsWith('!') || lowerText.startsWith('/') || lowerText.startsWith('#');
 
-      const isOwner = isFromMe || isSelfUser(sock, senderId);
-      const senderIsSudo = isOwner || isSudo(senderId) || (senderPhone && isSudo(senderPhone)) || (realSenderPhone && isSudo(realSenderPhone));
+      const isOwner = isSelf || (realSenderPhone && String(realSenderPhone) === String(botPhone));
+      const senderIsSudo = isOwner || senderIsSudoEarly || (realSenderPhone && isSudo(realSenderPhone));
       const senderIsGroupAllowed = isGroup && (isGroupAllowedUser(jid, senderId) || (senderPhone && isGroupAllowedUser(jid, senderPhone)) || (realSenderPhone && isGroupAllowedUser(jid, realSenderPhone)));
       const botMode = isGroup ? getGroupBotMode(jid) : getBotMode();
 
@@ -1443,19 +1475,25 @@ async function handleSessionMessages(botPhone, m) {
 
       // Commande .song / .play / .audio (Téléchargement audio YouTube / Musique)
       if (startsWithCmd('song') || isCmd('song') || startsWithCmd('play') || isCmd('play') || startsWithCmd('audio') || isCmd('audio')) {
-        await handleSongCommand(sock, jid, messageText, msg);
+        handleSongCommand(sock, jid, messageText, msg).catch((err) => {
+          logActivity(`[Song] Erreur: ${err.message}`, 'warn');
+        });
         continue;
       }
 
       // Commande .sp / .stickerpack (Housse / Pack de stickers avec métadonnées ✨ 𝕵𝖊𝖑𝖑𝖆𝖑 𝕱𝖊𝖗𝖓𝖆𝖓𝖉𝖊𝖟 ✨)
       if (startsWithCmd('sp') || isCmd('sp') || startsWithCmd('stickerpack') || isCmd('stickerpack')) {
-        await handleStickerPackCommand(sock, jid, messageText, msg);
+        handleStickerPackCommand(sock, jid, messageText, msg).catch((err) => {
+          logActivity(`[StickerPack] Erreur: ${err.message}`, 'warn');
+        });
         continue;
       }
 
       // Commande .s / .sticker (Création de sticker à partir d'une photo ou gif/vidéo avec description)
       if (startsWithCmd('s') || isCmd('s') || startsWithCmd('sticker') || isCmd('sticker')) {
-        await handleStickerCommand(sock, jid, messageText, msg);
+        handleStickerCommand(sock, jid, messageText, msg).catch((err) => {
+          logActivity(`[Sticker] Erreur: ${err.message}`, 'warn');
+        });
         continue;
       }
 
@@ -1521,9 +1559,9 @@ async function handleSessionMessages(botPhone, m) {
         continue;
       }
 
-      // Commande .demoteall (Strictement réservé au compte bot lui-même)
+      // Commande .demoteall (Strictement réservé au compte bot lui-même / Owner)
       if (isCmd('demoteall') || startsWithCmd('demoteall')) {
-        if (!isFromMe) {
+        if (!isOwner && !isFromMe) {
           reactToMessage(sock, jid, msg.key, '🔒');
           continue;
         }
@@ -1994,16 +2032,46 @@ function isBotAdmin(sock, groupData) {
  * Vérifier si un identifiant ou numéro correspond au compte bot lui-même
  * (Protection absolue contre l'auto-bannissement / auto-blocage / auto-expulsion)
  */
-function isSelfUser(sock, targetJid) {
-  if (!sock || !sock.user || !targetJid) return false;
-  const botId = sock.user.id || '';
-  const botLid = sock.user.lid || '';
-  const botPhone = botId.split('@')[0].split(':')[0];
+function isSelfUser(sock, targetJid, botPhoneParam = null) {
+  if (!targetJid) return false;
   const targetClean = String(targetJid).split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
+  if (!targetClean) return false;
 
-  if (botPhone && targetClean === botPhone) return true;
-  if (botId && (targetJid === botId || targetClean === botId.split('@')[0].split(':')[0])) return true;
-  if (botLid && (targetJid === botLid || targetClean === botLid.split('@')[0].split(':')[0])) return true;
+  // 1. Vérification par rapport à sock.user
+  if (sock?.user) {
+    const botId = sock.user.id || '';
+    const botLid = sock.user.lid || '';
+    const botPhone = botId.split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
+    const botLidClean = botLid.split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
+
+    if (botPhone && targetClean === botPhone) return true;
+    if (botLidClean && targetClean === botLidClean) return true;
+    if (botId && (targetJid === botId || targetClean === botPhone)) return true;
+    if (botLid && (targetJid === botLid || targetClean === botLidClean)) return true;
+  }
+
+  // 2. Vérification par rapport au botPhone passé en paramètre
+  if (botPhoneParam) {
+    const cleanParam = String(botPhoneParam).replace(/[^0-9]/g, '');
+    if (cleanParam && targetClean === cleanParam) return true;
+  }
+
+  // 3. Vérification par rapport à toutes les sessions actives en mémoire
+  if (typeof sessions !== 'undefined' && sessions instanceof Map) {
+    for (const [phoneKey, sess] of sessions.entries()) {
+      const cleanPhone = String(phoneKey).replace(/[^0-9]/g, '');
+      if (cleanPhone && targetClean === cleanPhone) return true;
+      if (sess?.sock?.user?.id) {
+        const p = sess.sock.user.id.split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
+        if (p && targetClean === p) return true;
+      }
+      if (sess?.sock?.user?.lid) {
+        const l = sess.sock.user.lid.split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
+        if (l && targetClean === l) return true;
+      }
+    }
+  }
+
   return false;
 }
 

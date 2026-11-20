@@ -89,6 +89,19 @@
 
 ## 5. Journal des Dernières Modifications
 
+* **2026-11-20 : Résolution de l'Inaccessibilité par le Numéro Connecté & Optimisation Majeure de la Réactivité (Zéro Latence)**
+  - **1. Correction de l'utilisation par le numéro connecté (Owner / Téléphone principal) :**
+    - Suppression du blocage prématuré `if (m.type === 'append') return;` qui rejetait systématiquement toutes les commandes envoyées depuis le téléphone principal WhatsApp du bot (les messages sortants du téléphone arrivent souvent avec `type: 'append'`). Les commandes récentes (`ageSec <= 60s`) envoyées par le compte connecté sont désormais traitées immédiatement.
+    - Correction de la résolution de l'expéditeur (`rawSender`) en message privé : lorsque `isFromMe = true`, `rawSender` pointe toujours vers le compte bot lui-même (`sock.user.id` / `botPhone`) au lieu de pointer vers le destinataire (`jid`).
+    - Renforcement de `isSelfUser(sock, targetJid, botPhoneParam)` : identification infaillible des comptes bot à travers les LIDs, JIDs multi-appareils (`:1@s.whatsapp.net`), numéros bruts et toutes les sessions actives.
+    - Bypass immédiat et attribution instantanée des permissions (`isOwner = true`, `senderIsSudo = true`, `senderIsAdmin = true`), court-circuitant tout appel réseau USync/LID pour le numéro connecté.
+  - **2. Élimination des goulots d'étranglement et accélération de la vitesse de réponse :**
+    - **Files d'attente isolées par conversation (`Map<jid, Promise>`) dans `wrapSocketForAntiBan` :** Le bot ne bloque plus tous les groupes et discussions derrière un seul message en cours d'envoi. Chaque chat a sa file indépendante.
+    - **Présence 'composing' non-bloquante :** L'indicateur d'écriture est envoyé de manière asynchrone sans bloquer l'envoi du message réel.
+    - **Envois immédiats prioritaires :** Les réactions emoji (`react`), suppressions de messages (`delete`) et messages urgents sont envoyés instantanément (0ms de latence artificielle).
+    - **Timeouts stricts de sécurité :** Ajout de timeouts (15s sur `sendMessage`, 2.5s sur `groupMetadata`, 1.5s sur `executeUSyncQuery`) pour garantir qu'aucune requête WhatsApp lente ne puisse paralyser le bot.
+    - **Exécution asynchrone des commandes lourdes (`.song`, `.sp`, `.s`) :** Les téléchargements audio et générations de packs de stickers s'exécutent en tâche de fond avec gestion d'erreurs, laissant la boucle de messages libre de répondre instantanément aux autres commandes (`.menu`, `.ping`, `.status`, etc.).
+
 * **2026-11-19 : Intégration Multimédia Avancée (Stickers & Musique YouTube)**
   - **1. Créateur de Sticker avec Description (.s / .sticker) :**
     - Permet de créer un sticker WhatsApp directement en répondant à une image, une vidéo courte (<= 10s) ou un GIF, ou en l'envoyant directement avec caption.
