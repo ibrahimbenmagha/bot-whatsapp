@@ -89,6 +89,17 @@
 
 ## 5. Journal des Dernières Modifications
 
+* **2026-11-25 : Système Anti-Service & Anti-AutoRéponse des Autres Bots (.antiservice [on/off])**
+  - **1. Neutralisation des Transactions et Auto-Réponses de Bots :**
+    - Nouvelle commande d'administration de groupe : `.antiservice on`, `.antiservice off` et `.antiservice` (statut actuel).
+    - Détecte et supprime automatiquement toute auto-réponse (AutoResponder, WhatsAuto, WhatsApp Business messages automatiques en arabe, français, anglais).
+    - Intercepte et bloque toutes les transactions de bots (reçus de paiement, recharges, points, numéros de transactions, commandes, messages de facturation).
+    - Intercepte structurellement tous les messages interactifs exclusifs aux bots (`buttonsMessage`, `templateMessage`, `listMessage`, `interactiveMessage`, `orderMessage`, etc.).
+    - Cooldown anti-flood de 30 secondes pour les notifications afin d'éviter toute boucle de spam dans le chat.
+    - Persistance SQLite dans `botdata.db` via `isAntiServiceEnabled(groupId)` et `setAntiServiceEnabled(groupId, enabled)`.
+    - Intégration complète dans le menu `.help` / `.menu` et dans la commande `.status`.
+    - Immunité totale préservée pour le Bot, les Sudo et la Trust List permanente.
+
 * **2026-11-20 : Résolution de l'Inaccessibilité par le Numéro Connecté & Optimisation Majeure de la Réactivité (Zéro Latence)**
   - **1. Correction de l'utilisation par le numéro connecté (Owner / Téléphone principal) :**
     - Suppression du blocage prématuré `if (m.type === 'append') return;` qui rejetait systématiquement toutes les commandes envoyées depuis le téléphone principal WhatsApp du bot (les messages sortants du téléphone arrivent souvent avec `type: 'append'`). Les commandes récentes (`ageSec <= 60s`) envoyées par le compte connecté sont désormais traitées immédiatement.

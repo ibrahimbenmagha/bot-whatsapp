@@ -1013,6 +1013,29 @@ export function setAutoCleanEnabled(groupId, enabled) {
 }
 
 // ----------------------------------------------------
+// 1.5 Système Anti-Service / Anti-AutoRéponse des autres bots (.antiservice)
+// ----------------------------------------------------
+export function isAntiServiceEnabled(groupId) {
+  try {
+    if (!groupId) return false;
+    const cleanId = cleanGroupId(groupId);
+    return getSetting(`antiservice_${cleanId}`, 'off') === 'on';
+  } catch (error) {
+    return false;
+  }
+}
+
+export function setAntiServiceEnabled(groupId, enabled) {
+  try {
+    if (!groupId) return false;
+    const cleanId = cleanGroupId(groupId);
+    return setSetting(`antiservice_${cleanId}`, enabled ? 'on' : 'off');
+  } catch (error) {
+    return false;
+  }
+}
+
+// ----------------------------------------------------
 // 2. Fermeture / Ouverture Programmée du Groupe (.sleep)
 // ----------------------------------------------------
 export function getGroupSleepSchedule(groupId) {

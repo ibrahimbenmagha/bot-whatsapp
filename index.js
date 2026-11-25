@@ -82,7 +82,9 @@ import {
   muteUser,
   unmuteUser,
   isAntiDeleteEnabled,
-  setAntiDeleteEnabled
+  setAntiDeleteEnabled,
+  isAntiServiceEnabled,
+  setAntiServiceEnabled
 } from './db.js';
 import { isAdmin, extractMessage, containsUrl, isGroupMessage, formatMention, normalizeJid } from './utils/helpers.js';
 
@@ -1133,6 +1135,20 @@ async function handleSessionMessages(botPhone, m) {
             }
           }
         }
+
+        // 5. Module Anti-Service & Anti-AutoRéponse (.antiservice)
+        // Stoppe et supprime les auto-réponses, boutons, menus et transactions des autres bots
+        if (!isSelf && !senderIsSudoEarly && isAntiServiceEnabled(jid)) {
+          const isWhitelistedUser = isPermanentWhitelisted(senderId) || (senderPhone && isPermanentWhitelisted(senderPhone)) ||
+                                    isBotAllowed(jid, senderId) || (senderPhone && isBotAllowed(jid, senderPhone));
+          if (!isWhitelistedUser) {
+            const botServiceDetected = isBotServiceOrAutoReply(msg, trimmedText, senderId, senderPhone);
+            if (botServiceDetected) {
+              await handleAntiServiceViolation(sock, jid, senderId, senderPhone, msg, botServiceDetected, groupData);
+              continue;
+            }
+          }
+        }
       } else {
         senderIsAdmin = true;
       }
@@ -1411,6 +1427,21 @@ async function handleSessionMessages(botPhone, m) {
           continue;
         }
         await handleAutoCleanToggleCommand(sock, jid, messageText, msg);
+        continue;
+      }
+
+      // Commande .antiservice [on/off] (Group Admins / Sudo)
+      if (startsWithCmd('antiservice') || isCmd('antiservice') || startsWithCmd('antiserv') || isCmd('antiserv') || startsWithCmd('anti-service') || isCmd('anti-service')) {
+        if (!senderIsAdmin && !senderIsSudo) {
+          reactToMessage(sock, jid, msg.key, '🔒');
+          continue;
+        }
+        reactToMessage(sock, jid, msg.key, '🛑');
+        if (!isGroup) {
+          await sock.sendMessage(jid, { text: 'ℹ️ هذه العملية تعمل فقط داخل المجموعات.' });
+          continue;
+        }
+        await handleAntiServiceToggleCommand(sock, jid, messageText, msg, senderIsAdmin, senderIsSudo);
         continue;
       }
 
@@ -3461,8 +3492,9 @@ async function handleHelpCommand(sock, jid, isAdminUser, senderId = null, sessio
       helpText += `│ ⋄ *.mute @عضو [10m/2h]* ⇠ كـتـم مـؤقـت لـعـضـو داخـل الـمـجـمـوعـة 🔇\n`;
       helpText += `│ ⋄ *.unmute @عضو* ⇠ إلـغـاء كـتـم الـعـضـو 🔊\n`;
       helpText += `│ ⋄ *.sleep [23:00-07:00 / off]* ⇠ جـدولـة إغـلاق وفـتـح الـمـجـمـوعـة تـلـقـائـيـاً 🌙\n`;
-      helpText += `│ ⋄ *.autoclean [on/off]* ⇠ تـنـظـيـف تـلـقـائـي لـرسـائـل الـنـظـام 🧹\n`;
-      helpText += `│ ⋄ *.promote @عضو* ⇠ تـرقـيـة عـضـو إلـى مـشـرف 🎖️\n`;
+      helpText += `│ ⋄ *.autoclean [on/off]* ⇠ تـنـظـيـف تـلـقـائـي لـرسـائـل الـنـظـام 🧹\n` +
+`│ ⋄ *.antiservice [on/off]* ⇠ تـعـطـيـل الـردود الـتـلـقـائـيـة ومـعـامـلات الـبـوتـات الأخـرى 🛑\n` +
+`│ ⋄ *.promote @عضو* ⇠ تـرقـيـة عـضـو إلـى مـشـرف 🎖️\n`;
       helpText += `│ ⋄ *.demote @عضو* ⇠ تـنـزيـل مـشـرف إلـى عـضـو ⬇️\n`;
       helpText += `│ ⋄ *.demoteall* ⇠ تـنـزيـل كـافـة الـمـشـرفـيـن (حـصـري لـلـبـوت) 🧹\n`;
       helpText += `│ ⋄ *.scan* ⇠ فـحـص كـافـة الأعـضـاء لـكـشـف الأجـهـزة والـبـوتـات 🔍\n` +
@@ -3516,6 +3548,7 @@ async function handleHelpCommand(sock, jid, isAdminUser, senderId = null, sessio
     helpText += `│ ⋄ 🤖 *مـضـاد الـبـوتـات* : كـشـف الأجـهـزة الـمـرتـبـطـة + طـرد فـوري 🤖\n`;
     helpText += `│ ⋄ 🔇 *الـكـتـم الـمـؤقـت* : حـذف رسـائـل الـمـكـتـوم فـوراً 🔇\n`;
     helpText += `│ ⋄ 🗑️ *كـاشـف الـمـحـذوفـات* : إرسـال الـرسـائـل الـمـحـذوفـة لـرقـم الـبـوت الـخـاص 🗑️\n`;
+    helpText += `│ ⋄ 🛑 *مـضـاد الـخـدمـات والـرد الـتـلـقـائـي* : مـنـع وحـذف ردود ومـعـامـلات الـبـوتـات الأخـرى 🛑\n`;
     helpText += `│ ⋄ ⚔️ *الـردع والـرد الـمـضـاد* : تـحـيـيـد سـكـريـبـتـات الـهـجـوم وعـكـسـهـا لـلـمـهـاجـم ⚔️\n`;
     helpText += `╰─────────────────────⊷\n\n`;
 
@@ -3554,6 +3587,7 @@ async function handleStatusCommand(sock, jid, groupData = null, session = null) 
     const sudoCount = getSudoList().length;
     const antibotStatus = isGroup ? (isAntiBotEnabled(jid) ? '🟢 مـفـعـل (ON)' : '🔴 مـعـطـل (OFF)') : '🔴 مـعـطـل (OFF)';
     const antispamStatus = isGroup ? (isAntiSpamEnabled(jid) ? '🟢 مـفـعـل (ON)' : '🔴 مـعـطـل (OFF)') : '🔴 مـعـطـل (OFF)';
+    const antiserviceStatus = isGroup ? (isAntiServiceEnabled(jid) ? '🟢 مـفـعـل (ON)' : '🔴 مـعـطـل (OFF)') : '🔴 مـعـطـل (OFF)';
 
     let text = `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚡ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
     text += `       🏰 *حـالـة الـحـسـاب والـبـوت* 🏰\n`;
@@ -3567,6 +3601,7 @@ async function handleStatusCommand(sock, jid, groupData = null, session = null) 
     text += `🏰 *الـمـجـمـوعـة الـحـالـيـة* : ${groupName}\n`;
     text += `🤖 *مـضـاد الـبـوتـات* : ${antibotStatus}\n`;
     text += `🚨 *مـضـاد الـسـبـام* : ${antispamStatus}\n`;
+    text += `🛑 *مـضـاد الـخـدمـات والـردود* : ${antiserviceStatus}\n`;
     text += `⚠️ *الـحـد الأقـصـى لـلإنـذارات* : ${CONFIG.maxWarnings}\n\n`;
     text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚔️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
     text += `       🏰 *PARADIS EMPIRE* 🏰`;
@@ -4696,6 +4731,177 @@ async function handleAutoCleanToggleCommand(sock, jid, messageText, msg) {
     await sock.sendMessage(jid, { text }, { quoted: msg });
   } catch (err) {
     console.error('Erreur handleAutoCleanToggleCommand:', err);
+  }
+}
+
+/**
+ * Détection des auto-réponses et transactions des autres bots
+ * (Messages interactifs/boutons, messages de commande, reçus de transaction, auto-réponses)
+ */
+function isBotServiceOrAutoReply(msg, text, senderId, senderPhone) {
+  if (!msg || !msg.message) return false;
+
+  let mContent = msg.message;
+  if (mContent.ephemeralMessage?.message) mContent = mContent.ephemeralMessage.message;
+  if (mContent.viewOnceMessage?.message) mContent = mContent.viewOnceMessage.message;
+
+  // 1. Détection structurelle : Types de messages interactifs exclusifs aux bots et business automatisés
+  const isInteractiveBotMsg = Boolean(
+    mContent.buttonsMessage ||
+    mContent.templateMessage ||
+    mContent.listMessage ||
+    mContent.interactiveMessage ||
+    mContent.buttonsResponseMessage ||
+    mContent.templateButtonReplyMessage ||
+    mContent.listResponseMessage ||
+    mContent.interactiveResponseMessage ||
+    mContent.orderMessage ||
+    mContent.paymentRequestMessage ||
+    mContent.paymentStatusMessage ||
+    mContent.invoiceMessage ||
+    mContent.catalogMessage ||
+    mContent.productMessage ||
+    mContent.shopMessage
+  );
+  if (isInteractiveBotMsg) {
+    return { type: 'interactive_bot_message', reason: 'رسالة تفاعلية / أزرار / قوائم خاصة بالبوتات' };
+  }
+
+  // 2. Détection textuelle : Signatures explicites d'auto-répondeur ou de transactions
+  if (text) {
+    // A. Signatures d'auto-répondeur (WhatsAuto, AutoResponder, Business Quick Reply)
+    const autoReplyHeaderRegex = /^(?:\[?(?:auto[ -]?reply|auto[ -]?response|réponse automatique|message automatique|رد تلقائي|الرد التلقائي|رسالة تلقائية)\]?[:\s\n])/i;
+    const autoReplyBodyRegex = /(?:هذا (?:الرد|المسج|الرسالة) (?:تلقائي|آلي|أوتوماتيكي)|رسالة مبرمجة تلقائياً|هذا رد آلي|هذا رد تلقائي|this is an automated (?:response|reply|message)|this message was sent automatically|ceci est une réponse automatique|message envoyé automatiquement)/i;
+
+    if (autoReplyHeaderRegex.test(text) || autoReplyBodyRegex.test(text)) {
+      return { type: 'auto_reply', reason: 'رد تلقائي مبرمج (Auto-Reply)' };
+    }
+
+    // B. Transactions automatisées de bots (Boutique, recharge, simulateurs, points)
+    const transactionRegex = /(?:معاملة رقم|رقم المعاملة|رمز المعاملة|معرف المعاملة|رقم الطلب|كود الطلب|تم التحويل بنجاح|تمت المعاملة بنجاح|تم الشحن بنجاح|تم استلام الدفعة|سحب رصيد|إيداع رصيد|رصيدك الحالي|تفاصيل الطلب|transaction id|transaction successful|transaction confirm|order id|order confirmed|payment confirmed|payment received|transfer successful|transaction réussie|commande confirmée|paiement reçu|transfert réussi)/i;
+    if (transactionRegex.test(text)) {
+      return { type: 'bot_transaction', reason: 'معاملة مالية / تجارية خاصة ببوت (Bot Transaction)' };
+    }
+
+    // C. Menus de services automatisés
+    const serviceBotRegex = /(?:بوت الخدمات|نظام الخدمات|خدمة العملاء الآلية|خدمة ذاتية|اختر من القائمة أدناه|اضغط على الزر أدناه|service bot|service menu|bot transaction|bot service)/i;
+    if (serviceBotRegex.test(text)) {
+      return { type: 'bot_service', reason: 'خدمة تفاعلية آلية لبوت (Bot Service)' };
+    }
+  }
+
+  // 3. Détection de réponse automatique de bot à un ordre / commande
+  const contextInfo = msg.message?.extendedTextMessage?.contextInfo;
+  if (contextInfo?.quotedMessage && text) {
+    const quotedText = (
+      contextInfo.quotedMessage.conversation ||
+      contextInfo.quotedMessage.extendedTextMessage?.text ||
+      contextInfo.quotedMessage.imageMessage?.caption ||
+      ''
+    ).trim().toLowerCase();
+
+    const isQuotingBotCommand = /^[.!/#$][a-z0-9_]{2,15}/i.test(quotedText);
+    if (isQuotingBotCommand) {
+      if (/^[⎔│╭╰┌└┏┗🏰🤖⚙️⚡⏳]/.test(text) || /(?:processing|command executed|تم تنفيذ الأمر|جاري المعالجة|menu|commands)/i.test(text)) {
+        return { type: 'bot_command_reply', reason: 'رد مبرمج على أمر بوت آخر' };
+      }
+    }
+  }
+
+  return false;
+}
+
+const antiServiceAlertCooldown = new Map(); // jid -> timestamp
+/**
+ * Procédure de neutralisation Anti-Service : supprime la transaction/auto-réponse
+ */
+async function handleAntiServiceViolation(sock, jid, senderId, senderPhone, msg, violation, groupData) {
+  try {
+    // 1. Suppression immédiate de la transaction ou de l'auto-réponse
+    if (msg.key) {
+      await sock.sendMessage(jid, { delete: msg.key }).catch(() => {});
+    }
+
+    const targetPhone = senderPhone || senderId.split('@')[0].split(':')[0];
+    logActivity(`[AntiService] Auto-réponse / transaction neutralisée (@${targetPhone}) dans ${jid} : ${violation.reason}`, 'warn');
+
+    // 2. Alerte légère avec cooldown anti-flood de 30 secondes pour ne pas polluer le groupe
+    const now = Date.now();
+    const lastAlert = antiServiceAlertCooldown.get(jid) || 0;
+    if (now - lastAlert > 30000) {
+      antiServiceAlertCooldown.set(jid, now);
+      let alertText = `🛑 *مـضـاد الـخـدمـات والـردود الـتـلـقـائـيـة (Anti-Service)* 🛑\n\n`;
+      alertText += `⋄ تـم إيـقـاف وحـذف مـعـامـلـة / رد تـلـقـائـي لـبـوت مـن : @${targetPhone}\n`;
+      alertText += `⋄ *الـنـوع :* ${violation.reason}\n\n`;
+      alertText += `✨ تـم مـنـع الـمـعـامـلـة لـلـحـفـاظ عـلـى نـظـام الـمـجـمـوعـة ومـنـع سـبـام الـبـوتـات.`;
+
+      await sock.sendMessage(jid, {
+        text: alertText,
+        mentions: [senderId, `${targetPhone}@s.whatsapp.net`].filter(Boolean)
+      }).catch(() => {});
+    }
+  } catch (err) {
+    console.error('Erreur handleAntiServiceViolation:', err);
+  }
+}
+
+/**
+ * Commande .antiservice [on/off] (Group Admins / Sudo)
+ */
+async function handleAntiServiceToggleCommand(sock, jid, messageText, msg, senderIsAdmin, senderIsSudo) {
+  try {
+    if (!senderIsAdmin && !senderIsSudo) {
+      reactToMessage(sock, jid, msg.key, '🔒');
+      return;
+    }
+
+    const words = messageText.trim().split(/\s+/);
+    const arg = (words[1] || '').toLowerCase();
+
+    if (arg === 'on' || arg === 'تشغيل' || arg === 'تفعيل' || arg === '1') {
+      setAntiServiceEnabled(jid, true);
+      let text = `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🛑 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+      text += `       🏰 *إمـبـراطـوريـة بـاراديـس* 🏰\n`;
+      text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🛑 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n\n`;
+      text += `🛑 *تـم تـفـعـيـل مـضـاد الـخـدمـات والـرد الـتـلـقـائـي (.antiservice on)* ✅\n\n`;
+      text += `⋄ سـيـقـوم الـبـوت بـرصـد وإيـقـاف جـمـيـع الـردود الـتـلـقـائـيـة ومـعـامـلات الـبـوتـات الأخـرى.\n`;
+      text += `⋄ سـيـتـم حـذف أي رسـالـة أزرار، قـوائـم، مـعـامـلات، أو رد مـبـرمـج فـوراً 🚫.\n`;
+      text += `⋄ حـمـايـة كـامـلـة لـلـمـجـمـوعـة مـن تـشـويـش وسـبـام الـبـوتـات الـخـدمـاتـيـة ✨.\n\n`;
+      text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚔️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+      text += `       🏰 *PARADIS EMPIRE* 🏰`;
+      await sock.sendMessage(jid, { text }, { quoted: msg });
+      logActivity(`[AntiService] Activé dans ${jid}`);
+      return;
+    }
+
+    if (arg === 'off' || arg === 'تعطيل' || arg === 'ايقاف' || arg === '0') {
+      setAntiServiceEnabled(jid, false);
+      let text = `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚠️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+      text += `       🏰 *إمـبـراطـوريـة بـاراديـس* 🏰\n`;
+      text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚠️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n\n`;
+      text += `⚠️ *تـم إيـقـاف مـضـاد الـخـدمـات والـرد الـتـلـقـائـي (.antiservice off)* ⛔\n\n`;
+      text += `⋄ يـمـكـن الآن لـلـبـوتـات الأخـرى إرسـال الـردود الـتـلـقـائـيـة والـمـعـامـلات داخـل الـمـجـمـوعـة.\n\n`;
+      text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚔️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+      text += `       🏰 *PARADIS EMPIRE* 🏰`;
+      await sock.sendMessage(jid, { text }, { quoted: msg });
+      logActivity(`[AntiService] Désactivé dans ${jid}`);
+      return;
+    }
+
+    // Afficher statut actuel
+    const currentStatus = isAntiServiceEnabled(jid);
+    let text = `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🛑 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+    text += `       🏰 *إمـبـراطـوريـة بـاراديـس* 🏰\n`;
+    text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 🛑 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n\n`;
+    text += `🛑 *حـالـة مـضـاد الـخـدمـات والـردود (Anti-Service)* : ${currentStatus ? '🟢 مـفـعـل (ON)' : '🔴 مـعـطـل (OFF)'}\n\n`;
+    text += `⋄ لـلـتـفـعـيـل : *.antiservice on*\n`;
+    text += `⋄ لـلـتـعـطـيـل : *.antiservice off*\n\n`;
+    text += `⋄ *الـوظـيـفـة :* إيـقـاف وحـذف جـمـيـع الـردود الـتـلـقـائـيـة والـمـعـامـلات الـصـادرة عـن الـبـوتـات الأخـرى 🛑.\n\n`;
+    text += `⎔⋅• ━ ╼━ ╼╃ ⌬〔 ⚔️ 〕⌬ ╄╾ ━ ╼━ •⋅⎔\n`;
+    text += `       🏰 *PARADIS EMPIRE* 🏰`;
+    await sock.sendMessage(jid, { text }, { quoted: msg });
+  } catch (err) {
+    console.error('Erreur handleAntiServiceToggleCommand:', err);
   }
 }
 
